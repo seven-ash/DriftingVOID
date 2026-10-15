@@ -56,16 +56,51 @@ pub fn glass<R>(ui: &mut egui::Ui, margin: Margin, radius: u8, add: impl FnOnce(
     }
     let idx = ui.painter().add(egui::Shape::Noop);
     let r = egui::Frame::NONE.inner_margin(margin).corner_radius(radius).show(ui, add);
+    ui.painter().set(idx, glass_shape(ui.ctx(), r.response.rect, radius));
+    r
+}
+
+pub fn glass_shape(ctx: &egui::Context, rect: Rect, radius: u8) -> egui::Shape {
     let [tr, tg, tb, _] = PAPER_2.to_array();
     let look = crate::glass::Look {
         radius: radius as f32,
         refract: 7.0,
         tint: [tr as f32 / 255.0, tg as f32 / 255.0, tb as f32 / 255.0, 0.62],
         dispersion: 5.0,
-        frame: ui.ctx().cumulative_pass_nr(),
+        frame: ctx.cumulative_pass_nr(),
     };
-    ui.painter().set(idx, crate::glass::shape(r.response.rect, look));
-    r
+    crate::glass::shape(rect, look)
+}
+
+/// Popup style for menus and dropdowns that host their own glass: egui's popup
+/// frame is made invisible and `glass_popup` paints the glass behind the content.
+pub fn glass_popup_style(menu: bool) -> egui::style::StyleModifier {
+    (move |s: &mut egui::Style| {
+        if menu {
+            egui::containers::menu::menu_style(s);
+        }
+        if crate::glass::available() {
+            s.visuals.window_fill = Color32::TRANSPARENT;
+            s.visuals.window_stroke = Stroke::NONE;
+            s.visuals.popup_shadow = Shadow::NONE;
+        }
+    })
+    .into()
+}
+
+/// Wraps popup content (menu / dropdown) with the glass, sized to the popup frame.
+pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if !crate::glass::available() {
+        return add(ui);
+    }
+    let idx = ui.painter().add(egui::Shape::Noop);
+    let out = add(ui);
+    let m = ui.spacing().menu_margin;
+    // scrolled popups (font list) only show part of their content
+    let r = ui.min_rect().intersect(ui.clip_rect());
+    let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
+    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(ui.ctx(), r, 12));
+    out
 }
 
 pub fn apply_visuals(ctx: &egui::Context) {

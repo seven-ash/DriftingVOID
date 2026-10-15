@@ -485,6 +485,9 @@ impl App {
             app.editing = Some(id);
             app.edit_focus = true;
         }
+        if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
+            app.pending = Some(Pending::New);
+        }
         if std::env::var_os("DV_SHOW_EXPORT").is_some() {
             app.open_export();
         }
@@ -2513,7 +2516,7 @@ impl App {
     }
 
     fn menus(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("파일", |ui| {
+        egui::containers::menu::MenuButton::new("파일").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| {
             if ui.button("새로 만들기  Ctrl+N").clicked() {
                 self.request(Pending::New);
             }
@@ -2536,8 +2539,8 @@ impl App {
             if ui.button("영역을 클립보드로 복사  Ctrl+Shift+C").clicked() {
                 self.quick_copy();
             }
-        });
-        ui.menu_button("편집", |ui| {
+        }));
+        egui::containers::menu::MenuButton::new("편집").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| {
             if ui.button("실행 취소  Ctrl+Z").clicked() {
                 self.undo();
             }
@@ -2554,8 +2557,8 @@ impl App {
             if ui.button("삭제  Del").clicked() {
                 self.delete_selected();
             }
-        });
-        ui.menu_button("보기", |ui| {
+        }));
+        egui::containers::menu::MenuButton::new("보기").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| {
             if ui.button("전체 보기  Ctrl+0").clicked() {
                 self.fit_view();
             }
@@ -2595,7 +2598,7 @@ impl App {
                     crate::glass::save_settings();
                 }
             });
-        });
+        }));
     }
 
     fn status_pill(&mut self, ctx: &egui::Context) {
@@ -3013,7 +3016,8 @@ impl App {
         let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
         let y = ctx.animate_value_with_time(egui::Id::new("rail_indicator_y"), r.center().y, 0.07);
         let c = pos2(r.center().x, y);
-        painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT);
+        // softer than a solid chip: half-strength amber, the glass spreads it
+        painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT.gamma_multiply(0.5));
     }
 
     fn draw_overlays(&self, painter: &egui::Painter, xf: &Xf) {
@@ -3192,7 +3196,7 @@ impl App {
     fn unsaved_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("unsaved")).frame(egui::Frame::NONE).show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
+        egui::Modal::new(egui::Id::new("unsaved")).frame(egui::Frame::NONE).backdrop_color(Color32::from_black_alpha(45)).show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
             ui.set_width(300.0);
             ui.heading("저장하지 않은 변경 사항");
             ui.label("변경 사항을 저장할까요?");
@@ -3236,7 +3240,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
     let shown = if family.is_empty() { DEFAULT_FONT.to_string() } else { family.clone() };
     ui.horizontal(|ui| {
         ui.label("글꼴");
-        egui::ComboBox::from_id_salt(id).selected_text(shown).width(170.0).height(360.0).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt(id).selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
             let Some(fams) = &fams else {
                 ui.label("설치된 글꼴 읽는 중…");
                 return;
@@ -3255,7 +3259,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
                     changed = true;
                 }
             }
-        });
+        }));
     });
     let styles: Vec<String> = if family.is_empty() {
         vec!["Regular".into(), "Bold".into()]
@@ -3268,14 +3272,14 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
     if styles.len() > 1 {
         ui.horizontal(|ui| {
             ui.label("스타일");
-            egui::ComboBox::from_id_salt((id, "style")).selected_text(style.clone()).width(170.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt((id, "style")).selected_text(style.clone()).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
                 for s in styles {
                     if ui.selectable_label(*style == s, &s).clicked() {
                         *style = s;
                         changed = true;
                     }
                 }
-            });
+            }));
         });
     }
     changed

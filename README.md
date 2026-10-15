@@ -48,6 +48,7 @@ when empty. Photos are placed under drawing layers.
   through `.void`, and exports a PNG (`out.log` gets the result).
 - `--selftest --list-fonts fonts.txt` dumps the installed font families.
 - `DV_SHOW_PALETTE=RRGGBB` / `DV_SHOW_EXPORT=1` open those panels at start (for screenshots).
+- `DV_SHOW_UNSAVED=1` shows the unsaved-changes dialog at start.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
 
