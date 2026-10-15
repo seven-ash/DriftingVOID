@@ -415,6 +415,7 @@ pub struct App {
     fonts_applied: bool,
     frames: u64,
     rail_active: Option<Rect>,
+    space_held: bool,
     /// Tool indicator glide: (from y, to y, start time).
     ind_anim: (f32, f32, f64),
     extra_sel: Vec<LayerId>,
@@ -470,6 +471,7 @@ impl App {
             fonts_applied: false,
             frames: 0,
             rail_active: None,
+            space_held: false,
             ind_anim: (f32::NAN, f32::NAN, 0.0),
             extra_sel: Vec::new(),
             pan_latch: false,
@@ -1625,9 +1627,22 @@ impl App {
     // ------------------------------------------------------------ input
 
     fn handle_canvas_input(&mut self, ctx: &egui::Context, rect: Rect, canvas_layer: egui::LayerId) {
-        let (events, space, mods) = ctx.input(|i| (i.events.clone(), i.key_down(Key::Space), i.modifiers));
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         let typing = ctx.egui_wants_keyboard_input();
-        let space = space && !typing;
+        // Track Space ourselves: the Korean IME can swallow the key-up of a Space typed
+        // into a text box, which left egui thinking Space was still held (every click
+        // then panned until Space was pressed again).
+        if typing {
+            self.space_held = false;
+        }
+        for e in &events {
+            match e {
+                egui::Event::Key { key: Key::Space, pressed, repeat: false, .. } if !typing => self.space_held = *pressed,
+                egui::Event::WindowFocused(false) => self.space_held = false,
+                _ => {}
+            }
+        }
+        let space = self.space_held;
         let over = |p: Pos2| rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == canvas_layer);
         let touch_frame = events.iter().any(|e| matches!(e, egui::Event::Touch { .. }));
         let now = ctx.input(|i| i.time);
