@@ -14,6 +14,8 @@ use egui::{Rect, Shape};
 static READY: AtomicBool = AtomicBool::new(false);
 static FAILED: AtomicBool = AtomicBool::new(false);
 static RES: Mutex<Option<Res>> = Mutex::new(None);
+/// Glass cards already drawn this frame (GL px centre/half size, radius), in paint order.
+static CARDS: Mutex<(u64, Vec<([f32; 4], f32)>)> = Mutex::new((u64::MAX, Vec::new()));
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static SHADOW_ON: AtomicBool = AtomicBool::new(false);
@@ -205,7 +207,6 @@ struct Res {
     cur: Option<Tex>,
     small: Option<Tex>,
     small1: Option<Tex>,
-    small2: Option<Tex>,
     tmp: Option<Tex>,
     /// Screen-sized snapshot of the scene layer (before overlays), and its frame id.
     scene: Option<Tex>,
@@ -285,7 +286,9 @@ uniform sampler2D u_ov;      // + overlay layer
 uniform sampler2D u_cur;     // + panels already drawn (what is on screen now)
 uniform sampler2D u_blur;    // heavy blur of u_scene over the region
 uniform sampler2D u_blur1;   // heavy blur of u_cur over the region
-uniform sampler2D u_blur2;   // heavy blur of u_ov over the region
+uniform vec4 u_cards[8];     // cards already drawn this frame: centre x y, half w h (GL px)
+uniform float u_cradius[8];
+uniform int u_ncards;
 uniform vec2 u_alloc;        // allocated size of the screen-sized textures
 uniform vec4 u_region;       // captured region x y w h (GL pixels)
 uniform vec2 u_bfit;         // used fraction of the blur textures
@@ -354,15 +357,19 @@ void main() {
     if (u_has_ov > 0.5) {
         col = clamp(col + od / ws, 0.0, 1.0);
     }
-    if (u_has_ui > 0.5) {
-        // another panel underneath: decided on heavily blurred images so the
-        // transition is smooth (no seams at text), shown blurred with half the tint
-        // so stacked cards still read as separate layers; dispersion stays single
-        vec2 bq = buv(frag);
-        vec3 bc = texture(u_blur1, bq).rgb;
-        vec3 dd = abs(bc - texture(u_blur2, bq).rgb);
-        float m = smoothstep(0.02, 0.09, max(dd.r, max(dd.g, dd.b)));
-        vec3 under = mix(bc, u_tint.rgb, u_tint.a * 0.5);
+    if (u_has_ui > 0.5 && u_ncards > 0) {
+        // cards already drawn below this one, known exactly by their shapes; edges are
+        // softened by about the blur width. There the lower card shows through blurred
+        // with half the tint, so stacked cards read as layers; dispersion stays single.
+        float m = 0.0;
+        float soft = 10.0 * u_ppp;
+        for (int i = 0; i < 8; i++) {
+            if (i >= u_ncards) break;
+            vec2 q = abs(frag - u_cards[i].xy) - u_cards[i].zw + u_cradius[i];
+            float di = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_cradius[i];
+            m = max(m, 1.0 - smoothstep(-soft, soft, di));
+        }
+        vec3 under = mix(texture(u_blur1, buv(frag)).rgb, u_tint.rgb, u_tint.a * 0.5);
         col = mix(col, under, m);
     }
     // neutral hairline so cards separate from what is behind them
@@ -553,7 +560,7 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, small2: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 
@@ -597,7 +604,6 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         if ensure(gl, &mut res.cur, sw, sh).is_none()
             || ensure(gl, &mut res.small, sw4, sh4).is_none()
             || ensure(gl, &mut res.small1, sw4, sh4).is_none()
-            || ensure(gl, &mut res.small2, sw4, sh4).is_none()
             || ensure(gl, &mut res.tmp, sw4, sh4).is_none()
         {
             return;
@@ -612,8 +618,7 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         let scene = if has_ov { res.scene.as_ref().unwrap() } else { cur };
         let ov = if has_ui { res.ov.as_ref().unwrap() } else { cur };
         // 2-3. quarter-size separable gaussian of a region of a screen-sized texture
-        let (small, small1, small2, tmp) =
-            (res.small.as_ref().unwrap(), res.small1.as_ref().unwrap(), res.small2.as_ref().unwrap(), res.tmp.as_ref().unwrap());
+        let (small, small1, tmp) = (res.small.as_ref().unwrap(), res.small1.as_ref().unwrap(), res.tmp.as_ref().unwrap());
         let blur_into = |src: &Tex, small: &Tex| {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src.fbo));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
@@ -638,7 +643,6 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         blur_into(scene, small);
         if has_ui {
             blur_into(cur, small1);
-            blur_into(ov, small2);
         }
 
         // 4. composite onto the screen
@@ -671,13 +675,35 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         gl.uniform_1_f32(u("u_ppp").as_ref(), ppp);
         gl.uniform_1_f32(u("u_has_ov").as_ref(), if has_ov { 1.0 } else { 0.0 });
         gl.uniform_1_f32(u("u_has_ui").as_ref(), if has_ui { 1.0 } else { 0.0 });
+        let me = ([c.x * ppp, sh as f32 - c.y * ppp, card.width() * 0.5 * ppp, card.height() * 0.5 * ppp], look.radius * ppp);
+        {
+            let mut cards = CARDS.lock().unwrap();
+            if cards.0 != look.frame {
+                *cards = (look.frame, Vec::new());
+            }
+            // only cards that overlap this one matter
+            let near: Vec<([f32; 4], f32)> = cards
+                .1
+                .iter()
+                .copied()
+                .filter(|(r, _)| (r[0] - me.0[0]).abs() < r[2] + me.0[2] + 16.0 && (r[1] - me.0[1]).abs() < r[3] + me.0[3] + 16.0)
+                .take(8)
+                .collect();
+            let flat: Vec<f32> = near.iter().flat_map(|(r, _)| r.iter().copied()).collect();
+            let radii: Vec<f32> = near.iter().map(|(_, rad)| *rad).collect();
+            if !near.is_empty() {
+                gl.uniform_4_f32_slice(u("u_cards").as_ref(), &flat);
+                gl.uniform_1_f32_slice(u("u_cradius").as_ref(), &radii);
+            }
+            gl.uniform_1_i32(u("u_ncards").as_ref(), near.len() as i32);
+            cards.1.push(me);
+        }
         for (unit, name, tex) in [
             (0u32, "u_scene", scene.tex),
             (1, "u_ov", ov.tex),
             (2, "u_cur", cur.tex),
             (3, "u_blur", small.tex),
             (4, "u_blur1", small1.tex),
-            (5, "u_blur2", small2.tex),
         ] {
             gl.active_texture(glow::TEXTURE0 + unit);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
