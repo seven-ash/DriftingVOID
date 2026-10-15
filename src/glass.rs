@@ -207,6 +207,7 @@ struct Res {
     cur: Option<Tex>,
     small: Option<Tex>,
     small1: Option<Tex>,
+    half: Option<Tex>,
     tmp: Option<Tex>,
     /// Screen-sized snapshot of the scene layer (before overlays), and its frame id.
     scene: Option<Tex>,
@@ -560,7 +561,7 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 
@@ -593,16 +594,22 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         let x1 = ((reg.max.x * ppp).ceil() as i32).clamp(0, sw);
         let ytop = ((reg.min.y * ppp).floor() as i32).clamp(0, sh);
         let ybot = ((reg.max.y * ppp).ceil() as i32).clamp(0, sh);
-        let (w, h) = (x1 - x0, ybot - ytop);
+        // Snap the region to a screen-fixed 4 px grid so the quarter-res samples do not
+        // move with the card (moving cards shimmered over bright, detailed content).
+        let snap_lo = |v: i32| v.div_euclid(4) * 4;
+        let snap_hi = |v: i32, max: i32| ((v + 3).div_euclid(4) * 4).min(max - max % 4);
+        let (x0, x1) = (snap_lo(x0), snap_hi(x1, sw));
+        let (gy0, gy1) = (snap_lo(sh - ybot), snap_hi(sh - ytop, sh));
+        let (w, h) = (x1 - x0, gy1 - gy0);
         if w < 8 || h < 8 {
             return;
         }
-        let gy0 = sh - ybot;
-        let (sw4, sh4) = ((w / 4).max(2), (h / 4).max(2));
+        let (sw4, sh4) = (w / 4, h / 4);
         let has_ov = res.scene_frame == look.frame && res.scene.as_ref().is_some_and(|t| t.w >= sw && t.h >= sh);
         let has_ui = has_ov && res.ov_frame == look.frame && res.ov.as_ref().is_some_and(|t| t.w >= sw && t.h >= sh);
         if ensure(gl, &mut res.cur, sw, sh).is_none()
             || ensure(gl, &mut res.small, sw4, sh4).is_none()
+            || ensure(gl, &mut res.half, w / 2, h / 2).is_none()
             || ensure(gl, &mut res.small1, sw4, sh4).is_none()
             || ensure(gl, &mut res.tmp, sw4, sh4).is_none()
         {
@@ -619,10 +626,16 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         let ov = if has_ui { res.ov.as_ref().unwrap() } else { cur };
         // 2-3. quarter-size separable gaussian of a region of a screen-sized texture
         let (small, small1, tmp) = (res.small.as_ref().unwrap(), res.small1.as_ref().unwrap(), res.tmp.as_ref().unwrap());
+        let half = res.half.as_ref().unwrap();
         let blur_into = |src: &Tex, small: &Tex| {
+            // 4x4 box average as two exact 2x2 steps (a single 4:1 linear blit only
+            // reads 4 of the 16 pixels, which aliases)
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(half.fbo));
+            gl.blit_framebuffer(x0, gy0, x1, gy0 + h, 0, 0, w / 2, h / 2, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(half.fbo));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
-            gl.blit_framebuffer(x0, gy0, x1, gy0 + h, 0, 0, sw4, sh4, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+            gl.blit_framebuffer(0, 0, w / 2, h / 2, 0, 0, sw4, sh4, glow::COLOR_BUFFER_BIT, glow::LINEAR);
             gl.use_program(Some(res.blur));
             gl.bind_vertex_array(Some(res.vao));
             gl.active_texture(glow::TEXTURE0);
