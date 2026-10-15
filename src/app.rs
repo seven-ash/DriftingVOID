@@ -3881,6 +3881,9 @@ impl App {
         }
 
         self.draw_rail_indicator(&ctx, &painter);
+        if crate::glass::available() {
+            painter.add(crate::glass::ui_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
+        }
 
         if self.doc.layers.is_empty() {
             painter.text(

@@ -46,7 +46,7 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
             if t.blend != Blend::Normal {
                 let mut tmp = Pixmap::new(w, h).ok_or("임시 버퍼를 만들 수 없음")?;
                 draw_layer(&mut tmp, layer, base, region, scale);
-                blend_onto(&mut out, &tmp, t.blend, layer.opacity);
+                blend_onto(&mut out, &tmp, t.blend, layer.opacity, bg);
                 continue;
             }
         }
@@ -64,7 +64,14 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
 
 /// Composites premultiplied `src` onto `dst` with a separable blend mode
 /// (W3C compositing: Co = as(1-ad)cs + as·ad·B(cd,cs) + (1-as)ad·cd).
-pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32) {
+/// `bg`: the export background, which 지우기 (erase) reveals instead of punching
+/// through to transparency.
+pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg: Option<Color32>) {
+    let bgp = bg.map(|c| {
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let af = a as f32 / 255.0;
+        [r as f32 * af, g as f32 * af, b as f32 * af, a as f32]
+    });
     for (d, s) in dst.data_mut().chunks_exact_mut(4).zip(src.data().chunks_exact(4)) {
         if s[3] == 0 {
             continue;
@@ -73,7 +80,8 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32) {
         let da = d[3] as f32 / 255.0;
         if mode == Blend::Erase {
             for k in 0..4 {
-                d[k] = (d[k] as f32 * (1.0 - sa)).round() as u8;
+                let under = bgp.map_or(0.0, |b| b[k]);
+                d[k] = (d[k] as f32 * (1.0 - sa) + under * sa).round().clamp(0.0, 255.0) as u8;
             }
             continue;
         }

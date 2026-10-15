@@ -96,10 +96,13 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     let idx = ui.painter().add(egui::Shape::Noop);
     let out = add(ui);
     let m = ui.spacing().menu_margin;
-    // scrolled popups (font list) only show part of their content
-    let r = ui.min_rect().intersect(ui.clip_rect());
+    // full popup width (items can be narrower than the frame), used height; scrolled
+    // popups (font list) only show part of their content
+    let (mr, nr) = (ui.max_rect(), ui.min_rect());
+    let r = Rect::from_min_max(mr.min, pos2(mr.max.x.max(nr.max.x), nr.max.y)).intersect(ui.clip_rect());
     let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
-    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(ui.ctx(), r, 12));
+    let radius = ui.visuals().menu_corner_radius.nw;
+    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(ui.ctx(), r, radius));
     out
 }
 
