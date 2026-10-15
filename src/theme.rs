@@ -51,6 +51,18 @@ pub fn card_frame() -> egui::Frame {
 /// A floating card: frosted glass when the GL path is available, the flat
 /// elevated card otherwise.
 pub fn glass<R>(ui: &mut egui::Ui, margin: Margin, radius: u8, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    glass_glow(ui, margin, radius, None, add)
+}
+
+/// Glass card with an optional soft glow (rect in screen points + colour) blended
+/// in after the tint, so it reads as a clean blurred light inside the glass.
+pub fn glass_glow<R>(
+    ui: &mut egui::Ui,
+    margin: Margin,
+    radius: u8,
+    glow: Option<(Rect, Color32)>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
     if !crate::glass::available() {
         return card_frame().inner_margin(margin).corner_radius(radius).show(ui, add);
     }
@@ -62,6 +74,10 @@ pub fn glass<R>(ui: &mut egui::Ui, margin: Margin, radius: u8, add: impl FnOnce(
         refract: 7.0,
         tint: [tr as f32 / 255.0, tg as f32 / 255.0, tb as f32 / 255.0, 0.62],
         dispersion: 5.0,
+        glow: glow.map(|(r, c)| {
+            let [cr, cg, cb, ca] = c.to_srgba_unmultiplied();
+            (r, [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0, ca as f32 / 255.0])
+        }),
     };
     ui.painter().set(idx, crate::glass::shape(r.response.rect, look));
     r

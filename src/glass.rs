@@ -97,6 +97,9 @@ pub struct Look {
     pub tint: [f32; 4],
     /// Red/blue split at the rim, points.
     pub dispersion: f32,
+    /// Optional soft glow inside the card (rect in points, straight RGBA 0..1).
+    /// It is added after tint and dispersion, so it stays bright and clean.
+    pub glow: Option<(Rect, [f32; 4])>,
 }
 
 static STRENGTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4030_0000); // 2.75
@@ -224,6 +227,9 @@ uniform float u_ppp;
 uniform vec2 u_blur_scale;
 uniform vec2 u_sharp_max;
 uniform float u_ca;          // dispersion at the rim, pixels
+uniform vec4 u_glow_rect;    // centre x y, half w h (GL pixels)
+uniform vec4 u_glow_col;     // straight rgba; a = 0 disables
+uniform float u_glow_soft;   // blur-like falloff width, pixels
 out vec4 o;
 
 float sd(vec2 p) {
@@ -262,6 +268,13 @@ void main() {
     vec3 blur = vec3(texture(u_blur, ur * u_blur_scale).r, texture(u_blur, uv * u_blur_scale).g, texture(u_blur, ub * u_blur_scale).b);
     vec3 col = mix(blur, sharp, edge * 0.45);
     col = mix(col, u_tint.rgb, u_tint.a * (1.0 - edge * 0.35));
+    if (u_glow_col.a > 0.0) {
+        // analytic soft rounded box: looks blurred, ignores tint, refraction and dispersion
+        vec2 q = abs(frag - u_glow_rect.xy) - u_glow_rect.zw + u_radius * 0.6;
+        float gd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_radius * 0.6;
+        float g = 1.0 - smoothstep(-u_glow_soft, u_glow_soft, gd);
+        col = mix(col, u_glow_col.rgb, g * u_glow_col.a);
+    }
     float a = clamp(0.5 - d, 0.0, 1.0);
     o = vec4(col * a, a);
 }
@@ -412,6 +425,15 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         gl.uniform_1_f32(u("u_shadow").as_ref(), SHADOW * ppp);
         gl.uniform_1_f32(u("u_shadow_on").as_ref(), if shadow() { 1.0 } else { 0.0 });
         gl.uniform_1_f32(u("u_ppp").as_ref(), ppp);
+        match look.glow {
+            Some((gr, gc)) => {
+                let gcen = gr.center();
+                gl.uniform_4_f32(u("u_glow_rect").as_ref(), gcen.x * ppp, sh as f32 - gcen.y * ppp, gr.width() * 0.5 * ppp, gr.height() * 0.5 * ppp);
+                gl.uniform_4_f32(u("u_glow_col").as_ref(), gc[0], gc[1], gc[2], gc[3]);
+                gl.uniform_1_f32(u("u_glow_soft").as_ref(), 5.0 * ppp);
+            }
+            None => gl.uniform_4_f32(u("u_glow_col").as_ref(), 0.0, 0.0, 0.0, 0.0),
+        }
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(sharp.tex));
         gl.uniform_1_i32(u("u_sharp").as_ref(), 0);
