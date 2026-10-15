@@ -2612,7 +2612,7 @@ impl App {
                 d.region = ExportRegion::Content;
             }
             if d.region == ExportRegion::Content {
-                ui.add(egui::Slider::new(&mut d.padding, 0.0..=400.0).custom_parser(crate::calc::parse).text("여백 px"));
+                ui.add(crate::dial::Dial::new(&mut d.padding, 0.0..=400.0).text("여백").suffix(" px").default(20.0));
             }
             ui.horizontal(|ui| {
                 ui.label("배율");
@@ -2634,7 +2634,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.label("JPG 품질");
-                ui.add(egui::Slider::new(&mut d.jpeg_quality, 50..=100).custom_parser(crate::calc::parse));
+                crate::dial::dial_u8(ui, &mut d.jpeg_quality, 50..=100, "");
             });
             let region = self.export_region(&d);
             match region {
@@ -2820,24 +2820,24 @@ impl App {
                         }
                     }
                 });
-                ui.add(egui::Slider::new(&mut s.brush_size, 1.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
-                ui.add(egui::Slider::new(&mut s.brush_opacity, 0.05..=1.0).custom_parser(crate::calc::parse).text("불투명도"));
-                ui.add(egui::Slider::new(&mut s.brush_hardness, 0.0..=1.0).custom_parser(crate::calc::parse).text("경도"));
+                ui.add(crate::dial::Dial::new(&mut s.brush_size, 1.0..=400.0).logarithmic(true).text("크기"));
+                ui.add(crate::dial::Dial::new(&mut s.brush_opacity, 0.05..=1.0).text("불투명도").default(1.0));
+                ui.add(crate::dial::Dial::new(&mut s.brush_hardness, 0.0..=1.0).text("경도"));
                 ui.checkbox(&mut s.brush_pressure_size, "필압 → 크기");
                 ui.checkbox(&mut s.brush_pressure_opacity, "필압 → 농도");
-                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).custom_parser(crate::calc::parse).text("손떨림 보정"));
+                ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
                 ui.small("Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기");
             }
             Tool::Pen => {
                 ui.strong("펜 (벡터)");
-                ui.add(egui::Slider::new(&mut s.pen_size, 0.5..=100.0).custom_parser(crate::calc::parse).logarithmic(true).text("굵기"));
+                ui.add(crate::dial::Dial::new(&mut s.pen_size, 0.5..=100.0).logarithmic(true).text("굵기"));
                 ui.checkbox(&mut s.pen_pressure, "필압 → 굵기");
-                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).custom_parser(crate::calc::parse).text("손떨림 보정"));
+                ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
                 ui.small("획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기");
             }
             Tool::Eraser => {
                 ui.strong("지우개");
-                ui.add(egui::Slider::new(&mut s.eraser_size, 2.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
+                ui.add(crate::dial::Dial::new(&mut s.eraser_size, 2.0..=400.0).logarithmic(true).text("크기"));
                 ui.checkbox(&mut s.eraser_pressure, "필압 → 크기");
                 ui.small("브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기");
             }
@@ -2845,7 +2845,7 @@ impl App {
                 ui.strong("글자");
                 if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
                     let s0 = crate::text::layout(t).size;
-                    layer_changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기")).changed();
+                    layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         let mut has = t.bg.is_some();
@@ -2870,7 +2870,7 @@ impl App {
                     }
                     ui.small("선택한 글자에 적용 · 새 글자도 이 설정으로 시작");
                 } else {
-                    ui.add(egui::Slider::new(&mut s.text_size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
+                    ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).logarithmic(true).text("크기"));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut s.text_bg, "배경 상자");
@@ -2882,7 +2882,7 @@ impl App {
             Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => {
                 ui.strong("도형");
                 if let Some(LayerKind::Shape(sh)) = sel_shape.map(|i| &mut self.doc.layers[i].kind) {
-                    layer_changed |= ui.add(egui::Slider::new(&mut sh.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("선 굵기")).changed();
+                    layer_changed |= ui.add(crate::dial::Dial::new(&mut sh.width, 0.0..=60.0).text("선 굵기")).changed();
                     if matches!(sh.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         ui.horizontal(|ui| {
                             let mut has = sh.fill.is_some();
@@ -2901,7 +2901,7 @@ impl App {
                     }
                     ui.small("선택한 도형에 적용 · 새 도형도 이 설정으로 시작");
                 } else {
-                    ui.add(egui::Slider::new(&mut s.shape_width, 0.0..=60.0).custom_parser(crate::calc::parse).text("선 굵기"));
+                    ui.add(crate::dial::Dial::new(&mut s.shape_width, 0.0..=60.0).text("선 굵기"));
                     if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut s.shape_fill, "채우기");
@@ -2993,17 +2993,17 @@ impl App {
                     changed |= ui.text_edit_singleline(&mut l.name).changed();
                 }
             });
-            changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0).custom_parser(crate::calc::parse).text("불투명도")).changed();
+            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0)).changed();
             match &mut l.kind {
                 LayerKind::Image(im) => {
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.rgba.width(), im.src.rgba.height(), im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(egui::Slider::new(&mut pct, 1.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기 %")).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).logarithmic(true).text("크기 %").default(100.0)).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -3031,9 +3031,9 @@ impl App {
                     });
                     ui.label("보정");
                     let a = &mut im.adjust;
-                    changed |= ui.add(egui::Slider::new(&mut a.brightness, -1.0..=1.0).custom_parser(crate::calc::parse).text("밝기")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut a.contrast, -1.0..=1.0).custom_parser(crate::calc::parse).text("대비")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut a.saturation, -1.0..=1.0).custom_parser(crate::calc::parse).text("채도")).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.brightness, -1.0..=1.0).text("밝기").default(0.0)).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text("대비").default(0.0)).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.saturation, -1.0..=1.0).text("채도").default(0.0)).changed();
                     if ui.button("보정 초기화").clicked() {
                         *a = Adjust::default();
                         changed = true;
@@ -3044,7 +3044,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기")).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
@@ -3079,7 +3079,7 @@ impl App {
                             });
                     });
                     let mut deg = t.rotation.to_degrees();
-                    if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
                         t.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -3104,12 +3104,12 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         if !shape_tool {
-                            changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("굵기")).changed();
+                            changed |= ui.add(crate::dial::Dial::new(&mut s.width, 0.0..=60.0).text("굵기")).changed();
                         }
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         let mut deg = s.rotation.to_degrees();
-                        if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
                             s.rotation = deg.to_radians();
                             changed = true;
                         }
@@ -3429,7 +3429,7 @@ impl App {
             }
             ui.add_enabled_ui(on, |ui| {
                 let mut k = crate::glass::strength();
-                let r = ui.add(egui::Slider::new(&mut k, 0.0..=4.0).custom_parser(crate::calc::parse).text("유리 가장자리")).on_hover_text("굴절 + 색 번짐 강도 · 0: 평평한 반투명");
+                let r = ui.add(crate::dial::Dial::new(&mut k, 0.0..=4.0).text("유리 가장자리").default(2.75)).on_hover_text("굴절 + 색 번짐 강도 · 0: 평평한 반투명");
                 if r.changed() {
                     crate::glass::set_strength(k);
                 }
@@ -3437,7 +3437,7 @@ impl App {
                     crate::glass::save_settings();
                 }
                 let mut bw = crate::glass::band();
-                let r = ui.add(egui::Slider::new(&mut bw, 1.0..=24.0).custom_parser(crate::calc::parse).suffix(" pt").text("굴절 테두리 폭")).on_hover_text("가장자리에서 굴절·색 번짐이 일어나는 폭");
+                let r = ui.add(crate::dial::Dial::new(&mut bw, 1.0..=24.0).suffix(" pt").text("굴절 테두리 폭").default(7.0)).on_hover_text("가장자리에서 굴절·색 번짐이 일어나는 폭");
                 if r.changed() {
                     crate::glass::set_band(bw);
                 }

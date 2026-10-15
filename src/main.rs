@@ -2,6 +2,7 @@
 
 mod app;
 mod calc;
+mod dial;
 mod canvas;
 mod doc;
 mod export;

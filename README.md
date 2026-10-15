@@ -31,6 +31,7 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | Group handles (several selected) | Scale / rotate about the common centre (Shift/Ctrl: 15° from start, Alt: absolute 15°) |
 | Layer list | Drag to reorder, double-click to rename |
 | Number fields | Accept maths: `40*1.5`, `2^3+1` |
+| Dials | Drag the tick ring (Shift: fine, wheel: one step); ↺ resets to the default |
 | Tab | Hide/show UI |
 | F12 | Input log (pen flags, mouse/touch events) |
 
@@ -70,6 +71,8 @@ when empty. Photos are placed under drawing layers.
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
 | `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
+| `src/dial.rs` | Focus-ring dial control with reset pin |
+| `src/calc.rs` | Maths parser for number fields |
 | `src/okhsv.rs` | OKHSV colour conversions |
 | `src/penhook.rs` | Pen button/eraser flags via a window subclass |
 | `src/io.rs` | Image import and `.void` save/load |
