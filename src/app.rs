@@ -3929,6 +3929,14 @@ impl App {
             .constrain(false)
             .show(ctx, |ui| {
                 self.drop_stale_ime(ui.ctx());
+                // Without a wrap width the box grows sideways while typing: lay the text
+                // out unwrapped instead of wrapping at last frame's width.
+                let wrap_px = if t.wrap > 0.0 { width.max(10.0) } else { f32::INFINITY };
+                let (lfont, lcol) = (font.clone(), t.color);
+                let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
+                    let job = egui::text::LayoutJob::simple(buf.as_str().to_owned(), lfont.clone(), lcol, wrap_px);
+                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                };
                 let te = egui::TextEdit::multiline(&mut text)
                     .font(font)
                     .text_color(t.color)
@@ -3936,6 +3944,8 @@ impl App {
                     .margin(egui::Margin::ZERO)
                     .desired_width(width.max(10.0))
                     .desired_rows(1)
+                    .clip_text(false)
+                    .layouter(&mut layouter)
                     .hint_text("글자 입력");
                 let resp = ui.add(te);
                 if self.edit_focus {
