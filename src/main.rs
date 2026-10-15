@@ -1,0 +1,54 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod app;
+mod canvas;
+mod doc;
+mod export;
+mod fontdb;
+mod glass;
+mod okhsv;
+mod penhook;
+mod theme;
+mod io;
+mod raster;
+mod selftest;
+mod text;
+mod vector;
+
+fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    fontdb::start_scan();
+    if args.first().map(String::as_str) == Some("--selftest") {
+        // wait for the font scan so SB_FONT can resolve
+        while fontdb::families().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if args.get(1).map(String::as_str) == Some("--list-fonts") {
+            let mut s = String::new();
+            for f in fontdb::families().unwrap().iter() {
+                s += &format!("{} :: {}
+", f.name, f.faces.iter().map(|x| x.style.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            let _ = std::fs::write(args.get(2).cloned().unwrap_or_else(|| "fonts.txt".into()), s);
+            return Ok(());
+        }
+        let out = args.get(1).cloned().unwrap_or_else(|| "selftest.png".into());
+        if let Err(e) = selftest::run(std::path::Path::new(&out), args.get(2).map(std::path::PathBuf::from)) {
+            eprintln!("selftest failed: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    let open = args.first().map(std::path::PathBuf::from);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Drifting VOID")
+            .with_inner_size([1400.0, 900.0])
+            .with_min_inner_size([700.0, 450.0])
+            .with_drag_and_drop(true),
+        multisampling: 4,
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
+    };
+    eframe::run_native("Drifting VOID", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))))
+}

@@ -1,0 +1,289 @@
+//! Unbounded tiled raster layer and the pressure brush engine.
+//! Pixels are premultiplied RGBA8 (same as tiny-skia), one pixel per world unit.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use egui::{Color32, Pos2, Rect, Vec2, pos2};
+
+use crate::doc::{TileMap, next_rev};
+
+pub const TILE: i32 = 256;
+const TILE_US: usize = TILE as usize;
+
+#[derive(Clone)]
+pub struct Tile {
+    pub rev: u64,
+    pub px: Vec<u8>,
+}
+
+impl Tile {
+    pub fn empty() -> Self {
+        Self { rev: next_rev(), px: vec![0; TILE_US * TILE_US * 4] }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.px.chunks_exact(4).all(|p| p[3] == 0)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RasterLayer {
+    /// Integer-valued world offset of local pixel (0,0).
+    pub offset: Vec2,
+    pub tiles: TileMap,
+}
+
+pub fn tile_of(x: i32, y: i32) -> ((i32, i32), usize) {
+    let tx = x.div_euclid(TILE);
+    let ty = y.div_euclid(TILE);
+    let lx = x.rem_euclid(TILE) as usize;
+    let ly = y.rem_euclid(TILE) as usize;
+    ((tx, ty), (ly * TILE_US + lx) * 4)
+}
+
+impl RasterLayer {
+    pub fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
+        let (k, i) = tile_of(x, y);
+        match self.tiles.get(&k) {
+            Some(t) => [t.px[i], t.px[i + 1], t.px[i + 2], t.px[i + 3]],
+            None => [0; 4],
+        }
+    }
+
+    pub fn alpha_at_world(&self, p: Pos2) -> u8 {
+        let l = p - self.offset;
+        self.pixel(l.x.floor() as i32, l.y.floor() as i32)[3]
+    }
+
+    /// Exact bounds of non-transparent pixels, in world space.
+    pub fn bounds(&self) -> Option<Rect> {
+        let mut acc: Option<(i32, i32, i32, i32)> = None;
+        for (&(tx, ty), t) in &self.tiles {
+            let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for y in 0..TILE {
+                let row = &t.px[(y as usize * TILE_US) * 4..((y as usize + 1) * TILE_US) * 4];
+                for x in 0..TILE {
+                    if row[x as usize * 4 + 3] != 0 {
+                        x0 = x0.min(x);
+                        x1 = x1.max(x);
+                        y0 = y0.min(y);
+                        y1 = y1.max(y);
+                    }
+                }
+            }
+            if x0 <= x1 {
+                let r = (tx * TILE + x0, ty * TILE + y0, tx * TILE + x1 + 1, ty * TILE + y1 + 1);
+                acc = Some(match acc {
+                    None => r,
+                    Some(a) => (a.0.min(r.0), a.1.min(r.1), a.2.max(r.2), a.3.max(r.3)),
+                });
+            }
+        }
+        acc.map(|(x0, y0, x1, y1)| {
+            Rect::from_min_max(pos2(x0 as f32, y0 as f32), pos2(x1 as f32, y1 as f32))
+                .translate(self.offset)
+        })
+    }
+
+    /// Copies the local pixel rectangle [x0,x1)x[y0,y1) into a premultiplied buffer.
+    pub fn read_region(&self, x0: i32, y0: i32, w: i32, h: i32) -> Vec<u8> {
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        let tx0 = x0.div_euclid(TILE);
+        let ty0 = y0.div_euclid(TILE);
+        let tx1 = (x0 + w - 1).div_euclid(TILE);
+        let ty1 = (y0 + h - 1).div_euclid(TILE);
+        for ty in ty0..=ty1 {
+            for tx in tx0..=tx1 {
+                let Some(t) = self.tiles.get(&(tx, ty)) else { continue };
+                let ox = tx * TILE;
+                let oy = ty * TILE;
+                let sx0 = x0.max(ox);
+                let sx1 = (x0 + w).min(ox + TILE);
+                let sy0 = y0.max(oy);
+                let sy1 = (y0 + h).min(oy + TILE);
+                if sx0 >= sx1 || sy0 >= sy1 {
+                    continue;
+                }
+                let n = ((sx1 - sx0) * 4) as usize;
+                for y in sy0..sy1 {
+                    let si = (((y - oy) * TILE + (sx0 - ox)) * 4) as usize;
+                    let di = (((y - y0) * w + (sx0 - x0)) * 4) as usize;
+                    out[di..di + n].copy_from_slice(&t.px[si..si + n]);
+                }
+            }
+        }
+        out
+    }
+
+}
+
+#[derive(Clone, Copy)]
+pub struct BrushParams {
+    pub color: Color32,
+    /// Radius in world pixels at full pressure.
+    pub radius: f32,
+    pub opacity: f32,
+    pub hardness: f32,
+    pub pressure_size: bool,
+    pub pressure_opacity: bool,
+    pub erase: bool,
+}
+
+/// One brush stroke in "wash" mode: dabs accumulate into a coverage mask with
+/// max(), and the layer is recomposited from the pre-stroke pixels, so overlapping
+/// dabs within a stroke never build up past the chosen opacity.
+pub struct RasterStroke {
+    pub p: BrushParams,
+    mask: HashMap<(i32, i32), Vec<f32>>,
+    orig: HashMap<(i32, i32), Option<Arc<Tile>>>,
+    last: Option<(Pos2, f32)>,
+    carry: f32,
+}
+
+impl RasterStroke {
+    pub fn new(p: BrushParams) -> Self {
+        Self { p, mask: HashMap::new(), orig: HashMap::new(), last: None, carry: 0.0 }
+    }
+
+    fn radius_at(&self, pressure: f32) -> f32 {
+        let r = if self.p.pressure_size { self.p.radius * (0.12 + 0.88 * pressure) } else { self.p.radius };
+        r.max(0.5)
+    }
+
+    fn alpha_at(&self, pressure: f32) -> f32 {
+        if self.p.pressure_opacity { pressure.clamp(0.0, 1.0) } else { 1.0 }
+    }
+
+    /// `p` is in the layer's local pixel space.
+    pub fn add_point(&mut self, layer: &mut RasterLayer, p: Pos2, pressure: f32) {
+        let pressure = pressure.clamp(0.0, 1.0);
+        match self.last {
+            None => {
+                self.dab(layer, p, self.radius_at(pressure), self.alpha_at(pressure));
+                self.last = Some((p, pressure));
+                self.carry = 0.0;
+            }
+            Some((q, qp)) => {
+                let d = p - q;
+                let dist = d.length();
+                if dist < 1e-4 {
+                    return;
+                }
+                // `t` is the position of the previous dab relative to q along the segment.
+                let mut t = -self.carry;
+                loop {
+                    let pr = qp + (pressure - qp) * (t.max(0.0) / dist).min(1.0);
+                    let step = (self.radius_at(pr) * 0.12).max(0.35);
+                    if t + step > dist {
+                        self.carry = dist - t;
+                        break;
+                    }
+                    t += step;
+                    let c = q + d * (t / dist);
+                    let pr = qp + (pressure - qp) * (t / dist);
+                    self.dab(layer, c, self.radius_at(pr), self.alpha_at(pr));
+                }
+                self.last = Some((p, pressure));
+            }
+        }
+    }
+
+    fn dab(&mut self, layer: &mut RasterLayer, c: Pos2, r: f32, alpha: f32) {
+        let x0 = (c.x - r - 1.0).floor() as i32;
+        let y0 = (c.y - r - 1.0).floor() as i32;
+        let x1 = (c.x + r + 1.0).ceil() as i32;
+        let y1 = (c.y + r + 1.0).ceil() as i32;
+        let inner = r * self.p.hardness.clamp(0.0, 1.0);
+        let soft = (r - inner).max(1e-3);
+        let op = self.p.opacity.clamp(0.0, 1.0);
+        let col = self.p.color.to_srgba_unmultiplied();
+        let cr = col[0] as f32 / 255.0;
+        let cg = col[1] as f32 / 255.0;
+        let cb = col[2] as f32 / 255.0;
+
+        for ty in y0.div_euclid(TILE)..=y1.div_euclid(TILE) {
+            for tx in x0.div_euclid(TILE)..=x1.div_euclid(TILE) {
+                let key = (tx, ty);
+                let ox = tx * TILE;
+                let oy = ty * TILE;
+                let sx0 = x0.max(ox);
+                let sx1 = x1.min(ox + TILE - 1);
+                let sy0 = y0.max(oy);
+                let sy1 = y1.min(oy + TILE - 1);
+                if sx0 > sx1 || sy0 > sy1 {
+                    continue;
+                }
+                if self.p.erase && !layer.tiles.contains_key(&key) && !self.orig.contains_key(&key) {
+                    continue;
+                }
+                let orig = self.orig.entry(key).or_insert_with(|| layer.tiles.get(&key).cloned()).clone();
+                let mask = self.mask.entry(key).or_insert_with(|| vec![0.0; TILE_US * TILE_US]);
+                let tile = Arc::make_mut(layer.tiles.entry(key).or_insert_with(|| Arc::new(Tile::empty())));
+                for y in sy0..=sy1 {
+                    let fy = y as f32 + 0.5 - c.y;
+                    for x in sx0..=sx1 {
+                        let fx = x as f32 + 0.5 - c.x;
+                        let d = (fx * fx + fy * fy).sqrt();
+                        if d > r + 0.5 {
+                            continue;
+                        }
+                        let mut a = if d <= inner {
+                            1.0
+                        } else {
+                            let t = ((d - inner) / soft).clamp(0.0, 1.0);
+                            1.0 - t * t * (3.0 - 2.0 * t)
+                        };
+                        a = a.min((r + 0.5 - d).clamp(0.0, 1.0)) * alpha;
+                        let li = ((y - oy) * TILE + (x - ox)) as usize;
+                        if a <= mask[li] {
+                            continue;
+                        }
+                        mask[li] = a;
+                        let pi = li * 4;
+                        let base = match &orig {
+                            Some(t) => [t.px[pi], t.px[pi + 1], t.px[pi + 2], t.px[pi + 3]],
+                            None => [0; 4],
+                        };
+                        let sa = a * op;
+                        if self.p.erase {
+                            for k in 0..4 {
+                                tile.px[pi + k] = (base[k] as f32 * (1.0 - sa)).round() as u8;
+                            }
+                        } else {
+                            let src = [cr * sa, cg * sa, cb * sa, sa];
+                            for k in 0..4 {
+                                let v = src[k] * 255.0 + base[k] as f32 * (1.0 - sa);
+                                tile.px[pi + k] = v.round().clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                    }
+                }
+                tile.rev = next_rev();
+            }
+        }
+    }
+
+    /// Drops tiles that ended up fully transparent.
+    pub fn finish(self, layer: &mut RasterLayer) {
+        for key in self.orig.keys() {
+            if layer.tiles.get(key).is_some_and(|t| t.is_empty()) {
+                layer.tiles.remove(key);
+            }
+        }
+    }
+
+    /// Restores the layer to the pre-stroke state.
+    pub fn cancel(self, layer: &mut RasterLayer) {
+        for (key, orig) in self.orig {
+            match orig {
+                Some(t) => {
+                    layer.tiles.insert(key, t);
+                }
+                None => {
+                    layer.tiles.remove(&key);
+                }
+            }
+        }
+    }
+}
