@@ -3809,7 +3809,11 @@ impl App {
                 painter.add(Shape::mesh(canvas::image_mesh(tex, corners, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE.gamma_multiply(0.3))));
             }
         }
-        let editing = self.editing;
+        // while editing, the renderer still draws the text (so blend modes, fonts and the
+        // background box look final); only rotated text is hidden for the upright editor
+        let editing = self
+            .editing
+            .filter(|id| matches!(self.doc.get(*id).map(|l| &l.kind), Some(LayerKind::Text(t)) if t.rotation != 0.0));
         canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, editing);
 
         // in-progress vector stroke
@@ -4077,12 +4081,16 @@ impl App {
         let t = t.clone();
         let lay = crate::text::layout(&t);
         let r = xf.rect_w2s(lay.rect(t.pos));
+        // upright text is drawn by the renderer underneath; the editor only shows caret
+        // and selection. Rotated text is edited upright with the editor's own glyphs.
+        let rendered = t.rotation == 0.0;
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("text_edit_bg")));
-        if let Some(bg) = t.bg {
+        if let (Some(bg), false) = (t.bg, rendered) {
             painter.rect_filled(r, t.size * 0.3 * xf.zoom, bg);
         }
         painter.rect_stroke(r.expand(3.0), 2.0, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
         let fam = self.egui_family(ctx, &t);
+        // renderer and editor both treat the size as the em in pixels
         let font = FontId::new((t.size * xf.zoom).max(2.0), fam);
         let pad = lay.pad * xf.zoom;
         let width = if t.wrap > 0.0 { (t.wrap - lay.pad * 2.0) * xf.zoom } else { (lay.size.x - lay.pad * 2.0) * xf.zoom + t.size * xf.zoom * 2.0 };
@@ -4098,14 +4106,21 @@ impl App {
                 // Without a wrap width the box grows sideways while typing: lay the text
                 // out unwrapped instead of wrapping at last frame's width.
                 let wrap_px = if t.wrap > 0.0 { width.max(10.0) } else { f32::INFINITY };
-                let (lfont, lcol) = (font.clone(), t.color);
+                let lcol = if !rendered {
+                    t.color
+                } else if std::env::var_os("DV_EDIT_DEBUG").is_some() {
+                    Color32::from_rgba_unmultiplied(0, 160, 255, 150) // shows editor glyphs for alignment checks
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let lfont = font.clone();
                 let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
                     let job = egui::text::LayoutJob::simple(buf.as_str().to_owned(), lfont.clone(), lcol, wrap_px);
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 };
                 let te = egui::TextEdit::multiline(&mut text)
                     .font(font)
-                    .text_color(t.color)
+                    .text_color(lcol)
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .desired_width(width.max(10.0))

@@ -61,13 +61,22 @@ pub fn font_for(t: &TextLayer) -> FontArc {
     if t.style.to_lowercase().contains("bold") { fonts().bold.clone() } else { fonts().regular.clone() }
 }
 
+/// Scale whose em square is `size` pixels (egui's convention). ab_glyph's
+/// pt_to_px_scale would add a 96/72 factor, making text 1.33x the set size.
+pub fn em_scale(font: &FontArc, size: f32) -> PxScale {
+    match font.units_per_em() {
+        Some(upem) if upem > 0.0 => PxScale::from(size * font.height_unscaled() / upem),
+        _ => PxScale::from(size),
+    }
+}
+
 pub fn pad_for(t: &TextLayer) -> f32 {
     if t.bg.is_some() { (t.size * 0.35).max(2.0) } else { 0.0 }
 }
 
 pub fn layout(t: &TextLayer) -> TextLayout {
     let font = &font_for(t);
-    let px = font.pt_to_px_scale(t.size.max(1.0)).unwrap_or(PxScale::from(t.size.max(1.0)));
+    let px = em_scale(font, t.size.max(1.0));
     let sf = font.as_scaled(px);
     let line_h = sf.height() + sf.line_gap();
     let ascent = sf.ascent();
@@ -164,7 +173,7 @@ pub fn render(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2) -> Option
         }
     }
     let font = &font_for(t);
-    let px = font.pt_to_px_scale((t.size * scale).max(0.5)).unwrap_or(PxScale::from(t.size * scale));
+    let px = em_scale(font, (t.size * scale).max(0.5));
     let [cr, cg, cb, ca] = t.color.to_srgba_unmultiplied();
     let ca = ca as f32 / 255.0;
     let col = [cr as f32, cg as f32, cb as f32];
