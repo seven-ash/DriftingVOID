@@ -721,6 +721,11 @@ impl App {
             app.s.text_style = "Regular".into();
             app.tool = Tool::Text;
             let id = app.new_text_layer(pos2(0.0, 0.0), "테스트 Test".into());
+            if let Some(deg) = std::env::var("DV_TEST_TEXT_ROT").ok().and_then(|v| v.parse::<f32>().ok()) {
+                if let Some(LayerKind::Text(t)) = app.doc.get_mut(id).map(|l| &mut l.kind) {
+                    t.rotation = deg.to_radians();
+                }
+            }
             app.sel = Some(id);
             app.editing = Some(id);
             app.edit_focus = true;
@@ -3811,10 +3816,7 @@ impl App {
         }
         // while editing, the renderer still draws the text (so blend modes, fonts and the
         // background box look final); only rotated text is hidden for the upright editor
-        let editing = self
-            .editing
-            .filter(|id| matches!(self.doc.get(*id).map(|l| &l.kind), Some(LayerKind::Text(t)) if t.rotation != 0.0));
-        canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, editing);
+        canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None);
 
         // in-progress vector stroke
         if let Some(Drag::Vector { id, pts, color, .. }) = &self.drag {
@@ -4081,14 +4083,18 @@ impl App {
         let t = t.clone();
         let lay = crate::text::layout(&t);
         let r = xf.rect_w2s(lay.rect(t.pos));
-        // upright text is drawn by the renderer underneath; the editor only shows caret
-        // and selection. Rotated text is edited upright with the editor's own glyphs.
-        let rendered = t.rotation == 0.0;
+        // The renderer draws the text underneath (as placed, rotation included); the
+        // invisible editor only takes input. Caret and selection are drawn here,
+        // rotated with the text.
+        let rendered = true;
+        let rot = t.rotation;
+        let c = r.center();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("text_edit_bg")));
-        if let (Some(bg), false) = (t.bg, rendered) {
-            painter.rect_filled(r, t.size * 0.3 * xf.zoom, bg);
-        }
-        painter.rect_stroke(r.expand(3.0), 2.0, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
+        let frame: Vec<Pos2> = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+            .iter()
+            .map(|p| crate::doc::rot_about(c + (*p - c) * ((r.width() + 6.0) / r.width().max(1.0)), c, rot))
+            .collect();
+        painter.add(Shape::closed_line(frame, Stroke::new(1.0, ACCENT)));
         let fam = self.egui_family(ctx, &t);
         // renderer and editor both treat the size as the em in pixels
         let font = FontId::new((t.size * xf.zoom).max(2.0), fam);
@@ -4128,12 +4134,42 @@ impl App {
                     .clip_text(false)
                     .layouter(&mut layouter)
                     .hint_text("글자 입력");
-                let resp = ui.add(te);
+                // hide egui's own caret/selection: they would be upright
+                ui.visuals_mut().text_cursor.stroke.color = Color32::TRANSPARENT;
+                ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
+                let out = te.show(ui);
+                let resp = out.response.response.clone();
                 if self.edit_focus {
                     resp.request_focus();
                     self.edit_focus = false;
                 }
                 lost = resp.lost_focus();
+                if resp.has_focus() {
+                    if let Some(cr) = out.cursor_range {
+                        let map = |p: Pos2| crate::doc::rot_about(p, c, rot);
+                        let at = |i: usize| out.galley.pos_from_cursor(egui::text::CCursor::new(i)).translate(out.galley_pos.to_vec2());
+                        // selection: one quad per character span on the same row
+                        let (pi, si) = (cr.primary.index.0, cr.secondary.index.0);
+                        let (a, b) = (pi.min(si), pi.max(si));
+                        let sel = ACCENT.gamma_multiply(0.35);
+                        for i in a..b {
+                            let (p0, p1) = (at(i), at(i + 1));
+                            if (p0.min.y - p1.min.y).abs() > 0.5 {
+                                continue; // line break
+                            }
+                            let q = Rect::from_min_max(pos2(p0.min.x, p0.min.y), pos2(p1.min.x, p0.max.y));
+                            let poly: Vec<Pos2> = [q.left_top(), q.right_top(), q.right_bottom(), q.left_bottom()].iter().map(|p| map(*p)).collect();
+                            ui.painter().add(Shape::convex_polygon(poly, sel, Stroke::NONE));
+                        }
+                        // caret, blinking like egui's
+                        let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
+                        if blink {
+                            let k = at(pi);
+                            ui.painter().line_segment([map(k.left_top()), map(k.left_bottom())], Stroke::new(2.0, INK));
+                        }
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                }
             });
         if text != t.text {
             if let Some(LayerKind::Text(tt)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
