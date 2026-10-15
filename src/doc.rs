@@ -154,6 +154,23 @@ pub struct TextLayer {
     pub blend: Blend,
 }
 
+impl TextLayer {
+    /// After the box changed size (typing, font, size...), keeps the rotated
+    /// top-left corner — where the first character sits — where it was, so the
+    /// text grows away from it along its own axes instead of around the centre.
+    pub fn keep_corner(&mut self, old_size: Vec2) {
+        if self.rotation == 0.0 {
+            return;
+        }
+        let new_size = crate::text::layout(self).size;
+        let d = (old_size - new_size) * 0.5;
+        // corner = pos + (I - R)·size/2, so shift pos by (I - R)·(old - new)/2
+        let (s, c) = self.rotation.sin_cos();
+        let rd = vec2(d.x * c - d.y * s, d.x * s + d.y * c);
+        self.pos += d - rd;
+    }
+}
+
 /// How a text layer mixes with what is under it.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug, Serialize, Deserialize)]
 pub enum Blend {
@@ -406,3 +423,34 @@ impl Document {
 }
 
 pub type TileMap = HashMap<(i32, i32), Arc<crate::raster::Tile>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotated_text_grows_from_its_first_corner() {
+        let mut t = TextLayer {
+            pos: pos2(100.0, 50.0),
+            text: "ab".into(),
+            size: 40.0,
+            color: Color32::WHITE,
+            family: String::new(),
+            style: "Regular".into(),
+            bg: None,
+            wrap: 0.0,
+            rotation: 0.6,
+            blend: Blend::Normal,
+        };
+        let corner = |t: &TextLayer| {
+            let s = crate::text::layout(t).size;
+            rot_about(t.pos, t.pos + s * 0.5, t.rotation)
+        };
+        let before = corner(&t);
+        let s0 = crate::text::layout(&t).size;
+        t.text = "ab cd ef\nsecond line".into();
+        t.keep_corner(s0);
+        let after = corner(&t);
+        assert!((before - after).length() < 1e-3, "{before:?} vs {after:?}");
+    }
+}

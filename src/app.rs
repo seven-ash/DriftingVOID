@@ -2844,6 +2844,7 @@ impl App {
             Tool::Text => {
                 ui.strong("글자");
                 if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
+                    let s0 = crate::text::layout(t).size;
                     layer_changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     ui.horizontal(|ui| {
@@ -2856,6 +2857,9 @@ impl App {
                             layer_changed |= color_row(ui, bg, PalTarget::TextBg(lid), &mut pal_req);
                         }
                     });
+                    if layer_changed {
+                        t.keep_corner(s0);
+                    }
                     // the next new text starts from the same style
                     s.text_size = t.size;
                     s.text_family = t.family.clone();
@@ -3036,6 +3040,7 @@ impl App {
                     }
                 }
                 LayerKind::Text(t) => {
+                    let s0 = crate::text::layout(t).size;
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
@@ -3088,6 +3093,9 @@ impl App {
                             changed |= ui.add(egui::DragValue::new(&mut t.wrap).custom_parser(crate::calc::parse).range(10.0..=20000.0).suffix(" px")).changed();
                         }
                     });
+                    if changed {
+                        t.keep_corner(s0);
+                    }
                 }
                 LayerKind::Shape(s) => {
                     ui.horizontal(|ui| {
@@ -4173,7 +4181,9 @@ impl App {
             });
         if text != t.text {
             if let Some(LayerKind::Text(tt)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                let s0 = crate::text::layout(tt).size;
                 tt.text = text;
+                tt.keep_corner(s0);
             }
             self.mark();
         }
