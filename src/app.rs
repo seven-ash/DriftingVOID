@@ -3087,7 +3087,7 @@ impl App {
         let t = t.clone();
         let lay = crate::text::layout(&t);
         let r = xf.rect_w2s(lay.rect(t.pos));
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("text_edit_bg")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("text_edit_bg")));
         if let Some(bg) = t.bg {
             painter.rect_filled(r, t.size * 0.3 * xf.zoom, bg);
         }
@@ -3100,7 +3100,9 @@ impl App {
         let mut lost = false;
         egui::Area::new(egui::Id::new("text_edit_area"))
             .fixed_pos(r.min + vec2(pad, pad))
-            .order(egui::Order::Foreground)
+            // below the floating panels (they are Middle), and never pushed back on-screen
+            .order(egui::Order::Background)
+            .constrain(false)
             .show(ctx, |ui| {
                 let te = egui::TextEdit::multiline(&mut text)
                     .font(font)
