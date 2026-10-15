@@ -2052,7 +2052,8 @@ impl App {
         } else if resp.hovered() && !active {
             p.rect_filled(r, 9.0, FILL_2);
         }
-        // with glass the amber indicator is a soft glow inside the rail's glass shader
+        // with glass the amber indicator is drawn in the canvas overlay layer under the
+        // rail (see `draw_rail_indicator`): blurred by the glass, but not tinted or split
         let col = if active {
             if under_glass { Color32::WHITE } else { ACCENT_INK }
         } else if resp.hovered() {
@@ -2073,11 +2074,7 @@ impl App {
             .order(egui::Order::Middle)
             .fixed_pos(pos2(screen.left() + SPACE_LG, screen.top() + 76.0))
             .show(ctx, |ui| {
-                let glow = self.rail_active.map(|r| {
-                    let y = ctx.animate_value_with_time(egui::Id::new("rail_indicator_y"), r.center().y, 0.16);
-                    (Rect::from_center_size(pos2(r.center().x, y), r.size()), ACCENT)
-                });
-                theme::glass_glow(ui, egui::Margin::same(6), theme::RADIUS_CARD, glow, |ui| {
+                theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                     let groups: [&[Tool]; 4] = [
                         &[Tool::Select, Tool::Hand],
@@ -2935,6 +2932,10 @@ impl App {
             painter.add(Shape::mesh(m));
         }
 
+        // ---- render layers: scene above, overlay layer below (cursor, selection, indicator)
+        if crate::glass::available() {
+            painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
+        }
         self.draw_overlays(&painter, &xf);
         self.text_editor(&ctx, &xf);
 
@@ -2993,6 +2994,8 @@ impl App {
             }
         }
 
+        self.draw_rail_indicator(&ctx, &painter);
+
         if self.doc.layers.is_empty() {
             painter.text(
                 rect.center(),
@@ -3003,6 +3006,14 @@ impl App {
             );
         }
         let _ = resp;
+    }
+
+    /// Amber "selected tool" block in the overlay layer under the tool rail's glass.
+    fn draw_rail_indicator(&self, ctx: &egui::Context, painter: &egui::Painter) {
+        let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
+        let y = ctx.animate_value_with_time(egui::Id::new("rail_indicator_y"), r.center().y, 0.07);
+        let c = pos2(r.center().x, y);
+        painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT);
     }
 
     fn draw_overlays(&self, painter: &egui::Painter, xf: &Xf) {

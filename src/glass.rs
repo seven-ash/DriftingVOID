@@ -97,9 +97,8 @@ pub struct Look {
     pub tint: [f32; 4],
     /// Red/blue split at the rim, points.
     pub dispersion: f32,
-    /// Optional soft glow inside the card (rect in points, straight RGBA 0..1).
-    /// It is added after tint and dispersion, so it stays bright and clean.
-    pub glow: Option<(Rect, [f32; 4])>,
+    /// Frame id; matches the scene snapshot taken this frame (see `scene_marker`).
+    pub frame: u64,
 }
 
 static STRENGTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4030_0000); // 2.75
@@ -132,6 +131,39 @@ pub fn shape(card: Rect, look: Look) -> Shape {
     Shape::Callback(egui::PaintCallback { rect: card.expand(SHADOW + 8.0), callback: std::sync::Arc::new(cb) })
 }
 
+/// Render layers: everything painted before this marker is the *scene* layer
+/// (gets tint, refraction and dispersion under glass); everything painted after it
+/// and before a glass card is the *overlay* layer (only blurred, full brightness).
+pub fn scene_marker(screen: Rect, frame: u64) -> Shape {
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe { snapshot(painter.gl(), &info, frame) };
+    });
+    Shape::Callback(egui::PaintCallback { rect: screen, callback: std::sync::Arc::new(cb) })
+}
+
+unsafe fn snapshot(gl: &glow::Context, info: &egui::PaintCallbackInfo, frame: u64) {
+    unsafe {
+        if FAILED.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut guard = RES.lock().unwrap();
+        let Some(res) = guard.as_mut() else { return };
+        let [sw, sh] = info.screen_size_px;
+        let (sw, sh) = (sw as i32, sh as i32);
+        if ensure(gl, &mut res.scene, sw, sh).is_none() {
+            return;
+        }
+        let scene = res.scene.as_ref().unwrap();
+        gl.disable(glow::SCISSOR_TEST);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(scene.fbo));
+        gl.blit_framebuffer(0, 0, sw, sh, 0, 0, sw, sh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        res.scene_frame = frame;
+    }
+}
+
 struct Tex {
     tex: glow::Texture,
     fbo: glow::Framebuffer,
@@ -146,6 +178,11 @@ struct Res {
     sharp: Option<Tex>,
     small: Option<Tex>,
     tmp: Option<Tex>,
+    /// Region with the overlay layer included.
+    sharp1: Option<Tex>,
+    /// Full-screen snapshot of the scene layer (before overlays), and its frame id.
+    scene: Option<Tex>,
+    scene_frame: u64,
 }
 
 unsafe fn compile(gl: &glow::Context, header: &str, vs: &str, fs: &str) -> Result<glow::Program, String> {
@@ -227,9 +264,8 @@ uniform float u_ppp;
 uniform vec2 u_blur_scale;
 uniform vec2 u_sharp_max;
 uniform float u_ca;          // dispersion at the rim, pixels
-uniform vec4 u_glow_rect;    // centre x y, half w h (GL pixels)
-uniform vec4 u_glow_col;     // straight rgba; a = 0 disables
-uniform float u_glow_soft;   // blur-like falloff width, pixels
+uniform sampler2D u_sharp1;  // region *with* the overlay layer
+uniform float u_has_overlay;
 out vec4 o;
 
 float sd(vec2 p) {
@@ -268,12 +304,21 @@ void main() {
     vec3 blur = vec3(texture(u_blur, ur * u_blur_scale).r, texture(u_blur, uv * u_blur_scale).g, texture(u_blur, ub * u_blur_scale).b);
     vec3 col = mix(blur, sharp, edge * 0.45);
     col = mix(col, u_tint.rgb, u_tint.a * (1.0 - edge * 0.35));
-    if (u_glow_col.a > 0.0) {
-        // analytic soft rounded box: looks blurred, ignores tint, refraction and dispersion
-        vec2 q = abs(frag - u_glow_rect.xy) - u_glow_rect.zw + u_radius * 0.6;
-        float gd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_radius * 0.6;
-        float g = 1.0 - smoothstep(-u_glow_soft, u_glow_soft, gd);
-        col = mix(col, u_glow_col.rgb, g * u_glow_col.a);
+    if (u_has_overlay > 0.5) {
+        // overlay layer = (with overlay) - (scene only), lightly blurred; the difference is
+        // the overlay alone, added at full strength: no tint, refraction or dispersion
+        vec2 us = (frag - u_region.xy) * px;
+        vec3 od = vec3(0.0);
+        float ws = 0.0;
+        for (int i = -2; i <= 2; i++) {
+            for (int j = -2; j <= 2; j++) {
+                vec2 q = clamp(us + vec2(float(i), float(j)) * 1.5 * u_ppp * px, vec2(0.0), u_sharp_max);
+                float wt = exp(-float(i * i + j * j) / 3.0);
+                od += (texture(u_sharp1, q).rgb - texture(u_sharp, q).rgb) * wt;
+                ws += wt;
+            }
+        }
+        col = clamp(col + od / ws, 0.0, 1.0);
     }
     float a = clamp(0.5 - d, 0.0, 1.0);
     o = vec4(col * a, a);
@@ -320,7 +365,7 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let blur = compile(gl, &header, VS_FULL, FS_BLUR).map_err(|e| eprintln!("glass blur: {e}")).ok()?;
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, vao, sharp: None, small: None, tmp: None })
+        Some(Res { blur, comp, vao, sharp: None, small: None, tmp: None, sharp1: None, scene: None, scene_frame: u64::MAX })
     }
 }
 
@@ -359,9 +404,11 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         }
         let gy0 = sh - ybot;
         let (sw4, sh4) = ((w / 4).max(2), (h / 4).max(2));
+        let has_overlay = res.scene_frame == look.frame && res.scene.as_ref().is_some_and(|t| t.w >= sw && t.h >= sh);
         if ensure(gl, &mut res.sharp, w, h).is_none()
             || ensure(gl, &mut res.small, sw4, sh4).is_none()
             || ensure(gl, &mut res.tmp, sw4, sh4).is_none()
+            || (has_overlay && ensure(gl, &mut res.sharp1, w, h).is_none())
         {
             return;
         }
@@ -369,34 +416,42 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
 
         gl.disable(glow::SCISSOR_TEST);
         gl.disable(glow::BLEND);
-        // 1. resolve the (multisampled) default framebuffer region into `sharp`
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        // 1. `sharp` = scene layer only (from the snapshot if there is one), and
+        //    `sharp1` = what is on screen now (scene + overlay layer)
+        let scene_src = if has_overlay { res.scene.as_ref().map(|t| t.fbo) } else { None };
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, scene_src);
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(sharp.fbo));
         gl.blit_framebuffer(x0, gy0, x1, gy0 + h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
-        // 2. downsample to quarter size
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(sharp.fbo));
-        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
-        gl.blit_framebuffer(0, 0, w, h, 0, 0, sw4, sh4, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-        // 3. separable gaussian, twice
-        gl.use_program(Some(res.blur));
-        gl.bind_vertex_array(Some(res.vao));
-        gl.active_texture(glow::TEXTURE0);
-        gl.uniform_1_i32(gl.get_uniform_location(res.blur, "u_src").as_ref(), 0);
-        let u_dir = gl.get_uniform_location(res.blur, "u_dir");
-        gl.viewport(0, 0, sw4, sh4);
-        // uv covers only the used part of the (larger) textures
-        let (fx, fy) = (sw4 as f32 / small.w as f32, sh4 as f32 / small.h as f32);
-        for _ in 0..2 {
-            for (src, dst, dir) in [(small, tmp, [1.4 / small.w as f32, 0.0]), (tmp, small, [0.0, 1.4 / small.h as f32])] {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst.fbo));
-                gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
-                gl.uniform_2_f32(u_dir.as_ref(), dir[0], dir[1]);
-                // draw into the used corner only: scale via viewport, sample via uv scale
-                gl.viewport(0, 0, sw4, sh4);
-                set_uv_scale(gl, res.blur, fx, fy);
-                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            }
+        if has_overlay {
+            let sharp1 = res.sharp1.as_ref().unwrap();
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(sharp1.fbo));
+            gl.blit_framebuffer(x0, gy0, x1, gy0 + h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
         }
+        // 2-3. quarter-size separable gaussian of each layer
+        let blur_into = |src_full: &Tex, small: &Tex| {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src_full.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
+            gl.blit_framebuffer(0, 0, w, h, 0, 0, sw4, sh4, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+            gl.use_program(Some(res.blur));
+            gl.bind_vertex_array(Some(res.vao));
+            gl.active_texture(glow::TEXTURE0);
+            gl.uniform_1_i32(gl.get_uniform_location(res.blur, "u_src").as_ref(), 0);
+            let u_dir = gl.get_uniform_location(res.blur, "u_dir");
+            // uv covers only the used part of the (larger) textures
+            let (fx, fy) = (sw4 as f32 / small.w as f32, sh4 as f32 / small.h as f32);
+            for _ in 0..2 {
+                for (src, dst, dir) in [(small, tmp, [1.4 / small.w as f32, 0.0]), (tmp, small, [0.0, 1.4 / small.h as f32])] {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst.fbo));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
+                    gl.uniform_2_f32(u_dir.as_ref(), dir[0], dir[1]);
+                    gl.viewport(0, 0, sw4, sh4);
+                    set_uv_scale(gl, res.blur, fx, fy);
+                    gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+        };
+        blur_into(sharp, small);
 
         // 4. composite onto the screen
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -425,14 +480,12 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         gl.uniform_1_f32(u("u_shadow").as_ref(), SHADOW * ppp);
         gl.uniform_1_f32(u("u_shadow_on").as_ref(), if shadow() { 1.0 } else { 0.0 });
         gl.uniform_1_f32(u("u_ppp").as_ref(), ppp);
-        match look.glow {
-            Some((gr, gc)) => {
-                let gcen = gr.center();
-                gl.uniform_4_f32(u("u_glow_rect").as_ref(), gcen.x * ppp, sh as f32 - gcen.y * ppp, gr.width() * 0.5 * ppp, gr.height() * 0.5 * ppp);
-                gl.uniform_4_f32(u("u_glow_col").as_ref(), gc[0], gc[1], gc[2], gc[3]);
-                gl.uniform_1_f32(u("u_glow_soft").as_ref(), 5.0 * ppp);
-            }
-            None => gl.uniform_4_f32(u("u_glow_col").as_ref(), 0.0, 0.0, 0.0, 0.0),
+        gl.uniform_1_f32(u("u_has_overlay").as_ref(), if has_overlay { 1.0 } else { 0.0 });
+        if has_overlay {
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(res.sharp1.as_ref().unwrap().tex));
+            gl.uniform_1_i32(u("u_sharp1").as_ref(), 2);
+            gl.active_texture(glow::TEXTURE0);
         }
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(sharp.tex));

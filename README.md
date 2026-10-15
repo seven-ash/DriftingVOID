@@ -62,7 +62,7 @@ when empty. Photos are placed under drawing layers.
 | `src/canvas.rs` | GPU display and texture caches |
 | `src/export.rs` | Full-resolution CPU compositor (export, clipboard, eyedropper) |
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
-| `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) |
+| `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/okhsv.rs` | OKHSV colour conversions |
 | `src/penhook.rs` | Pen button/eraser flags via a window subclass |
