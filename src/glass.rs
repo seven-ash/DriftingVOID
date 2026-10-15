@@ -36,6 +36,11 @@ pub fn set_shadow(on: bool) {
     SHADOW_ON.store(on, Ordering::Relaxed);
 }
 
+/// GL glass path works (independent of the glass on/off setting).
+pub fn gl_ok() -> bool {
+    READY.load(Ordering::Relaxed) || !FAILED.load(Ordering::Relaxed)
+}
+
 pub fn available() -> bool {
     ENABLED.load(Ordering::Relaxed) && (READY.load(Ordering::Relaxed) || !FAILED.load(Ordering::Relaxed))
 }
@@ -174,6 +179,11 @@ struct Tex {
 struct Res {
     blur: glow::Program,
     comp: glow::Program,
+    blend: glow::Program,
+    /// Uploaded text pixmaps for the blend pass, by cache key.
+    texts: std::collections::HashMap<u64, glow::Texture>,
+    /// What lies under a blended text (kept apart from the glass textures).
+    bdst: Option<Tex>,
     vao: glow::VertexArray,
     sharp: Option<Tex>,
     small: Option<Tex>,
@@ -325,6 +335,146 @@ void main() {
 }
 "#;
 
+const VS_BLEND: &str = r#"
+uniform vec2 u_p[4];      // corners TL TR BR BL, GL pixels
+uniform vec2 u_screen;
+out vec2 v_uv;
+void main() {
+    int i = gl_VertexID;
+    vec2 p = i == 0 ? u_p[0] : i == 1 ? u_p[1] : i == 2 ? u_p[3] : u_p[2];
+    v_uv = i == 0 ? vec2(0.0, 0.0) : i == 1 ? vec2(1.0, 0.0) : i == 2 ? vec2(0.0, 1.0) : vec2(1.0, 1.0);
+    gl_Position = vec4(p / u_screen * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+const FS_BLEND: &str = r#"
+uniform sampler2D u_src;   // text, premultiplied
+uniform sampler2D u_dst;   // what is under it
+uniform vec4 u_region;     // x y of the captured area, allocated w h
+uniform int u_mode;
+uniform float u_op;
+uniform vec3 u_void;
+in vec2 v_uv;
+out vec4 o;
+void main() {
+    vec4 s = texture(u_src, v_uv);
+    float sa = s.a * u_op;
+    // un-premultiply; rounding can push faint edge pixels above 1, so clamp
+    vec3 cs = s.a > 0.0 ? clamp(s.rgb / s.a, 0.0, 1.0) : vec3(0.0);
+    // exact texel of the captured area (filtering would pull in unused texels at its edge)
+    ivec2 q = clamp(ivec2(floor(gl_FragCoord.xy - u_region.xy)), ivec2(0), ivec2(u_region.zw) - 1);
+    vec3 cd = texelFetch(u_dst, q, 0).rgb;
+    vec3 b = cs;
+    if (u_mode == 1) b = min(cd + cs, 1.0);
+    else if (u_mode == 2) b = max(cd - cs, 0.0);
+    else if (u_mode == 3) b = cd * cs;
+    else if (u_mode == 4) b = min(cd / max(cs, vec3(1.0 / 255.0)), 1.0);
+    else if (u_mode == 5) b = abs(cd - cs);
+    else if (u_mode == 6) b = u_void;   // erase: show the empty canvas
+    o = vec4(mix(cd, b, sa), 1.0);
+}
+"#;
+
+/// Draws a text pixmap onto the screen with a blend mode, reading what is
+/// already under it (the egui pipeline only does normal / additive).
+pub fn blend_shape(corners: [egui::Pos2; 4], px: std::sync::Arc<Vec<u8>>, dims: [u32; 2], key: u64, mode: i32, opacity: f32) -> Shape {
+    let bbox = Rect::from_points(&corners);
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe { paint_blend(painter.gl(), &info, corners, &px, dims, key, mode, opacity) };
+    });
+    Shape::Callback(egui::PaintCallback { rect: bbox, callback: std::sync::Arc::new(cb) })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_blend(gl: &glow::Context, info: &egui::PaintCallbackInfo, corners: [egui::Pos2; 4], px: &[u8], dims: [u32; 2], key: u64, mode: i32, opacity: f32) {
+    unsafe {
+        if FAILED.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut guard = RES.lock().unwrap();
+        if guard.is_none() {
+            match init(gl) {
+                Some(r) => {
+                    *guard = Some(r);
+                    READY.store(true, Ordering::Relaxed);
+                }
+                None => {
+                    FAILED.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        let res = guard.as_mut().unwrap();
+        let ppp = info.pixels_per_point;
+        let [sw, sh] = info.screen_size_px;
+        let (sw, sh) = (sw as i32, sh as i32);
+        // text texture (uploaded once per cache key)
+        if !res.texts.contains_key(&key) {
+            if res.texts.len() > 64 {
+                for (_, t) in res.texts.drain() {
+                    gl.delete_texture(t);
+                }
+            }
+            let Ok(tex) = gl.create_texture() else { return };
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, dims[0] as i32, dims[1] as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(px)));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            res.texts.insert(key, tex);
+        }
+        let src_tex = res.texts[&key];
+        // capture what is under the text
+        let gp: Vec<(f32, f32)> = corners.iter().map(|p| (p.x * ppp, sh as f32 - p.y * ppp)).collect();
+        let x0 = (gp.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i32 - 1).clamp(0, sw);
+        let x1 = (gp.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i32 + 1).clamp(0, sw);
+        let y0 = (gp.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i32 - 1).clamp(0, sh);
+        let y1 = (gp.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i32 + 1).clamp(0, sh);
+        let (w, h) = (x1 - x0, y1 - y0);
+        // screen-sized capture at identical coordinates (some drivers require the same
+        // rectangle when resolving a multisampled framebuffer)
+        if w < 1 || h < 1 || ensure(gl, &mut res.bdst, sw, sh).is_none() {
+            return;
+        }
+        let dst = res.bdst.as_ref().unwrap();
+        gl.disable(glow::SCISSOR_TEST);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst.fbo));
+        gl.blit_framebuffer(x0, y0, x1, y1, x0, y0, x1, y1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        // draw the quad with the blend shader, overwriting (blending off)
+        gl.viewport(0, 0, sw, sh);
+        gl.disable(glow::BLEND);
+        let clip = info.clip_rect_in_pixels();
+        gl.enable(glow::SCISSOR_TEST);
+        gl.scissor(clip.left_px, clip.from_bottom_px, clip.width_px, clip.height_px);
+        gl.use_program(Some(res.blend));
+        gl.bind_vertex_array(Some(res.vao));
+        let u = |n: &str| gl.get_uniform_location(res.blend, n);
+        let flat: Vec<f32> = gp.iter().flat_map(|p| [p.0, p.1]).collect();
+        gl.uniform_2_f32_slice(u("u_p").as_ref(), &flat);
+        gl.uniform_2_f32(u("u_screen").as_ref(), sw as f32, sh as f32);
+        gl.uniform_4_f32(u("u_region").as_ref(), 0.0, 0.0, sw as f32, sh as f32);
+        gl.uniform_1_i32(u("u_mode").as_ref(), mode);
+        gl.uniform_1_f32(u("u_op").as_ref(), opacity);
+        let v = crate::theme::VOID;
+        gl.uniform_3_f32(u("u_void").as_ref(), v.r() as f32 / 255.0, v.g() as f32 / 255.0, v.b() as f32 / 255.0);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+        gl.uniform_1_i32(u("u_src").as_ref(), 0);
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(dst.tex));
+        gl.uniform_1_i32(u("u_dst").as_ref(), 1);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_vertex_array(None);
+        gl.enable(glow::BLEND);
+    }
+}
+
 unsafe fn ensure(gl: &glow::Context, slot: &mut Option<Tex>, w: i32, h: i32) -> Option<()> {
     unsafe {
         if let Some(t) = slot {
@@ -364,8 +514,9 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         }
         let blur = compile(gl, &header, VS_FULL, FS_BLUR).map_err(|e| eprintln!("glass blur: {e}")).ok()?;
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
+        let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, vao, sharp: None, small: None, tmp: None, sharp1: None, scene: None, scene_frame: u64::MAX })
+        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, sharp: None, small: None, tmp: None, sharp1: None, scene: None, scene_frame: u64::MAX })
     }
 }
 

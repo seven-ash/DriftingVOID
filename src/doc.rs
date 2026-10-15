@@ -151,6 +151,54 @@ pub struct TextLayer {
     pub wrap: f32,
     /// Radians, about the box centre.
     pub rotation: f32,
+    pub blend: Blend,
+}
+
+/// How a text layer mixes with what is under it.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug, Serialize, Deserialize)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Difference,
+    /// Punches the shape out of everything below.
+    Erase,
+}
+
+impl Blend {
+    pub const ALL: [Blend; 7] = [Blend::Normal, Blend::Add, Blend::Subtract, Blend::Multiply, Blend::Divide, Blend::Difference, Blend::Erase];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Blend::Normal => "보통",
+            Blend::Add => "더하기",
+            Blend::Subtract => "빼기",
+            Blend::Multiply => "곱하기",
+            Blend::Divide => "나누기",
+            Blend::Difference => "차이",
+            Blend::Erase => "지우기",
+        }
+    }
+
+    /// Shader / compositor mode number.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// Separable blend on straight colour channels (0..1).
+    pub fn mix(self, d: f32, s: f32) -> f32 {
+        match self {
+            Blend::Normal | Blend::Erase => s,
+            Blend::Add => (d + s).min(1.0),
+            Blend::Subtract => (d - s).max(0.0),
+            Blend::Multiply => d * s,
+            Blend::Divide => (d / s.max(1.0 / 255.0)).min(1.0),
+            Blend::Difference => (d - s).abs(),
+        }
+    }
 }
 
 /// Rotates `p` by `th` (clockwise on screen) about `c`.

@@ -79,6 +79,8 @@ enum FileKind {
         wrap: f32,
         #[serde(default)]
         rotation: f32,
+        #[serde(default)]
+        blend: Blend,
     },
     Shape {
         kind: ShapeKind,
@@ -154,6 +156,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     bg: t.bg.map(c2a),
                     wrap: t.wrap,
                     rotation: t.rotation,
+                    blend: t.blend,
                 },
                 LayerKind::Shape(s) => FileKind::Shape {
                     kind: s.kind,
@@ -216,7 +219,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 };
                 LayerKind::Image(ImageLayer { src, center: pos2(center[0], center[1]), scale, rotation, crop: a2r(crop), adjust })
             }
-            FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation } => LayerKind::Text(TextLayer {
+            FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation, blend } => LayerKind::Text(TextLayer {
                 pos: pos2(pos[0], pos[1]),
                 text,
                 size,
@@ -226,6 +229,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 bg: bg.map(a2c),
                 wrap,
                 rotation,
+                blend,
             }),
             FileKind::Shape { kind, a, b, color, width, fill, rotation } => LayerKind::Shape(ShapeLayer {
                 kind,

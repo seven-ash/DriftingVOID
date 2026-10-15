@@ -254,7 +254,76 @@ enum Source {
     Middle,
 }
 
+/// What the palette is editing.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PalTarget {
+    Main,
+    TextColor(LayerId),
+    TextBg(LayerId),
+    ShapeColor(LayerId),
+    ShapeFill(LayerId),
+    DefaultTextBg,
+    DefaultFill,
+    ExportBg,
+}
+
+type PalReq = Option<(PalTarget, Color32, Pos2)>;
+
+fn hex_of(c: Color32) -> String {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 { format!("#{r:02X}{g:02X}{b:02X}") } else { format!("#{r:02X}{g:02X}{b:02X}{a:02X}") }
+}
+
+fn parse_hex(s: &str) -> Option<Color32> {
+    let h = s.trim().trim_start_matches('#');
+    let v = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
+    match h.len() {
+        3 => {
+            let d = |i: usize| u8::from_str_radix(h.get(i..i + 1)?, 16).ok().map(|x| x * 17);
+            Some(Color32::from_rgb(d(0)?, d(1)?, d(2)?))
+        }
+        6 => Some(Color32::from_rgb(v(0)?, v(2)?, v(4)?)),
+        8 => Some(Color32::from_rgba_unmultiplied(v(0)?, v(2)?, v(4)?, v(6)?)),
+        _ => None,
+    }
+}
+
+/// Swatch (opens the palette for this field) + editable hex + copy / paste.
+fn color_row(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut PalReq) -> bool {
+    let mut changed = false;
+    let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+    ui.painter().rect_filled(r, 5.0, *c);
+    ui.painter().rect_stroke(r, 5.0, Stroke::new(1.0, if resp.hovered() { INK_2 } else { FILL_3 }), StrokeKind::Inside);
+    if resp.on_hover_text("팔레트 열기").clicked() {
+        *req = Some((target, *c, r.right_top()));
+    }
+    let id = ui.id().with(("hex", format!("{target:?}")));
+    let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| hex_of(*c));
+    let te = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(84.0).font(egui::TextStyle::Monospace));
+    if te.changed() {
+        if let Some(nc) = parse_hex(&buf) {
+            *c = nc;
+            changed = true;
+        }
+    }
+    if !te.has_focus() {
+        buf = hex_of(*c);
+    }
+    ui.data_mut(|d| d.insert_temp(id, buf));
+    if ui.small_button("복사").on_hover_text("헥스 코드 복사").clicked() {
+        ui.ctx().copy_text(hex_of(*c));
+    }
+    if ui.small_button("붙여넣기").on_hover_text("클립보드의 헥스 코드 적용").clicked() {
+        if let Some(nc) = arboard::Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()).and_then(|t| parse_hex(&t)) {
+            *c = nc;
+            changed = true;
+        }
+    }
+    changed
+}
+
 struct Palette {
+    target: PalTarget,
     pos: Pos2,
     h: f32,
     s: f32,
@@ -980,6 +1049,7 @@ impl App {
             bg: self.s.text_bg.then_some(self.s.text_bg_color),
             wrap: 0.0,
             rotation: 0.0,
+            blend: Blend::Normal,
         };
         self.doc.insert("글".into(), LayerKind::Text(t), self.sel)
     }
@@ -2500,6 +2570,7 @@ impl App {
         let Some(mut d) = self.export.take() else { return };
         let mut open = true;
         let mut action: Option<u8> = None;
+        let mut pal_req: PalReq = None;
         egui::Window::new("내보내기")
             .title_bar(false)
             .frame(egui::Frame::NONE)
@@ -2547,7 +2618,7 @@ impl App {
                 ui.radio_value(&mut d.bg, ExportBg::White, "흰색");
                 ui.radio_value(&mut d.bg, ExportBg::Custom, "색");
                 if d.bg == ExportBg::Custom {
-                    ui.color_edit_button_srgba(&mut d.bg_color);
+                    color_row(ui, &mut d.bg_color, PalTarget::ExportBg, &mut pal_req);
                 }
             });
             ui.horizontal(|ui| {
@@ -2605,6 +2676,9 @@ impl App {
         self.last_export = Some(d.clone());
         if open {
             self.export = Some(d);
+        }
+        if let Some((t, c, at)) = pal_req {
+            self.open_palette_for(t, c, at);
         }
     }
 
@@ -2707,6 +2781,8 @@ impl App {
                 && matches!(self.tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse)
         });
         let mut layer_changed = false;
+        let mut pal_req: PalReq = None;
+        let lid = sel_text.or(sel_shape).map(|i| self.doc.layers[i].id).unwrap_or(0);
         let s = &mut self.s;
         match self.tool {
             Tool::Brush => {
@@ -2766,7 +2842,7 @@ impl App {
                             layer_changed = true;
                         }
                         if let Some(bg) = &mut t.bg {
-                            layer_changed |= ui.color_edit_button_srgba(bg).changed();
+                            layer_changed |= color_row(ui, bg, PalTarget::TextBg(lid), &mut pal_req);
                         }
                     });
                     // the next new text starts from the same style
@@ -2783,7 +2859,7 @@ impl App {
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut s.text_bg, "배경 상자");
-                        ui.color_edit_button_srgba(&mut s.text_bg_color);
+                        color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
                     });
                 }
                 ui.small("빈 곳 클릭: 새 글 · 글 클릭: 수정 · Esc: 끝내기");
@@ -2800,7 +2876,7 @@ impl App {
                                 layer_changed = true;
                             }
                             if let Some(f) = &mut sh.fill {
-                                layer_changed |= ui.color_edit_button_srgba(f).changed();
+                                layer_changed |= color_row(ui, f, PalTarget::ShapeFill(lid), &mut pal_req);
                             }
                         });
                     }
@@ -2814,7 +2890,7 @@ impl App {
                     if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut s.shape_fill, "채우기");
-                            ui.color_edit_button_srgba(&mut s.fill_color);
+                            color_row(ui, &mut s.fill_color, PalTarget::DefaultFill, &mut pal_req);
                         });
                     }
                 }
@@ -2862,6 +2938,9 @@ impl App {
         if layer_changed {
             self.mark();
         }
+        if let Some((t, c, at)) = pal_req {
+            self.open_palette_for(t, c, at);
+        }
         ui.separator();
         ui.checkbox(&mut self.s.touch_draw, "손가락 터치로도 그리기")
             .on_hover_text("끄면 손가락 한 개는 화면 이동, 두 개는 확대/축소. 펜은 항상 그려.");
@@ -2889,6 +2968,7 @@ impl App {
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
+        let mut pal_req: PalReq = None;
         let mut start_crop = false;
         {
             let l = &mut self.doc.layers[idx];
@@ -2957,13 +3037,30 @@ impl App {
                                 changed = true;
                             }
                             if let Some(bg) = &mut t.bg {
-                                changed |= ui.color_edit_button_srgba(bg).changed();
+                                changed |= color_row(ui, bg, PalTarget::TextBg(id), &mut pal_req);
                             }
                         });
                     }
                     ui.horizontal(|ui| {
                         ui.label("색");
-                        changed |= ui.color_edit_button_srgba(&mut t.color).changed();
+                        changed |= color_row(ui, &mut t.color, PalTarget::TextColor(id), &mut pal_req);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("혼합");
+                        egui::ComboBox::from_id_salt("text_blend")
+                            .selected_text(t.blend.label())
+                            .width(110.0)
+                            .popup_style(theme::glass_popup_style(false))
+                            .show_ui(ui, |ui| {
+                                theme::glass_popup(ui, |ui| {
+                                    for b in Blend::ALL {
+                                        if ui.selectable_label(t.blend == b, b.label()).clicked() {
+                                            t.blend = b;
+                                            changed = true;
+                                        }
+                                    }
+                                })
+                            });
                     });
                     let mut deg = t.rotation.to_degrees();
                     if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
@@ -2984,7 +3081,9 @@ impl App {
                 LayerKind::Shape(s) => {
                     ui.horizontal(|ui| {
                         ui.label("색");
-                        changed |= ui.color_edit_button_srgba(&mut s.color).changed();
+                        changed |= color_row(ui, &mut s.color, PalTarget::ShapeColor(id), &mut pal_req);
+                    });
+                    ui.horizontal(|ui| {
                         if !shape_tool {
                             changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("굵기")).changed();
                         }
@@ -3004,7 +3103,7 @@ impl App {
                                 changed = true;
                             }
                             if let Some(f) = &mut s.fill {
-                                changed |= ui.color_edit_button_srgba(f).changed();
+                                changed |= color_row(ui, f, PalTarget::ShapeFill(id), &mut pal_req);
                             }
                         });
                     }
@@ -3023,6 +3122,9 @@ impl App {
         }
         if changed {
             self.mark();
+        }
+        if let Some((t, c, at)) = pal_req {
+            self.open_palette_for(t, c, at);
         }
         if start_crop {
             self.set_tool(Tool::Crop);
@@ -3409,14 +3511,19 @@ impl App {
     // ------------------------------------------------------------ palette
 
     fn open_palette(&mut self, at: Pos2) {
+        self.open_palette_for(PalTarget::Main, self.s.color, at);
+    }
+
+    fn open_palette_for(&mut self, target: PalTarget, color: Color32, at: Pos2) {
         let hint = self.palette.as_ref().map(|p| p.h).unwrap_or(0.08);
-        let (h, s, v) = crate::okhsv::from_rgb(self.s.color, hint);
+        let (h, s, v) = crate::okhsv::from_rgb(color, hint);
         self.palette = Some(Palette {
+            target,
             pos: at + vec2(14.0, 14.0),
             h,
             s,
             v,
-            orig: self.s.color,
+            orig: color,
             sv_tex: None,
             hue_tex: None,
             rect: Rect::NOTHING,
@@ -3427,6 +3534,49 @@ impl App {
             patch_tex: None,
             value_tex: None,
         });
+    }
+
+    fn apply_pal(&mut self, target: PalTarget, c: Color32) {
+        fn layer(doc: &mut Document, id: LayerId) -> Option<&mut LayerKind> {
+            doc.get_mut(id).map(|l| &mut l.kind)
+        }
+        match target {
+            PalTarget::Main => {
+                self.s.color = c;
+                self.recolor_selected();
+                return;
+            }
+            PalTarget::TextColor(id) => {
+                if let Some(LayerKind::Text(t)) = layer(&mut self.doc, id) {
+                    t.color = c;
+                }
+            }
+            PalTarget::TextBg(id) => {
+                if let Some(LayerKind::Text(t)) = layer(&mut self.doc, id) {
+                    t.bg = Some(c);
+                }
+                self.s.text_bg_color = c;
+            }
+            PalTarget::ShapeColor(id) => {
+                if let Some(LayerKind::Shape(s)) = layer(&mut self.doc, id) {
+                    s.color = c;
+                }
+            }
+            PalTarget::ShapeFill(id) => {
+                if let Some(LayerKind::Shape(s)) = layer(&mut self.doc, id) {
+                    s.fill = Some(c);
+                }
+                self.s.fill_color = c;
+            }
+            PalTarget::DefaultTextBg => self.s.text_bg_color = c,
+            PalTarget::DefaultFill => self.s.fill_color = c,
+            PalTarget::ExportBg => {
+                if let Some(d) = self.export.as_mut() {
+                    d.bg_color = c;
+                }
+            }
+        }
+        self.mark();
     }
 
     fn palette_ui(&mut self, ctx: &egui::Context) {
@@ -3487,7 +3637,15 @@ impl App {
             }
             resp
         };
-        let recent = if self.recent.is_empty() { PALETTE.to_vec() } else { self.recent.clone() };
+        let mut recent: Vec<Color32> = self.recent.iter().copied().take(8).collect();
+        for c in PALETTE {
+            if recent.len() >= 8 {
+                break;
+            }
+            if !recent.contains(c) {
+                recent.push(*c);
+            }
+        }
         let cur = crate::okhsv::to_rgb(p.h, p.s, p.v);
         let area = egui::Area::new(egui::Id::new("palette")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
@@ -3607,8 +3765,7 @@ impl App {
             new_color = Some(p.orig);
         }
         if let Some(c) = new_color {
-            self.s.color = c;
-            self.recolor_selected();
+            self.apply_pal(p.target, c);
         }
         let clicked_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|q| !p.rect.contains(q)));
         if clicked_outside && now - p.born > 0.2 {
@@ -4051,7 +4208,7 @@ fn font_preview(ctx: &egui::Context, name: &str, style: &str) -> Option<(egui::T
     if !name.chars().all(|c| c == ' ' || face.font.glyph_id(c).0 != 0) {
         return None;
     }
-    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK, family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0, rotation: 0.0 };
+    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK, family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal };
     let ppp = ctx.pixels_per_point();
     let lay = crate::text::layout(&t);
     let pm = crate::text::render(&t, &lay, ppp, Vec2::ZERO)?;

@@ -48,6 +48,7 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
             bg: Some(Color32::from_rgba_unmultiplied(255, 236, 150, 230)),
             wrap: 0.0,
             rotation: 0.0,
+            blend: std::env::var("SB_BLEND").ok().and_then(|b| Blend::ALL.into_iter().find(|x| format!("{x:?}") == b)).unwrap_or_default(),
         }),
         None,
     );

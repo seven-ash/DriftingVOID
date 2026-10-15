@@ -7,7 +7,7 @@ use tiny_skia::{
     Stroke, Transform,
 };
 
-use crate::doc::{Document, ImageLayer, Layer, LayerKind, ShapeKind};
+use crate::doc::{Blend, Document, ImageLayer, Layer, LayerKind, ShapeKind};
 
 pub const MAX_SIDE: u32 = 32000;
 pub const MAX_PIXELS: u64 = 400_000_000;
@@ -42,6 +42,14 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
         if !layer.bounds().is_some_and(|b| b.intersects(region)) {
             continue;
         }
+        if let LayerKind::Text(t) = &layer.kind {
+            if t.blend != Blend::Normal {
+                let mut tmp = Pixmap::new(w, h).ok_or("임시 버퍼를 만들 수 없음")?;
+                draw_layer(&mut tmp, layer, base, region, scale);
+                blend_onto(&mut out, &tmp, t.blend, layer.opacity);
+                continue;
+            }
+        }
         if layer.opacity < 0.999 {
             let mut tmp = Pixmap::new(w, h).ok_or("임시 버퍼를 만들 수 없음")?;
             draw_layer(&mut tmp, layer, base, region, scale);
@@ -52,6 +60,32 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
         }
     }
     Ok(out)
+}
+
+/// Composites premultiplied `src` onto `dst` with a separable blend mode
+/// (W3C compositing: Co = as(1-ad)cs + as·ad·B(cd,cs) + (1-as)ad·cd).
+pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32) {
+    for (d, s) in dst.data_mut().chunks_exact_mut(4).zip(src.data().chunks_exact(4)) {
+        if s[3] == 0 {
+            continue;
+        }
+        let sa = s[3] as f32 / 255.0 * opacity;
+        let da = d[3] as f32 / 255.0;
+        if mode == Blend::Erase {
+            for k in 0..4 {
+                d[k] = (d[k] as f32 * (1.0 - sa)).round() as u8;
+            }
+            continue;
+        }
+        for k in 0..3 {
+            let cs = (s[k] as f32 / s[3] as f32).min(1.0);
+            let cd = if d[3] > 0 { d[k] as f32 / d[3] as f32 } else { 0.0 };
+            let b = mode.mix(cd, cs);
+            let co = sa * (1.0 - da) * cs + sa * da * b + (1.0 - sa) * da * cd;
+            d[k] = (co * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        d[3] = ((sa + da * (1.0 - sa)) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {

@@ -46,7 +46,7 @@ pub struct TexCache {
     frame: u64,
     images: HashMap<(u64, u64), (TextureHandle, u64)>,
     tiles: HashMap<(LayerId, (i32, i32)), (u64, TextureHandle, u64)>,
-    texts: HashMap<LayerId, (u64, TextureHandle, u64)>,
+    texts: HashMap<LayerId, (u64, TextureHandle, u64, std::sync::Arc<Vec<u8>>, [u32; 2])>,
 }
 
 impl TexCache {
@@ -115,7 +115,7 @@ impl TexCache {
         id
     }
 
-    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32) -> Option<(egui::TextureId, Vec2)> {
+    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32) -> Option<(egui::TextureId, Vec2, std::sync::Arc<Vec<u8>>, [u32; 2], u64)> {
         let lay = crate::text::layout(t);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         t.text.hash(&mut h);
@@ -132,15 +132,17 @@ impl TexCache {
         if let Some(e) = self.texts.get_mut(&id) {
             if e.0 == key {
                 e.2 = frame;
-                return Some((e.1.id(), lay.size));
+                return Some((e.1.id(), lay.size, e.3.clone(), e.4, key));
             }
         }
         let pm = crate::text::render(t, &lay, scale, Vec2::ZERO)?;
         let ci = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
         let tex = ctx.load_texture(format!("text{id}"), ci, TEX_OPTS);
         let tid = tex.id();
-        self.texts.insert(id, (key, tex, frame));
-        Some((tid, lay.size))
+        let px = std::sync::Arc::new(pm.data().to_vec());
+        let dims = [pm.width(), pm.height()];
+        self.texts.insert(id, (key, tex, frame, px.clone(), dims));
+        Some((tid, lay.size, px, dims, key))
     }
 }
 
@@ -293,14 +295,19 @@ pub fn draw_doc(
                 if !r.intersects(view_w) {
                     continue;
                 }
-                if let Some((tex, size)) = cache.text(ctx, layer.id, t, scale) {
+                if let Some((tex, size, px, dims, key)) = cache.text(ctx, layer.id, t, scale) {
                     let pm_size = vec2(
                         (size.x * scale).ceil() + 1.0,
                         (size.y * scale).ceil() + 1.0,
                     );
                     let sr = Rect::from_min_size(xf.w2s(t.pos), pm_size / scale * xf.zoom);
                     let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
-                    if t.rotation == 0.0 {
+                    if t.blend != crate::doc::Blend::Normal && crate::glass::gl_ok() {
+                        let c = xf.w2s(Rect::from_min_size(t.pos, size).center());
+                        let corners = [sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom()]
+                            .map(|p| crate::doc::rot_about(p, c, t.rotation));
+                        painter.add(crate::glass::blend_shape(corners, px, dims, key, t.blend.code(), op));
+                    } else if t.rotation == 0.0 {
                         painter.image(tex, sr, uv, tint(op));
                     } else {
                         // rotate about the text box centre (not the padded texture's)
