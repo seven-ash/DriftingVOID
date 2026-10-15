@@ -411,6 +411,7 @@ pub struct App {
     ui_hidden: bool,
     fonts_applied: bool,
     frames: u64,
+    rail_active: Option<Rect>,
     extra_sel: Vec<LayerId>,
     pan_latch: bool,
     middle_moved: bool,
@@ -463,6 +464,7 @@ impl App {
             ui_hidden: false,
             fonts_applied: false,
             frames: 0,
+            rail_active: None,
             extra_sel: Vec::new(),
             pan_latch: false,
             middle_moved: false,
@@ -2040,13 +2042,25 @@ impl App {
     fn tool_button(&mut self, ui: &mut egui::Ui, t: Tool) {
         let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
         let active = self.tool == t;
-        let p = ui.painter();
+        let under_glass = crate::glass::available();
         if active {
+            self.rail_active = Some(r);
+        }
+        let p = ui.painter();
+        if active && !under_glass {
             p.rect_filled(r, 9.0, ACCENT);
-        } else if resp.hovered() {
+        } else if resp.hovered() && !active {
             p.rect_filled(r, 9.0, FILL_2);
         }
-        let col = if active { ACCENT_INK } else if resp.hovered() { INK } else { INK_2 };
+        // with glass the amber indicator is painted on the canvas layer below the rail
+        // (see `draw_rail_indicator`), so it shows through blurred and refracted
+        let col = if active {
+            if under_glass { Color32::WHITE } else { ACCENT_INK }
+        } else if resp.hovered() {
+            INK
+        } else {
+            INK_2
+        };
         theme::tool_icon(p, t, Rect::from_center_size(r.center(), theme::ICON), col);
         let (name, key) = TOOLS.iter().find(|x| x.0 == t).map(|x| (x.1, x.2)).unwrap_or(("", ""));
         if resp.on_hover_text(format!("{name}  ·  {key}")).clicked() {
@@ -2919,6 +2933,7 @@ impl App {
         }
 
         self.draw_overlays(&painter, &xf);
+        self.draw_rail_indicator(&ctx, &painter);
         self.text_editor(&ctx, &xf);
 
         let size_anchor = match &self.drag {
@@ -2986,6 +3001,14 @@ impl App {
             );
         }
         let _ = resp;
+    }
+
+    /// Amber "selected tool" block under the tool rail's glass, gliding between tools.
+    fn draw_rail_indicator(&self, ctx: &egui::Context, painter: &egui::Painter) {
+        let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
+        let y = ctx.animate_value_with_time(egui::Id::new("rail_indicator_y"), r.center().y, 0.16);
+        let c = pos2(r.center().x, y);
+        painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT);
     }
 
     fn draw_overlays(&self, painter: &egui::Painter, xf: &Xf) {
