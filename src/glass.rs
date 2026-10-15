@@ -17,6 +17,16 @@ static RES: Mutex<Option<Res>> = Mutex::new(None);
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static SHADOW_ON: AtomicBool = AtomicBool::new(false);
+static PALETTE_NEAR: AtomicBool = AtomicBool::new(false);
+
+/// Palette option: show the "similar colours" map (off by default).
+pub fn palette_near() -> bool {
+    PALETTE_NEAR.load(Ordering::Relaxed)
+}
+
+pub fn set_palette_near(on: bool) {
+    PALETTE_NEAR.store(on, Ordering::Relaxed);
+}
 
 pub fn shadow() -> bool {
     SHADOW_ON.load(Ordering::Relaxed)
@@ -53,6 +63,9 @@ pub fn load_settings() {
     if let Some(b) = v.get("glass_band").and_then(|x| x.as_f64()) {
         set_band(b as f32);
     }
+    if let Some(on) = v.get("palette_near").and_then(|x| x.as_bool()) {
+        set_palette_near(on);
+    }
     if let Some(on) = v.get("shadow").and_then(|x| x.as_bool()) {
         set_shadow(on);
     }
@@ -66,7 +79,7 @@ pub fn save_settings() {
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let v = serde_json::json!({ "glass": enabled(), "glass_strength": strength(), "shadow": shadow(), "glass_band": band() });
+    let v = serde_json::json!({ "glass": enabled(), "glass_strength": strength(), "shadow": shadow(), "glass_band": band(), "palette_near": palette_near() });
     let _ = std::fs::write(p, serde_json::to_string_pretty(&v).unwrap_or_default());
 }
 

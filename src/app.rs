@@ -151,22 +151,28 @@ struct Palette {
     sub_down: bool,
     strip_tex: Option<MapView>,
     patch_tex: Option<MapView>,
+    value_tex: Option<MapView>,
 }
 
 /// A colour plane with only the colours "similar" to a reference kept at full
 /// strength; the rest is a dim ghost of the same plane. Only the region that is
 /// connected to the reference survives (stray islands are dropped), and the view
 /// window re-centres and zooms on that region.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum GamutMap {
-    /// hue x value at the reference saturation; keeps similar OKLab lightness + chroma
-    Tone,
-    /// hue x saturation at the reference value; keeps small OKLab distance
+    /// OKLCH slice at the reference lightness: x = hue, y = chroma (for colouring)
+    Value,
+    /// OKLCH slice at the reference chroma: x = hue, y = lightness (for shading)
+    Chroma,
+    /// OKHSV hue x saturation at the reference value; keeps small OKLab distance
     Near,
 }
 
+/// Chroma shown at the top of the "same value" map.
+const MAX_C: f32 = 0.33;
+
 /// View window in plane coordinates: x = hue (unwrapped, may leave 0..1),
-/// y = 0 at the top (value/saturation 1) .. 1 at the bottom.
+/// y = 0 at the top .. 1 at the bottom.
 #[derive(Clone, Copy)]
 struct Win {
     x0: f32,
@@ -186,66 +192,59 @@ impl GamutMap {
     const W: usize = 132;
     const H: usize = 132;
 
-    /// Plane point -> OKHSV.
-    fn hsv(self, r: (f32, f32, f32), x: f32, y: f32) -> (f32, f32, f32) {
+    /// Colour at a plane point and whether it belongs to the matching set.
+    /// Out-of-gamut points return a clamped ghost colour and `false`.
+    fn eval(self, r: (f32, f32, f32), lch: (f32, f32, f32), x: f32, y: f32) -> (Color32, bool) {
         let h = x.rem_euclid(1.0);
         let t = (1.0 - y).clamp(0.0, 1.0);
         match self {
-            GamutMap::Tone => (h, r.1, t),
-            GamutMap::Near => (h, t, r.2),
-        }
-    }
-
-    /// OKHSV -> plane point, with hue unwrapped next to `xc`.
-    fn plane(self, xc: f32, h: f32, s: f32, v: f32) -> (f32, f32) {
-        let x = xc + ((h - xc + 0.5).rem_euclid(1.0) - 0.5);
-        match self {
-            GamutMap::Tone => (x, 1.0 - v),
-            GamutMap::Near => (x, 1.0 - s),
-        }
-    }
-
-    fn keeps(self, a: [f32; 3], c: (f32, f32, f32)) -> bool {
-        let b = crate::okhsv::to_oklab(c.0, c.1, c.2);
-        match self {
-            GamutMap::Tone => {
-                let ca = (a[1] * a[1] + a[2] * a[2]).sqrt();
-                let cb = (b[1] * b[1] + b[2] * b[2]).sqrt();
-                (a[0] - b[0]).abs() < 0.075 && (ca - cb).abs() < 0.05
-            }
+            GamutMap::Value => crate::okhsv::oklch(lch.0, t * MAX_C, h),
+            GamutMap::Chroma => crate::okhsv::oklch(t, lch.1, h),
             GamutMap::Near => {
+                let c = crate::okhsv::to_rgb(h, t, r.2);
+                let a = crate::okhsv::to_oklab(r.0, r.1, r.2);
+                let b = crate::okhsv::to_oklab(h, t, r.2);
                 let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < 0.12
+                (c, (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < 0.12)
             }
+        }
+    }
+
+    /// Plane position of an OKHSV colour, hue unwrapped next to `xc`.
+    fn plane(self, xc: f32, hsv: (f32, f32, f32)) -> (f32, f32) {
+        let (l, c, lh) = crate::okhsv::lch_of(crate::okhsv::to_rgb(hsv.0, hsv.1, hsv.2), hsv.0);
+        let hue = if self == GamutMap::Near { hsv.0 } else { lh };
+        let x = xc + ((hue - xc + 0.5).rem_euclid(1.0) - 0.5);
+        match self {
+            GamutMap::Value => (x, 1.0 - c / MAX_C),
+            GamutMap::Chroma => (x, 1.0 - l),
+            GamutMap::Near => (x, 1.0 - hsv.1),
         }
     }
 
     /// Samples `win` on a w x h grid and keeps only the 4-connected component
     /// that contains the reference point.
-    fn sample(self, r: (f32, f32, f32), win: Win, w: usize, h: usize) -> (Vec<(f32, f32, f32)>, Vec<bool>) {
-        let lab = crate::okhsv::to_oklab(r.0, r.1, r.2);
-        let mut hsv = Vec::with_capacity(w * h);
+    fn sample(self, r: (f32, f32, f32), win: Win, w: usize, h: usize) -> (Vec<Color32>, Vec<bool>) {
+        let lch = crate::okhsv::lch_of(crate::okhsv::to_rgb(r.0, r.1, r.2), r.0);
+        let mut cols = Vec::with_capacity(w * h);
         let mut raw = Vec::with_capacity(w * h);
         for j in 0..h {
             for i in 0..w {
                 let x = win.x0 + (i as f32 + 0.5) / w as f32 * (win.x1 - win.x0);
                 let y = win.y0 + (j as f32 + 0.5) / h as f32 * (win.y1 - win.y0);
-                let c = self.hsv(r, x, y);
-                raw.push(self.keeps(lab, c));
-                hsv.push(c);
+                let (c, k) = self.eval(r, lch, x, y);
+                cols.push(c);
+                raw.push(k);
             }
         }
-        let (rx, ry) = self.plane((win.x0 + win.x1) * 0.5, r.0, r.1, r.2);
+        let (rx, ry) = self.plane((win.x0 + win.x1) * 0.5, r);
         let ci = (((rx - win.x0) / (win.x1 - win.x0) * w as f32) as isize).clamp(0, w as isize - 1) as usize;
         let cj = (((ry - win.y0) / (win.y1 - win.y0) * h as f32) as isize).clamp(0, h as isize - 1) as usize;
         let mut keep = vec![false; w * h];
-        // seed at the reference, or the nearest kept cell if rounding missed it
-        let seed = (0..w * h)
-            .filter(|&k| raw[k])
-            .min_by_key(|&k| {
-                let (i, j) = ((k % w) as isize - ci as isize, (k / w) as isize - cj as isize);
-                i * i + j * j
-            });
+        let seed = (0..w * h).filter(|&k| raw[k]).min_by_key(|&k| {
+            let (i, j) = ((k % w) as isize - ci as isize, (k / w) as isize - cj as isize);
+            i * i + j * j
+        });
         let mut stack: Vec<usize> = seed.into_iter().collect();
         while let Some(k) = stack.pop() {
             if keep[k] || !raw[k] {
@@ -266,15 +265,15 @@ impl GamutMap {
                 stack.push(k + w);
             }
         }
-        (hsv, keep)
+        (cols, keep)
     }
 
     /// Window centred on the reference that frames its connected region.
     fn fit(self, r: (f32, f32, f32)) -> Win {
-        let full = Win { x0: r.0 - 0.5, x1: r.0 + 0.5, y0: 0.0, y1: 1.0 };
+        let (rx, ry) = self.plane(r.0, r);
+        let full = Win { x0: rx - 0.5, x1: rx + 0.5, y0: 0.0, y1: 1.0 };
         let (w, h) = (180, 90);
         let (_, keep) = self.sample(r, full, w, h);
-        let (rx, ry) = self.plane(r.0, r.0, r.1, r.2);
         let (mut dx, mut dy) = (0.0f32, 0.0f32);
         for (k, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
             let x = full.x0 + ((k % w) as f32 + 0.5) / w as f32;
@@ -282,8 +281,8 @@ impl GamutMap {
             dx = dx.max((x - rx).abs());
             dy = dy.max((y - ry).abs());
         }
-        let hx = (dx * 1.35 + 0.01).clamp(0.04, 0.5);
-        let hy = (dy * 1.35 + 0.01).clamp(0.08, 0.5);
+        let hx = (dx * 1.25 + 0.01).clamp(0.04, 0.5);
+        let hy = (dy * 1.25 + 0.01).clamp(0.08, 0.5);
         let (mut y0, mut y1) = (ry - hy, ry + hy);
         if y0 < 0.0 {
             y1 -= y0;
@@ -299,12 +298,11 @@ impl GamutMap {
     fn render(self, r: (f32, f32, f32)) -> (egui::ColorImage, Win, Vec<bool>) {
         let win = self.fit(r);
         let (w, h) = (Self::W, Self::H);
-        let (hsv, keep) = self.sample(r, win, w, h);
+        let (cols, keep) = self.sample(r, win, w, h);
         let ghost_bg = theme::PAPER_2;
         let px = (0..w * h)
             .map(|i| {
-                let (hh, ss, vv) = hsv[i];
-                let c = crate::okhsv::to_rgb(hh, ss, vv);
+                let c = cols[i];
                 if keep[i] {
                     let (x, y) = (i % w, i / w);
                     let edge = [(x > 0).then(|| i - 1), (x + 1 < w).then(|| i + 1), (y > 0).then(|| i - w), (y + 1 < h).then(|| i + w)]
@@ -317,6 +315,13 @@ impl GamutMap {
             })
             .collect();
         (egui::ColorImage::new([w, h], px), win, keep)
+    }
+
+    /// Colour picked at a plane point, as OKHSV.
+    fn pick(self, r: (f32, f32, f32), x: f32, y: f32) -> (f32, f32, f32) {
+        let lch = crate::okhsv::lch_of(crate::okhsv::to_rgb(r.0, r.1, r.2), r.0);
+        let (c, _) = self.eval(r, lch, x, y);
+        crate::okhsv::from_rgb(c, x.rem_euclid(1.0))
     }
 
     fn view(self, ctx: &egui::Context, slot: &mut Option<MapView>, key: (f32, f32, f32), name: &str) {
@@ -2600,6 +2605,7 @@ impl App {
             sub_down: false,
             strip_tex: None,
             patch_tex: None,
+            value_tex: None,
         });
     }
 
@@ -2635,8 +2641,12 @@ impl App {
             p.sub_center = (p.h, p.s, p.v);
         }
         let c = p.sub_center;
-        GamutMap::Tone.view(ctx, &mut p.strip_tex, c, "palette_tone");
-        GamutMap::Near.view(ctx, &mut p.patch_tex, c, "palette_near");
+        let show_near = crate::glass::palette_near();
+        GamutMap::Value.view(ctx, &mut p.value_tex, c, "palette_value");
+        GamutMap::Chroma.view(ctx, &mut p.strip_tex, c, "palette_chroma");
+        if show_near {
+            GamutMap::Near.view(ctx, &mut p.patch_tex, c, "palette_near");
+        }
         let mut sub_down = false;
         let screen = ctx.content_rect();
         let est = vec2(820.0, 300.0);
@@ -2699,6 +2709,11 @@ impl App {
                         ui.add_space(SPACE_SM);
                         ui.label(egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).monospace().color(INK_2));
                     });
+                    let mut near = show_near;
+                    if ui.checkbox(&mut near, egui::RichText::new("비슷한 색 지도").size(theme::TEXT_SMALL).color(INK_2)).changed() {
+                        crate::glass::set_palette_near(near);
+                        crate::glass::save_settings();
+                    }
                     if !recent.is_empty() {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -2715,10 +2730,14 @@ impl App {
                 // Similar-colour maps: dim gamut ghost + the connected matching region,
                 // re-centred and zoomed on it. The reference freezes while dragging.
                 let center = p.sub_center;
-                for (title, view, which, tip) in [
-                    ("같은 밝기·채도", p.strip_tex.as_ref().unwrap(), GamutMap::Tone, "가로: 색상 · 세로: 명도 (채도 고정)"),
-                    ("비슷한 색", p.patch_tex.as_ref().unwrap(), GamutMap::Near, "가로: 색상 · 세로: 채도 (명도 고정)"),
-                ] {
+                let mut maps = vec![
+                    ("같은 명도 · 채색", p.value_tex.as_ref().unwrap(), GamutMap::Value, "밝기 고정 · 가로: 색상 · 세로: 채도"),
+                    ("같은 채도 · 명암", p.strip_tex.as_ref().unwrap(), GamutMap::Chroma, "채도 고정 · 가로: 색상 · 세로: 밝기"),
+                ];
+                if show_near {
+                    maps.push(("비슷한 색", p.patch_tex.as_ref().unwrap(), GamutMap::Near, "색 거리가 가까운 색 · 가로: 색상 · 세로: 채도"));
+                }
+                for (title, view, which, tip) in maps {
                     theme::glass(ui, egui::Margin::same(10), theme::RADIUS_CARD, |ui| ui.vertical(|ui| {
                         ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(INK_3)).on_hover_text(tip);
                         let side = SQ + 30.0;
@@ -2734,11 +2753,11 @@ impl App {
                                 if view.mask.get(k).copied().unwrap_or(false) {
                                     let x = win.x0 + u * (win.x1 - win.x0);
                                     let y = win.y0 + v * (win.y1 - win.y0);
-                                    picked = Some(which.hsv(center, x, y));
+                                    picked = Some(which.pick(center, x, y));
                                 }
                             }
                         }
-                        let (px, py) = which.plane((win.x0 + win.x1) * 0.5, p.h, p.s, p.v);
+                        let (px, py) = which.plane((win.x0 + win.x1) * 0.5, (p.h, p.s, p.v));
                         let m = pos2(
                             r.left() + (px - win.x0) / (win.x1 - win.x0) * r.width(),
                             r.top() + (py - win.y0) / (win.y1 - win.y0) * r.height(),

@@ -148,6 +148,27 @@ pub fn to_oklab(h: f32, s: f32, v: f32) -> [f32; 3] {
     lin_to_oklab(f(r), f(g), f(b))
 }
 
+/// OKLCH (hue 0..1) to sRGB; the bool says whether it was inside the gamut.
+/// Out-of-gamut colours come back clamped.
+pub fn oklch(l: f32, c: f32, h: f32) -> (Color32, bool) {
+    let a = c * (std::f32::consts::TAU * h).cos();
+    let b = c * (std::f32::consts::TAU * h).sin();
+    let rgb = oklab_to_lin(l, a, b);
+    let inside = rgb.iter().all(|v| (-0.0005..=1.0005).contains(v));
+    let u = |x: f32| (linear_to_srgb(x.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    (Color32::from_rgb(u(rgb[0]), u(rgb[1]), u(rgb[2])), inside)
+}
+
+/// OKLab lightness, chroma and hue (0..1); greys keep `hue_hint`.
+pub fn lch_of(c: Color32, hue_hint: f32) -> (f32, f32, f32) {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    let f = |x: u8| srgb_to_linear(x as f32 / 255.0);
+    let lab = lin_to_oklab(f(r), f(g), f(b));
+    let chroma = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+    let h = if chroma < 1e-4 { hue_hint } else { (lab[2].atan2(lab[1]) / std::f32::consts::TAU).rem_euclid(1.0) };
+    (lab[0], chroma, h)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
