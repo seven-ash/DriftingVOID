@@ -412,6 +412,8 @@ pub struct App {
     fonts_applied: bool,
     frames: u64,
     rail_active: Option<Rect>,
+    /// Tool indicator glide: (from y, to y, start time).
+    ind_anim: (f32, f32, f64),
     extra_sel: Vec<LayerId>,
     pan_latch: bool,
     middle_moved: bool,
@@ -465,6 +467,7 @@ impl App {
             fonts_applied: false,
             frames: 0,
             rail_active: None,
+            ind_anim: (f32::NAN, f32::NAN, 0.0),
             extra_sel: Vec::new(),
             pan_latch: false,
             middle_moved: false,
@@ -3012,9 +3015,27 @@ impl App {
     }
 
     /// Amber "selected tool" block in the overlay layer under the tool rail's glass.
-    fn draw_rail_indicator(&self, ctx: &egui::Context, painter: &egui::Painter) {
+    fn draw_rail_indicator(&mut self, ctx: &egui::Context, painter: &egui::Painter) {
         let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
-        let y = ctx.animate_value_with_time(egui::Id::new("rail_indicator_y"), r.center().y, 0.07);
+        // eased glide (cubic in/out) from wherever it currently is to the active tool
+        const DUR: f64 = 0.14;
+        let now = ctx.input(|i| i.time);
+        let target = r.center().y;
+        let (from, to, t0) = self.ind_anim;
+        let cur = |t: f64| {
+            let k = ((t - t0) / DUR).clamp(0.0, 1.0) as f32;
+            from + (to - from) * egui::emath::easing::cubic_in_out(k)
+        };
+        if to.is_nan() || (to - target).abs() > 0.01 {
+            let start = if to.is_nan() { target } else { cur(now) };
+            self.ind_anim = (start, target, now);
+        }
+        let (from, to, t0) = self.ind_anim;
+        let k = ((now - t0) / DUR).clamp(0.0, 1.0) as f32;
+        let y = from + (to - from) * egui::emath::easing::cubic_in_out(k);
+        if k < 1.0 {
+            ctx.request_repaint();
+        }
         let c = pos2(r.center().x, y);
         // softer than a solid chip: half-strength amber, the glass spreads it
         painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT.gamma_multiply(0.5));
