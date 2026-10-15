@@ -2462,6 +2462,28 @@ impl App {
         match self.tool {
             Tool::Brush => {
                 ui.strong("브러시");
+                // presets: (name, size, opacity, hardness, pressure->size, pressure->opacity, smoothing)
+                const PRESETS: [(&str, f32, f32, f32, bool, bool, f32); 5] = [
+                    ("연필", 3.0, 0.9, 0.95, true, false, 0.2),
+                    ("펜촉", 6.0, 1.0, 1.0, true, false, 0.45),
+                    ("마커", 18.0, 0.55, 0.7, false, false, 0.3),
+                    ("에어브러시", 60.0, 0.25, 0.0, false, true, 0.2),
+                    ("수채", 34.0, 0.4, 0.2, true, true, 0.35),
+                ];
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for (name, size, op, hard, ps, po, sm) in PRESETS {
+                        let on = (s.brush_size - size).abs() < 0.01 && (s.brush_opacity - op).abs() < 0.01 && (s.brush_hardness - hard).abs() < 0.01;
+                        if ui.selectable_label(on, name).clicked() {
+                            s.brush_size = size;
+                            s.brush_opacity = op;
+                            s.brush_hardness = hard;
+                            s.brush_pressure_size = ps;
+                            s.brush_pressure_opacity = po;
+                            s.smoothing = sm;
+                        }
+                    }
+                });
                 ui.add(egui::Slider::new(&mut s.brush_size, 1.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
                 ui.add(egui::Slider::new(&mut s.brush_opacity, 0.05..=1.0).custom_parser(crate::calc::parse).text("불투명도"));
                 ui.add(egui::Slider::new(&mut s.brush_hardness, 0.0..=1.0).custom_parser(crate::calc::parse).text("경도"));
