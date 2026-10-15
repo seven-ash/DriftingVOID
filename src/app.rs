@@ -730,6 +730,10 @@ impl App {
             app.editing = Some(id);
             app.edit_focus = true;
         }
+        if std::env::var_os("DV_SELECT_PHOTO").is_some() {
+            // selects the first photo (for screenshots of its properties)
+            app.sel = app.doc.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))).map(|l| l.id);
+        }
         if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
             app.pending = Some(Pending::New);
         }

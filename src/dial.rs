@@ -47,6 +47,14 @@ impl<'a> Dial<'a> {
 const TICK_PX: f32 = 7.0;
 const TICKS_PER_RANGE: f32 = 60.0;
 
+/// Nearest 1-2-5 × 10^n step to `x`.
+fn nice_step(x: f32) -> f32 {
+    let e = 10f32.powf(x.max(1e-9).log10().floor());
+    let m = x / e;
+    let n = if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 };
+    n * e
+}
+
 /// Small "reset" glyph: an open circular arrow.
 fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
     let r = 5.0;
@@ -100,7 +108,13 @@ impl Widget for Dial<'_> {
                 if resp.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
                     if scroll != 0.0 {
-                        u = (u + scroll.signum() * dt).clamp(ulo, uhi);
+                        // one tick per notch, snapped onto the tick grid when linear
+                        u = if log {
+                            (u + scroll.signum() * dt).clamp(ulo, uhi)
+                        } else {
+                            let st = nice_step(dt);
+                            (((u / st).round() + scroll.signum()) * st).clamp(ulo, uhi)
+                        };
                     }
                 }
                 let nv = from_u(u).clamp(lo, hi);
@@ -111,24 +125,51 @@ impl Widget for Dial<'_> {
                 // ticks on a cylinder: angle per tick so neighbours are TICK_PX apart at
                 // the centre, x = R·sin(angle), fading towards the sides
                 let radius = r.width() * 0.5;
+                // pixels per unit stay TICK_PX/dt so the ticks follow the pointer 1:1
                 let ang_per_u = TICK_PX / radius / dt;
-                let first = ((u - 1.6 / ang_per_u - ulo) / dt).floor() as i64;
-                let last = ((u + 1.6 / ang_per_u - ulo) / dt).ceil() as i64;
-                for k in first.max(0)..=last.min(TICKS_PER_RANGE.round() as i64) {
-                    let tu = ulo + k as f32 * dt;
-                    let a = (tu - u) * ang_per_u;
+                let (vis_lo, vis_hi) = (u - 1.55 / ang_per_u, u + 1.55 / ang_per_u);
+                // ticks sit on "nice" values so defaults (0, 1, 100 %...) land on major
+                // ticks: 1-2-5 steps from 0 (linear), or m·10^n like a log ruler
+                let mut ticks: Vec<(f32, u8)> = Vec::new(); // (value, 0 minor / 1 mid / 2 major)
+                if log {
+                    let (a, b) = (from_u(vis_lo).max(lo), from_u(vis_hi).min(hi));
+                    for e in a.log10().floor() as i32..=b.log10().ceil() as i32 {
+                        let base = 10f32.powi(e);
+                        for m in 1..=9 {
+                            let t = m as f32 * base;
+                            if t >= lo - 1e-6 && t <= hi + 1e-6 && t >= a * 0.999 && t <= b * 1.001 {
+                                ticks.push((t, if m == 1 { 2 } else if m == 2 || m == 5 { 1 } else { 0 }));
+                            }
+                        }
+                    }
+                } else {
+                    let step = nice_step(dt);
+                    let (k0, k1) = ((vis_lo.max(lo) / step).floor() as i64, (vis_hi.min(hi) / step).ceil() as i64);
+                    for k in k0..=k1 {
+                        let t = k as f32 * step;
+                        if t >= lo - step * 1e-3 && t <= hi + step * 1e-3 {
+                            ticks.push((t, if k % 5 == 0 { 2 } else { 0 }));
+                        }
+                    }
+                }
+                let y = r.center().y;
+                let draw = |t: f32, kind: u8, end: bool| {
+                    let a = (to_u(t) - u) * ang_per_u;
                     if a.abs() > 1.5 {
-                        continue;
+                        return;
                     }
                     let x = r.center().x + radius * a.sin();
                     let fade = a.cos().powf(1.6);
-                    let major = k % 5 == 0;
-                    let end = k == 0 || k == TICKS_PER_RANGE.round() as i64;
-                    let h = if end { r.height() * 0.62 } else if major { r.height() * 0.46 } else { r.height() * 0.26 };
-                    let col = (if end { INK_2 } else if major { INK_3.gamma_multiply(1.6) } else { INK_3 }).gamma_multiply(fade);
-                    let y = r.center().y;
-                    p.line_segment([pos2(x, y - h * 0.5), pos2(x, y + h * 0.5)], Stroke::new(if major || end { 1.3 } else { 1.0 }, col));
+                    let h = r.height() * if end { 0.62 } else { [0.26, 0.36, 0.46][kind as usize] };
+                    let col = (if end { INK_2 } else if kind == 2 { INK_3.gamma_multiply(1.6) } else { INK_3 }).gamma_multiply(fade);
+                    p.line_segment([pos2(x, y - h * 0.5), pos2(x, y + h * 0.5)], Stroke::new(if kind > 0 || end { 1.3 } else { 1.0 }, col));
+                };
+                for (t, kind) in ticks {
+                    draw(t, kind, false);
                 }
+                // the real limits get end stops
+                draw(lo, 2, true);
+                draw(hi, 2, true);
                 // fixed index line
                 let cx = r.center().x;
                 p.line_segment([pos2(cx, r.top() + 2.0), pos2(cx, r.bottom() - 2.0)], Stroke::new(2.0, ACCENT));
