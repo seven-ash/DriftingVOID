@@ -1534,10 +1534,15 @@ impl App {
                     let a0 = (*start - c).y.atan2((*start - c).x);
                     let a1 = (w - c).y.atan2((w - c).x);
                     th = a1 - a0;
-                    if mods.shift {
-                        let step = 15f32.to_radians();
-                        th = (th / step).round() * step;
-                    }
+                    // absolute snapping is measured on the first photo's angle, if any
+                    let base = origs
+                        .iter()
+                        .find_map(|(l, _)| match &l.kind {
+                            LayerKind::Image(im) => Some(im.rotation),
+                            _ => None,
+                        })
+                        .unwrap_or(0.0);
+                    th = snap_angle(base + th, base, mods) - base;
                 } else {
                     s = ((w - c).length() / (*start - c).length().max(1e-3)).max(0.02);
                     if mods.shift {
@@ -1611,10 +1616,7 @@ impl App {
             Drag::Rotate { id, orig } => {
                 let d = w - orig.center;
                 let mut a = d.y.atan2(d.x) + std::f32::consts::FRAC_PI_2;
-                if mods.shift {
-                    let step = 15f32.to_radians();
-                    a = (a / step).round() * step;
-                }
+                a = snap_angle(a, orig.rotation, mods);
                 let id = *id;
                 if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                     im.rotation = a;
@@ -3799,6 +3801,19 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
         }
     }
     l
+}
+
+/// Rotation snapping in 15° steps: Shift/Ctrl relative to where the drag started
+/// (`start`), Alt relative to 0°.
+fn snap_angle(a: f32, start: f32, mods: Modifiers) -> f32 {
+    let step = 15f32.to_radians();
+    if mods.alt {
+        (a / step).round() * step
+    } else if mods.shift || mods.ctrl {
+        start + ((a - start) / step).round() * step
+    } else {
+        a
+    }
 }
 
 fn handle_box(painter: &egui::Painter, p: Pos2, c: Color32) {
