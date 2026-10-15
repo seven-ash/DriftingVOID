@@ -3017,14 +3017,14 @@ impl App {
     /// Amber "selected tool" block in the overlay layer under the tool rail's glass.
     fn draw_rail_indicator(&mut self, ctx: &egui::Context, painter: &egui::Painter) {
         let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
-        // eased glide (cubic in/out) from wherever it currently is to the active tool
-        const DUR: f64 = 0.14;
+        // eased glide (quadratic in/out) from wherever it currently is to the active tool
+        const DUR: f64 = 0.08;
         let now = ctx.input(|i| i.time);
         let target = r.center().y;
         let (from, to, t0) = self.ind_anim;
         let cur = |t: f64| {
             let k = ((t - t0) / DUR).clamp(0.0, 1.0) as f32;
-            from + (to - from) * egui::emath::easing::cubic_in_out(k)
+            from + (to - from) * egui::emath::easing::quadratic_in_out(k)
         };
         if to.is_nan() || (to - target).abs() > 0.01 {
             let start = if to.is_nan() { target } else { cur(now) };
@@ -3032,7 +3032,7 @@ impl App {
         }
         let (from, to, t0) = self.ind_anim;
         let k = ((now - t0) / DUR).clamp(0.0, 1.0) as f32;
-        let y = from + (to - from) * egui::emath::easing::cubic_in_out(k);
+        let y = from + (to - from) * egui::emath::easing::quadratic_in_out(k);
         if k < 1.0 {
             ctx.request_repaint();
         }
