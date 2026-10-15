@@ -70,6 +70,8 @@ pub struct Settings {
     pub brush_hardness: f32,
     pub brush_pressure_size: bool,
     pub brush_pressure_opacity: bool,
+    /// Last picked brush preset (its values are the reset defaults); empty = none.
+    pub brush_preset: String,
     pub pen_size: f32,
     pub pen_pressure: bool,
     pub eraser_size: f32,
@@ -95,6 +97,7 @@ impl Default for Settings {
             brush_hardness: 0.8,
             brush_pressure_size: true,
             brush_pressure_opacity: false,
+            brush_preset: String::new(),
             pen_size: 4.0,
             pen_pressure: true,
             eraser_size: 30.0,
@@ -2813,8 +2816,8 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                     for (name, size, op, hard, ps, po, sm) in PRESETS {
-                        let on = (s.brush_size - size).abs() < 0.01 && (s.brush_opacity - op).abs() < 0.01 && (s.brush_hardness - hard).abs() < 0.01;
-                        if ui.selectable_label(on, name).clicked() {
+                        if ui.selectable_label(s.brush_preset == name, name).clicked() {
+                            s.brush_preset = name.to_string();
                             s.brush_size = size;
                             s.brush_opacity = op;
                             s.brush_hardness = hard;
@@ -2824,12 +2827,19 @@ impl App {
                         }
                     }
                 });
-                ui.add(crate::dial::Dial::new(&mut s.brush_size, 1.0..=400.0).step(2.0).text("크기"));
-                ui.add(crate::dial::Dial::new(&mut s.brush_opacity, 0.05..=1.0).text("불투명도").default(1.0));
-                ui.add(crate::dial::Dial::new(&mut s.brush_hardness, 0.0..=1.0).text("경도"));
+                // reset targets: the picked preset's values, else the app defaults
+                let base = Settings::default();
+                let (d_size, d_op, d_hard, d_sm) = PRESETS
+                    .iter()
+                    .find(|p| p.0 == s.brush_preset)
+                    .map(|p| (p.1, p.2, p.3, p.6))
+                    .unwrap_or((base.brush_size, base.brush_opacity, base.brush_hardness, base.smoothing));
+                ui.add(crate::dial::Dial::new(&mut s.brush_size, 1.0..=400.0).step(2.0).text("크기").default(d_size));
+                ui.add(crate::dial::Dial::new(&mut s.brush_opacity, 0.05..=1.0).text("불투명도").default(d_op));
+                ui.add(crate::dial::Dial::new(&mut s.brush_hardness, 0.0..=1.0).text("경도").default(d_hard));
                 ui.checkbox(&mut s.brush_pressure_size, "필압 → 크기");
                 ui.checkbox(&mut s.brush_pressure_opacity, "필압 → 농도");
-                ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
+                ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정").default(d_sm));
                 ui.small("Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기");
             }
             Tool::Pen => {

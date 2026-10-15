@@ -15,11 +15,12 @@ pub struct Dial<'a> {
     text: String,
     suffix: String,
     default: Option<f32>,
+    integer: bool,
 }
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -36,6 +37,12 @@ impl<'a> Dial<'a> {
 
     pub fn suffix(mut self, s: impl Into<String>) -> Self {
         self.suffix = s.into();
+        self
+    }
+
+    /// Writes whole numbers only; the ring still turns smoothly underneath.
+    pub fn integer(mut self) -> Self {
+        self.integer = true;
         self
     }
 
@@ -57,6 +64,19 @@ fn nice_step(x: f32) -> f32 {
     n * e
 }
 
+/// The 1-2-5 step one below `x` (5 -> 2 -> 1 -> 0.5 ...).
+fn nice_down(x: f32) -> f32 {
+    let e = 10f32.powf(x.max(1e-9).log10().floor());
+    let m = (x / e).round();
+    if m >= 10.0 { 5.0 * e } else if m >= 5.0 { 2.0 * e } else if m >= 2.0 { e } else { 0.5 * e }
+}
+
+/// Is `v` a whole multiple of `m`?
+fn on_grid(v: f32, m: f32) -> bool {
+    let k = v / m;
+    (k - k.round()).abs() < 1e-3
+}
+
 /// Small "reset" glyph: an open circular arrow.
 fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
     let r = 5.0;
@@ -76,13 +96,30 @@ fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
 
 impl Widget for Dial<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let Dial { value, range, step, text, suffix, default } = self;
+        let Dial { value, range, step, text, suffix, default, integer } = self;
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
-        // value per tick; the ring moves TICK_PX per step so ticks track the pointer
-        let dt = step.unwrap_or_else(|| nice_step(span / TICKS_PER_RANGE));
-        // ticks are counted from the default (else 0) so it sits on a major tick
-        let anchor = default.unwrap_or(0.0);
+        // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
+        // An automatic step is refined (1-2-5 down) until the default lands on a
+        // major tick of the zero-based grid, e.g. 0..400 with default 20 -> 2/tick.
+        let dt = step.unwrap_or_else(|| {
+            let mut st = nice_step(span / TICKS_PER_RANGE);
+            if let Some(d) = default {
+                for _ in 0..4 {
+                    if on_grid(d, st * 5.0) {
+                        break;
+                    }
+                    st = nice_down(st);
+                }
+            }
+            if integer { st.max(1.0) } else { st }
+        });
+        // ticks count from 0 so majors fall on round values; only when the default
+        // is off that grid do they count from the default instead
+        let anchor = match default {
+            Some(d) if !on_grid(d, dt * 5.0) => d,
+            _ => 0.0,
+        };
         let before = *value;
 
         let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
@@ -102,7 +139,18 @@ impl Widget for Dial<'_> {
 
                 // ---- the ring
                 let (r, resp) = ui.allocate_exact_size(vec2(ring_w, row_h - 4.0), Sense::click_and_drag());
+                // while dragging, keep turning from the unrounded position as long as
+                // nobody else changed the value (integer dials and callers that
+                // round would otherwise eat sub-step motion and stutter)
+                let mem = resp.id.with("raw");
                 let mut u = value.clamp(lo, hi);
+                if resp.dragged() {
+                    if let Some((raw, wrote)) = ui.data(|d| d.get_temp::<(f32, f32)>(mem)) {
+                        if (wrote - *value).abs() <= dt * 1e-3 {
+                            u = raw;
+                        }
+                    }
+                }
                 let mut moved = false;
                 if resp.dragged() && resp.drag_delta().x != 0.0 {
                     moved = true;
@@ -117,10 +165,13 @@ impl Widget for Dial<'_> {
                         u = (anchor + (((u - anchor) / dt).round() + scroll.signum()) * dt).clamp(lo, hi);
                     }
                 }
-                let nv = u;
+                let nv = if integer { u.round().clamp(lo, hi) } else { u };
                 // only a real drag or scroll writes, so hovering never nudges the value
                 if moved && (nv - *value).abs() > f32::EPSILON {
                     *value = nv;
+                }
+                if resp.dragged() {
+                    ui.data_mut(|d| d.insert_temp(mem, (u, *value)));
                 }
                 let p = ui.painter().with_clip_rect(r);
                 // ticks on a cylinder: angle per tick so neighbours are TICK_PX apart at
@@ -204,7 +255,7 @@ impl Widget for Dial<'_> {
 /// Integer convenience for u8 settings (e.g. JPEG quality).
 pub fn dial_u8(ui: &mut Ui, v: &mut u8, range: RangeInclusive<u8>, text: &str) -> Response {
     let mut f = *v as f32;
-    let r = ui.add(Dial::new(&mut f, *range.start() as f32..=*range.end() as f32).text(text));
+    let r = ui.add(Dial::new(&mut f, *range.start() as f32..=*range.end() as f32).integer().text(text));
     *v = f.round().clamp(*range.start() as f32, *range.end() as f32) as u8;
     r
 }
