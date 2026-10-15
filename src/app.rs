@@ -1155,6 +1155,105 @@ impl App {
         }
     }
 
+    /// Align / distribute buttons for a multi-selection.
+    fn align_bar(&mut self, ui: &mut egui::Ui) {
+        let mut act = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            for (i, (label, tip)) in [
+                ("왼쪽", "왼쪽 맞춤"),
+                ("가로 중앙", "가로 가운데 맞춤"),
+                ("오른쪽", "오른쪽 맞춤"),
+                ("위", "위쪽 맞춤"),
+                ("세로 중앙", "세로 가운데 맞춤"),
+                ("아래", "아래쪽 맞춤"),
+                ("가로 간격", "가로 간격 같게 (양 끝 고정)"),
+                ("세로 간격", "세로 간격 같게 (양 끝 고정)"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if ui.add(egui::Button::new(label).small()).on_hover_text(tip).clicked() {
+                    act = Some(i);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        if let Some(a) = act {
+            self.align(a);
+        }
+    }
+
+    /// 0..5: align left / h-centre / right / top / v-centre / bottom,
+    /// 6: distribute horizontally, 7: vertically (by centres, ends fixed).
+    fn align(&mut self, mode: usize) {
+        let parts = self.sel_parts();
+        let bounds = |(l, part): &(Layer, Part)| -> Option<Rect> {
+            match part {
+                Part::Whole => l.bounds(),
+                Part::Strokes(idx) => match &l.kind {
+                    LayerKind::Vector(v) => idx.iter().filter_map(|&i| v.strokes.get(i)).map(|s| s.bounds.translate(v.offset)).reduce(|a, b| a.union(b)),
+                    _ => None,
+                },
+                Part::Pixels(rs) => rs.iter().copied().reduce(|a, b| a.union(b)),
+            }
+        };
+        let items: Vec<(usize, Rect)> = parts.iter().enumerate().filter_map(|(i, p)| bounds(p).map(|b| (i, b))).collect();
+        if items.len() < 2 {
+            return;
+        }
+        let all = items.iter().map(|x| x.1).reduce(|a, b| a.union(b)).unwrap();
+        let mut moves: Vec<(usize, Vec2)> = Vec::new();
+        match mode {
+            0..=5 => {
+                for &(i, b) in &items {
+                    let d = match mode {
+                        0 => vec2(all.min.x - b.min.x, 0.0),
+                        1 => vec2(all.center().x - b.center().x, 0.0),
+                        2 => vec2(all.max.x - b.max.x, 0.0),
+                        3 => vec2(0.0, all.min.y - b.min.y),
+                        4 => vec2(0.0, all.center().y - b.center().y),
+                        _ => vec2(0.0, all.max.y - b.max.y),
+                    };
+                    moves.push((i, d));
+                }
+            }
+            _ => {
+                let horiz = mode == 6;
+                let mut sorted = items.clone();
+                sorted.sort_by(|a, b| {
+                    let (ka, kb) = if horiz { (a.1.center().x, b.1.center().x) } else { (a.1.center().y, b.1.center().y) };
+                    ka.partial_cmp(&kb).unwrap()
+                });
+                let (first, last) = (sorted[0].1.center(), sorted[sorted.len() - 1].1.center());
+                let n = (sorted.len() - 1) as f32;
+                for (k, &(i, b)) in sorted.iter().enumerate() {
+                    let t = k as f32 / n;
+                    let target = first + (last - first) * t;
+                    let d = if horiz { vec2(target.x - b.center().x, 0.0) } else { vec2(0.0, target.y - b.center().y) };
+                    moves.push((i, d));
+                }
+            }
+        }
+        for (i, d) in moves {
+            let (o, part) = &parts[i];
+            // whole layers of one id may appear once; strokes/pixels each once
+            let cur = self.doc.get(o.id).cloned().unwrap_or_else(|| o.clone());
+            let l = apply_part(&cur, part, Pos2::ZERO, 1.0, 0.0, d);
+            if let Some(ix) = self.doc.index_of(l.id) {
+                self.doc.layers[ix] = l;
+            }
+            if let Part::Pixels(_) = part {
+                if let Some(e) = self.sub.pixels.iter_mut().find(|x| x.0 == o.id) {
+                    for r in e.1.iter_mut() {
+                        *r = r.translate(d.round());
+                    }
+                }
+            }
+        }
+        self.mark();
+    }
+
     fn drop_stale_ime(&self, ctx: &egui::Context) {
         if self.now < self.ime_guard_until {
             ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Ime(_))));
@@ -2676,6 +2775,9 @@ impl App {
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
+        if self.sel_parts().len() >= 2 {
+            self.align_bar(ui);
+        }
         let Some(id) = self.sel else {
             if self.sub.is_empty() {
                 ui.weak("선택된 레이어 없음");
