@@ -508,6 +508,8 @@ pub struct App {
     frames: u64,
     rail_active: Option<Rect>,
     space_held: bool,
+    now: f64,
+    ime_guard_until: f64,
     /// Tool indicator glide: (from y, to y, start time).
     ind_anim: (f32, f32, f64),
     extra_sel: Vec<LayerId>,
@@ -565,6 +567,8 @@ impl App {
             frames: 0,
             rail_active: None,
             space_held: false,
+            now: 0.0,
+            ime_guard_until: 0.0,
             ind_anim: (f32::NAN, f32::NAN, 0.0),
             extra_sel: Vec::new(),
             sub: SubSel::default(),
@@ -1098,8 +1102,18 @@ impl App {
         None
     }
 
+    fn drop_stale_ime(&self, ctx: &egui::Context) {
+        if self.now < self.ime_guard_until {
+            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Ime(_))));
+        }
+    }
+
     fn finish_text_edit(&mut self) {
         if let Some(id) = self.editing.take() {
+            // The Korean IME commits the syllable it was still composing *after* focus
+            // moves; egui already put that syllable into this box as preedit, so drop
+            // IME events briefly instead of letting them land in the next text box.
+            self.ime_guard_until = self.now + 0.25;
             let empty = matches!(self.doc.get(id).map(|l| &l.kind), Some(LayerKind::Text(t)) if t.text.trim().is_empty());
             if empty {
                 if let Some(i) = self.doc.index_of(id) {
@@ -3505,6 +3519,7 @@ impl App {
             .order(egui::Order::Background)
             .constrain(false)
             .show(ctx, |ui| {
+                self.drop_stale_ime(ui.ctx());
                 let te = egui::TextEdit::multiline(&mut text)
                     .font(font)
                     .text_color(t.color)
@@ -3871,6 +3886,8 @@ fn shape_hit(s: &ShapeLayer, w: Pos2, tol: f32) -> bool {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.now = ctx.input(|i| i.time);
+        self.drop_stale_ime(&ctx);
 
         // swap in the nicer UI face once the system font scan lands
         if !self.fonts_applied && crate::fontdb::families().is_some() {
