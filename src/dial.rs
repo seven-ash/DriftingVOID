@@ -101,24 +101,26 @@ impl Widget for Dial<'_> {
                 // ---- the ring
                 let (r, resp) = ui.allocate_exact_size(vec2(ring_w, row_h - 4.0), Sense::click_and_drag());
                 let mut u = to_u(*value).clamp(ulo, uhi);
-                if resp.dragged() {
+                let mut moved = false;
+                if resp.dragged() && resp.drag_delta().x != 0.0 {
+                    moved = true;
                     let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
                     u = (u - resp.drag_delta().x / TICK_PX * dt * fine).clamp(ulo, uhi);
                 }
                 if resp.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
                     if scroll != 0.0 {
+                        moved = true;
                         // one tick per notch, snapped onto the tick grid when linear
-                        u = if log {
-                            (u + scroll.signum() * dt).clamp(ulo, uhi)
-                        } else {
-                            let st = nice_step(dt);
-                            (((u / st).round() + scroll.signum()) * st).clamp(ulo, uhi)
-                        };
+                        let st = if log { dt } else { nice_step(dt) };
+                        let anchor = to_u(default.unwrap_or(if log { 1.0 } else { 0.0 }));
+                        u = (anchor + (((u - anchor) / st).round() + scroll.signum()) * st).clamp(ulo, uhi);
                     }
                 }
                 let nv = from_u(u).clamp(lo, hi);
-                if (nv - *value).abs() > f32::EPSILON && (resp.dragged() || resp.hovered()) {
+                // only a real drag or scroll writes, so hovering never nudges the value
+                // (a log round trip is not exact)
+                if moved && (nv - *value).abs() > f32::EPSILON {
                     *value = nv;
                 }
                 let p = ui.painter().with_clip_rect(r);
@@ -128,28 +130,17 @@ impl Widget for Dial<'_> {
                 // pixels per unit stay TICK_PX/dt so the ticks follow the pointer 1:1
                 let ang_per_u = TICK_PX / radius / dt;
                 let (vis_lo, vis_hi) = (u - 1.55 / ang_per_u, u + 1.55 / ang_per_u);
-                // ticks sit on "nice" values so defaults (0, 1, 100 %...) land on major
-                // ticks: 1-2-5 steps from 0 (linear), or m·10^n like a log ruler
-                let mut ticks: Vec<(f32, u8)> = Vec::new(); // (value, 0 minor / 1 mid / 2 major)
-                if log {
-                    let (a, b) = (from_u(vis_lo).max(lo), from_u(vis_hi).min(hi));
-                    for e in a.log10().floor() as i32..=b.log10().ceil() as i32 {
-                        let base = 10f32.powi(e);
-                        for m in 1..=9 {
-                            let t = m as f32 * base;
-                            if t >= lo - 1e-6 && t <= hi + 1e-6 && t >= a * 0.999 && t <= b * 1.001 {
-                                ticks.push((t, if m == 1 { 2 } else if m == 2 || m == 5 { 1 } else { 0 }));
-                            }
-                        }
-                    }
-                } else {
-                    let step = nice_step(dt);
-                    let (k0, k1) = ((vis_lo.max(lo) / step).floor() as i64, (vis_hi.min(hi) / step).ceil() as i64);
-                    for k in k0..=k1 {
-                        let t = k as f32 * step;
-                        if t >= lo - step * 1e-3 && t <= hi + step * 1e-3 {
-                            ticks.push((t, if k % 5 == 0 { 2 } else { 0 }));
-                        }
+                // evenly spaced ticks, major every 5 (....|....|), anchored on the default
+                // (else 0, or 1 on log dials) so the default sits on a major tick; the
+                // range start may fall anywhere between ticks
+                let step = if log { dt } else { nice_step(dt) };
+                let anchor = to_u(default.unwrap_or(if log { 1.0 } else { 0.0 }));
+                let mut ticks: Vec<(f32, u8)> = Vec::new(); // (value, 0 minor / 2 major)
+                let (k0, k1) = (((vis_lo.max(ulo) - anchor) / step).floor() as i64, ((vis_hi.min(uhi) - anchor) / step).ceil() as i64);
+                for k in k0..=k1 {
+                    let tu = anchor + k as f32 * step;
+                    if tu >= ulo - step * 1e-3 && tu <= uhi + step * 1e-3 {
+                        ticks.push((from_u(tu), if k.rem_euclid(5) == 0 { 2 } else { 0 }));
                     }
                 }
                 let y = r.center().y;
