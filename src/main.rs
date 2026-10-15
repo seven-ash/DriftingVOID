@@ -45,10 +45,17 @@ fn main() -> eframe::Result {
             .with_title("Drifting VOID")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([700.0, 450.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(window_icon()),
         multisampling: 4,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native("Drifting VOID", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))))
+}
+
+fn window_icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon-256.png")).expect("bundled icon").to_rgba8();
+    let (w, h) = img.dimensions();
+    egui::IconData { rgba: img.into_raw(), width: w, height: h }
 }

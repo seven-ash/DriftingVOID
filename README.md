@@ -67,4 +67,6 @@ when empty. Photos are placed under drawing layers.
 | `src/io.rs` | Image import and `.void` save/load |
 | `docs/ROADMAP.md` | Planned work and known issues |
 | `docs/CHANGELOG.md` | What shipped, per version |
-| `assets/icon-candidates/` | App icon candidates (`preview.html` shows them all) |
+| `assets/icon.svg`, `icon.ico`, `icon-256.png` | App icon (source, exe icon, window icon) |
+| `assets/icon-candidates/` | Other icon candidates (`preview.html` shows them all) |
+| `build.rs` | Embeds the icon and version info into the exe |

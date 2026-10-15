@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6E50DC"/>
+      <stop offset="1" stop-color="#F2A541"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0D0C13"/>
+  <g fill="#ECE8E1" opacity=".18">
+    <circle cx="96" cy="96" r="4"/><circle cx="176" cy="96" r="4"/><circle cx="256" cy="96" r="4"/><circle cx="336" cy="96" r="4"/><circle cx="416" cy="96" r="4"/>
+    <circle cx="96" cy="416" r="4"/><circle cx="176" cy="416" r="4"/><circle cx="256" cy="416" r="4"/><circle cx="336" cy="416" r="4"/><circle cx="416" cy="416" r="4"/>
+  </g>
+  <g transform="translate(256 250) rotate(-8)">
+    <rect x="-140" y="-104" width="280" height="208" rx="20" fill="none" stroke="#ECE8E1" stroke-opacity=".6" stroke-width="9" stroke-dasharray="28 18"/>
+  </g>
+  <path d="M120 330 C 190 262, 250 262, 284 300 C 312 334, 360 330, 414 266
+           C 362 352, 306 364, 272 330 C 240 298, 188 302, 120 330 Z" fill="url(#ink)"/>
+</svg>

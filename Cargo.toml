@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 
 [[bin]]
@@ -22,3 +22,6 @@ tiny-skia = "0.12.0"
 ttf-parser = "0.25"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+winresource = "0.1.34"
