@@ -28,6 +28,8 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | Ctrl + drag (brush, pen, eraser, shapes) | Change size / stroke width |
 | Alt + click | OKHSV colour palette |
 | Shift + drag (select tool) | Box selection; Shift+click toggles |
+| Group handles (several selected) | Scale / rotate about the common centre |
+| Number fields | Accept maths: `40*1.5`, `2^3+1` |
 | Tab | Hide/show UI |
 | F12 | Input log (pen flags, mouse/touch events) |
 
@@ -46,6 +48,7 @@ when empty. Photos are placed under drawing layers.
 
 - `DriftingVOID.exe --selftest out.png` builds a sample document, round-trips it
   through `.void`, and exports a PNG (`out.log` gets the result).
+- `SB_GROUP=1` with `--selftest` also adds a scaled+rotated copy of every layer.
 - `--selftest --list-fonts fonts.txt` dumps the installed font families.
 - `DV_SHOW_PALETTE=RRGGBB` / `DV_SHOW_EXPORT=1` open those panels at start (for screenshots).
 - `DV_SHOW_UNSAVED=1` shows the unsaved-changes dialog at start.

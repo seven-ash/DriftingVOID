@@ -102,6 +102,25 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
     brush(&mut r, true, Color32::BLACK, 12.0, &[(540.0, 560.0, 1.0), (740.0, 560.0, 1.0)]);
     doc.insert("brush".into(), LayerKind::Raster(r), None);
 
+    // group transform check: copies of every layer, scaled 0.5 and rotated 30 degrees
+    // about a shared centre, shifted to the right of the originals
+    if std::env::var_os("SB_GROUP").is_some() {
+        let c = doc.content_bounds().unwrap().center();
+        let copies: Vec<Layer> = doc
+            .layers
+            .iter()
+            .map(|l| {
+                let mut t = crate::app::transform_layer(l, c, 0.5, 30f32.to_radians());
+                t.translate(vec2(700.0, 0.0));
+                t
+            })
+            .collect();
+        for mut l in copies {
+            l.id = doc.new_id();
+            doc.layers.push(l);
+        }
+    }
+
     // round-trip through the project format
     let proj = out.with_extension("void");
     crate::io::save_project(&doc, &proj)?;

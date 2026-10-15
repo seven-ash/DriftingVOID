@@ -118,6 +118,49 @@ impl RasterLayer {
 
 }
 
+/// Resamples a raster layer scaled by `s` and rotated by `th` about world point `c`.
+pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<RasterLayer> {
+    let b = src.bounds()?;
+    let lb = b.translate(-src.offset);
+    let (x0, y0) = (lb.min.x as i32, lb.min.y as i32);
+    let (w, h) = (lb.width() as i32, lb.height() as i32);
+    let pm = tiny_skia::Pixmap::from_vec(src.read_region(x0, y0, w, h), tiny_skia::IntSize::from_wh(w as u32, h as u32)?)?;
+    let (sin, cos) = th.sin_cos();
+    let map = |p: Pos2| {
+        let d = (p - c) * s;
+        c + Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
+    };
+    let corners = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].map(map);
+    let nb = Rect::from_points(&corners);
+    let (nx0, ny0) = (nb.min.x.floor(), nb.min.y.floor());
+    let (nw, nh) = ((nb.max.x.ceil() - nx0) as u32 + 1, (nb.max.y.ceil() - ny0) as u32 + 1);
+    if nw as u64 * nh as u64 > 200_000_000 {
+        return None;
+    }
+    let mut out = tiny_skia::Pixmap::new(nw, nh)?;
+    // pixmap pixel -> world (b.min + p) -> transformed world -> output pixel
+    let ts = tiny_skia::Transform::from_translate(b.min.x - c.x, b.min.y - c.y)
+        .post_scale(s, s)
+        .post_concat(tiny_skia::Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0))
+        .post_translate(c.x - nx0, c.y - ny0);
+    let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+    out.draw_pixmap(0, 0, pm.as_ref(), &paint, ts, None);
+    let mut n = RasterLayer { offset: Vec2::new(nx0, ny0), tiles: Default::default() };
+    let data = out.data();
+    for y in 0..nh as i32 {
+        for x in 0..nw as i32 {
+            let i = ((y * nw as i32 + x) * 4) as usize;
+            if data[i + 3] == 0 {
+                continue;
+            }
+            let (k, ti) = tile_of(x, y);
+            let t = Arc::make_mut(n.tiles.entry(k).or_insert_with(|| Arc::new(Tile::empty())));
+            t.px[ti..ti + 4].copy_from_slice(&data[i..i + 4]);
+        }
+    }
+    Some(n)
+}
+
 #[derive(Clone, Copy)]
 pub struct BrushParams {
     pub color: Color32,

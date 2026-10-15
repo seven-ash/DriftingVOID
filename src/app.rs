@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -125,6 +126,8 @@ enum Drag {
     Size { anchor: Pos2, start: f32, x0: f32 },
     Marquee { start: Pos2, cur: Pos2 },
     MoveMany { start: Pos2, origs: Vec<Layer> },
+    /// Group scale/rotate about the selection's common centre.
+    Group { rotate: bool, center: Pos2, start: Pos2, box_: Rect, origs: Vec<Layer> },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -404,7 +407,7 @@ pub struct App {
     view_init: bool,
     title: String,
     cursor_world: Option<Pos2>,
-    font_filter: String,
+    font_ui: FontUi,
     egui_fonts: std::collections::HashSet<String>,
     palette: Option<Palette>,
     restore_tool: Option<Tool>,
@@ -459,7 +462,7 @@ impl App {
             view_init: false,
             title: String::new(),
             cursor_world: None,
-            font_filter: String::new(),
+            font_ui: FontUi::default(),
             egui_fonts: Default::default(),
             palette: None,
             restore_tool: None,
@@ -942,6 +945,28 @@ impl App {
     // ------------------------------------------------------------ handles
 
     /// Handles of the selection in screen space: (id, position).
+    /// Union of the selected layers' bounds (multi-selection only).
+    fn group_box(&self) -> Option<Rect> {
+        if self.extra_sel.is_empty() {
+            return None;
+        }
+        self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b))
+    }
+
+    /// Group handles in screen space: 30..=33 corners, 34 rotate.
+    fn group_handles(&self) -> Vec<(u8, Pos2)> {
+        let Some(b) = self.group_box().filter(|_| self.tool == Tool::Select) else { return Vec::new() };
+        let xf = self.xf();
+        let r = xf.rect_w2s(b);
+        vec![
+            (30, r.left_top()),
+            (31, r.right_top()),
+            (32, r.right_bottom()),
+            (33, r.left_bottom()),
+            (34, r.center_top() - vec2(0.0, 28.0)),
+        ]
+    }
+
     fn handles(&self) -> Vec<(u8, Pos2)> {
         let xf = self.xf();
         let mut out = Vec::new();
@@ -1040,6 +1065,20 @@ impl App {
         }
         match self.tool {
             Tool::Select => {
+                for (h, hp) in self.group_handles() {
+                    if hp.distance(sp) <= 9.0 {
+                        let box_ = self.group_box().unwrap();
+                        let origs: Vec<Layer> = self
+                            .selected_ids()
+                            .iter()
+                            .filter_map(|i| self.doc.get(*i))
+                            .filter(|l| !l.locked)
+                            .cloned()
+                            .collect();
+                        self.drag = Some(Drag::Group { rotate: h == 34, center: box_.center(), start: w, box_, origs });
+                        return;
+                    }
+                }
                 for (h, hp) in self.handles() {
                     if hp.distance(sp) <= 9.0 {
                         let id = self.sel.unwrap();
@@ -1296,6 +1335,32 @@ impl App {
         let Some(drag) = self.drag.as_mut() else { return };
         match drag {
             Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } => {}
+            Drag::Group { rotate, center, start, origs, .. } => {
+                let c = *center;
+                let (mut s, mut th) = (1.0f32, 0.0f32);
+                if *rotate {
+                    let a0 = (*start - c).y.atan2((*start - c).x);
+                    let a1 = (w - c).y.atan2((w - c).x);
+                    th = a1 - a0;
+                    if mods.shift {
+                        let step = 15f32.to_radians();
+                        th = (th / step).round() * step;
+                    }
+                } else {
+                    s = ((w - c).length() / (*start - c).length().max(1e-3)).max(0.02);
+                    if mods.shift {
+                        s = ((s * 20.0).round() / 20.0).max(0.05);
+                    }
+                }
+                for o in origs.iter() {
+                    let l = transform_layer(o, c, s, th);
+                    if let Some(i) = self.doc.index_of(l.id) {
+                        self.doc.layers[i] = l;
+                    }
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::MoveMany { start, origs } => {
                 let mut d = w - *start;
                 if mods.shift {
@@ -1966,7 +2031,7 @@ impl App {
                 d.region = ExportRegion::Content;
             }
             if d.region == ExportRegion::Content {
-                ui.add(egui::Slider::new(&mut d.padding, 0.0..=400.0).text("여백 px"));
+                ui.add(egui::Slider::new(&mut d.padding, 0.0..=400.0).custom_parser(crate::calc::parse).text("여백 px"));
             }
             ui.horizontal(|ui| {
                 ui.label("배율");
@@ -1975,7 +2040,7 @@ impl App {
                         d.scale = s;
                     }
                 }
-                ui.add(egui::DragValue::new(&mut d.scale).range(0.05..=8.0).speed(0.01).suffix("×"));
+                ui.add(egui::DragValue::new(&mut d.scale).custom_parser(crate::calc::parse).range(0.05..=8.0).speed(0.01).suffix("×"));
             });
             ui.horizontal(|ui| {
                 ui.label("배경");
@@ -1988,7 +2053,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.label("JPG 품질");
-                ui.add(egui::Slider::new(&mut d.jpeg_quality, 50..=100));
+                ui.add(egui::Slider::new(&mut d.jpeg_quality, 50..=100).custom_parser(crate::calc::parse));
             });
             let region = self.export_region(&d);
             match region {
@@ -2146,32 +2211,32 @@ impl App {
         match self.tool {
             Tool::Brush => {
                 ui.strong("브러시");
-                ui.add(egui::Slider::new(&mut s.brush_size, 1.0..=400.0).logarithmic(true).text("크기"));
-                ui.add(egui::Slider::new(&mut s.brush_opacity, 0.05..=1.0).text("불투명도"));
-                ui.add(egui::Slider::new(&mut s.brush_hardness, 0.0..=1.0).text("경도"));
+                ui.add(egui::Slider::new(&mut s.brush_size, 1.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
+                ui.add(egui::Slider::new(&mut s.brush_opacity, 0.05..=1.0).custom_parser(crate::calc::parse).text("불투명도"));
+                ui.add(egui::Slider::new(&mut s.brush_hardness, 0.0..=1.0).custom_parser(crate::calc::parse).text("경도"));
                 ui.checkbox(&mut s.brush_pressure_size, "필압 → 크기");
                 ui.checkbox(&mut s.brush_pressure_opacity, "필압 → 농도");
-                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
+                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).custom_parser(crate::calc::parse).text("손떨림 보정"));
                 ui.small("Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기");
             }
             Tool::Pen => {
                 ui.strong("펜 (벡터)");
-                ui.add(egui::Slider::new(&mut s.pen_size, 0.5..=100.0).logarithmic(true).text("굵기"));
+                ui.add(egui::Slider::new(&mut s.pen_size, 0.5..=100.0).custom_parser(crate::calc::parse).logarithmic(true).text("굵기"));
                 ui.checkbox(&mut s.pen_pressure, "필압 → 굵기");
-                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
+                ui.add(egui::Slider::new(&mut s.smoothing, 0.0..=0.9).custom_parser(crate::calc::parse).text("손떨림 보정"));
                 ui.small("획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기");
             }
             Tool::Eraser => {
                 ui.strong("지우개");
-                ui.add(egui::Slider::new(&mut s.eraser_size, 2.0..=400.0).logarithmic(true).text("크기"));
+                ui.add(egui::Slider::new(&mut s.eraser_size, 2.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
                 ui.checkbox(&mut s.eraser_pressure, "필압 → 크기");
                 ui.small("브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기");
             }
             Tool::Text => {
                 ui.strong("글자");
                 if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
-                    layer_changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
-                    layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_filter);
+                    layer_changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기")).changed();
+                    layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         let mut has = t.bg.is_some();
                         if ui.checkbox(&mut has, "배경 상자").changed() {
@@ -2192,8 +2257,8 @@ impl App {
                     }
                     ui.small("선택한 글자에 적용 · 새 글자도 이 설정으로 시작");
                 } else {
-                    ui.add(egui::Slider::new(&mut s.text_size, 6.0..=400.0).logarithmic(true).text("크기"));
-                    font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_filter);
+                    ui.add(egui::Slider::new(&mut s.text_size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기"));
+                    font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut s.text_bg, "배경 상자");
                         ui.color_edit_button_srgba(&mut s.text_bg_color);
@@ -2204,7 +2269,7 @@ impl App {
             Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => {
                 ui.strong("도형");
                 if let Some(LayerKind::Shape(sh)) = sel_shape.map(|i| &mut self.doc.layers[i].kind) {
-                    layer_changed |= ui.add(egui::Slider::new(&mut sh.width, 0.0..=60.0).text("선 굵기")).changed();
+                    layer_changed |= ui.add(egui::Slider::new(&mut sh.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("선 굵기")).changed();
                     if matches!(sh.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         ui.horizontal(|ui| {
                             let mut has = sh.fill.is_some();
@@ -2223,7 +2288,7 @@ impl App {
                     }
                     ui.small("선택한 도형에 적용 · 새 도형도 이 설정으로 시작");
                 } else {
-                    ui.add(egui::Slider::new(&mut s.shape_width, 0.0..=60.0).text("선 굵기"));
+                    ui.add(egui::Slider::new(&mut s.shape_width, 0.0..=60.0).custom_parser(crate::calc::parse).text("선 굵기"));
                     if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut s.shape_fill, "채우기");
@@ -2297,17 +2362,17 @@ impl App {
                     changed |= ui.text_edit_singleline(&mut l.name).changed();
                 }
             });
-            changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0).text("불투명도")).changed();
+            changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0).custom_parser(crate::calc::parse).text("불투명도")).changed();
             match &mut l.kind {
                 LayerKind::Image(im) => {
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.rgba.width(), im.src.rgba.height(), im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(egui::Slider::new(&mut pct, 1.0..=400.0).logarithmic(true).text("크기 %")).changed() {
+                    if ui.add(egui::Slider::new(&mut pct, 1.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기 %")).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).text("회전 °")).changed() {
+                    if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -2335,9 +2400,9 @@ impl App {
                     });
                     ui.label("보정");
                     let a = &mut im.adjust;
-                    changed |= ui.add(egui::Slider::new(&mut a.brightness, -1.0..=1.0).text("밝기")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut a.contrast, -1.0..=1.0).text("대비")).changed();
-                    changed |= ui.add(egui::Slider::new(&mut a.saturation, -1.0..=1.0).text("채도")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut a.brightness, -1.0..=1.0).custom_parser(crate::calc::parse).text("밝기")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut a.contrast, -1.0..=1.0).custom_parser(crate::calc::parse).text("대비")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut a.saturation, -1.0..=1.0).custom_parser(crate::calc::parse).text("채도")).changed();
                     if ui.button("보정 초기화").clicked() {
                         *a = Adjust::default();
                         changed = true;
@@ -2347,8 +2412,8 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
-                        changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_filter);
+                        changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).custom_parser(crate::calc::parse).logarithmic(true).text("크기")).changed();
+                        changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
                             if ui.checkbox(&mut has, "배경 상자").changed() {
@@ -2371,7 +2436,7 @@ impl App {
                             changed = true;
                         }
                         if t.wrap > 0.0 {
-                            changed |= ui.add(egui::DragValue::new(&mut t.wrap).range(10.0..=20000.0).suffix(" px")).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut t.wrap).custom_parser(crate::calc::parse).range(10.0..=20000.0).suffix(" px")).changed();
                         }
                     });
                 }
@@ -2380,7 +2445,7 @@ impl App {
                         ui.label("색");
                         changed |= ui.color_edit_button_srgba(&mut s.color).changed();
                         if !shape_tool {
-                            changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).text("굵기")).changed();
+                            changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("굵기")).changed();
                         }
                     });
                     if !shape_tool && matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
@@ -2585,7 +2650,7 @@ impl App {
             }
             ui.add_enabled_ui(on, |ui| {
                 let mut k = crate::glass::strength();
-                let r = ui.add(egui::Slider::new(&mut k, 0.0..=4.0).text("유리 가장자리")).on_hover_text("굴절 + 색 번짐 강도 · 0: 평평한 반투명");
+                let r = ui.add(egui::Slider::new(&mut k, 0.0..=4.0).custom_parser(crate::calc::parse).text("유리 가장자리")).on_hover_text("굴절 + 색 번짐 강도 · 0: 평평한 반투명");
                 if r.changed() {
                     crate::glass::set_strength(k);
                 }
@@ -2593,7 +2658,7 @@ impl App {
                     crate::glass::save_settings();
                 }
                 let mut bw = crate::glass::band();
-                let r = ui.add(egui::Slider::new(&mut bw, 1.0..=24.0).suffix(" pt").text("굴절 테두리 폭")).on_hover_text("가장자리에서 굴절·색 번짐이 일어나는 폭");
+                let r = ui.add(egui::Slider::new(&mut bw, 1.0..=24.0).custom_parser(crate::calc::parse).suffix(" pt").text("굴절 테두리 폭")).on_hover_text("가장자리에서 굴절·색 번짐이 일어나는 폭");
                 if r.changed() {
                     crate::glass::set_band(bw);
                 }
@@ -3076,6 +3141,26 @@ impl App {
             painter.rect_filled(r, 0.0, ACCENT.gamma_multiply(0.08));
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
         }
+        if let Some(Drag::Group { box_, center, .. }) = &self.drag {
+            // original box, carried along with the current transform of the group
+            let pts: Vec<Pos2> = [box_.left_top(), box_.right_top(), box_.right_bottom(), box_.left_bottom(), box_.left_top()]
+                .iter()
+                .map(|p| xf.w2s(*p))
+                .collect();
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, INK_3), 4.0, 4.0));
+            painter.circle_filled(xf.w2s(*center), 3.0, ACCENT);
+        } else if let Some(b) = self.group_box().filter(|_| self.tool == Tool::Select) {
+            let r = xf.rect_w2s(b);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
+            let gh = self.group_handles();
+            let rh = gh[4].1;
+            painter.line_segment([r.center_top(), rh], Stroke::new(1.0, ACCENT));
+            painter.circle_filled(rh, 5.0, Color32::WHITE);
+            painter.circle_stroke(rh, 5.0, Stroke::new(1.5, ACCENT));
+            for (_, p) in &gh[..4] {
+                handle_box(painter, *p, ACCENT);
+            }
+        }
         for id in &self.extra_sel {
             if let Some(b) = self.doc.get(*id).and_then(|l| l.bounds()) {
                 let sr = xf.rect_w2s(b).expand(2.0);
@@ -3255,7 +3340,32 @@ impl App {
 const DEFAULT_FONT: &str = "기본 (맑은 고딕)";
 
 /// Family + style chooser over the installed fonts. Returns true if changed.
-fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut String, filter: &mut String) -> bool {
+/// Search text and rendered name previews for the font dropdowns.
+#[derive(Default)]
+pub struct FontUi {
+    filter: String,
+    previews: HashMap<String, Option<(egui::TextureHandle, Vec2)>>,
+}
+
+/// The family name rendered in its own face (None if it can't be drawn).
+fn font_preview(ctx: &egui::Context, name: &str, style: &str) -> Option<(egui::TextureHandle, Vec2)> {
+    use ab_glyph::Font;
+    let face = crate::fontdb::load(name, style)?;
+    if !name.chars().all(|c| c == ' ' || face.font.glyph_id(c).0 != 0) {
+        return None;
+    }
+    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK, family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0 };
+    let ppp = ctx.pixels_per_point();
+    let lay = crate::text::layout(&t);
+    let pm = crate::text::render(&t, &lay, ppp, Vec2::ZERO)?;
+    let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+    let tex = ctx.load_texture(format!("fontpv:{name}"), img, egui::TextureOptions::LINEAR);
+    Some((tex, vec2(pm.width() as f32, pm.height() as f32) / ppp))
+}
+
+fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut String, fui: &mut FontUi) -> bool {
+    let filter = &mut fui.filter;
+    let previews = &mut fui.previews;
     let mut changed = false;
     let fams = crate::fontdb::families();
     let shown = if family.is_empty() { DEFAULT_FONT.to_string() } else { family.clone() };
@@ -3273,11 +3383,50 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
                 changed = true;
             }
             let f = filter.to_lowercase();
+            // each name is drawn in its own face; previews are built lazily, only for
+            // rows on screen and a few per frame, so opening the list stays quick
+            let mut budget = 4;
+            let width = ui.available_width().max(220.0);
+            ui.spacing_mut().item_spacing.y = 1.0;
             for fam in fams.iter().filter(|x| f.is_empty() || x.name.to_lowercase().contains(&f)) {
-                if ui.selectable_label(*family == fam.name, &fam.name).clicked() {
+                let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+                if !ui.is_rect_visible(r) {
+                    continue;
+                }
+                let selected = *family == fam.name;
+                if selected {
+                    ui.painter().rect_filled(r, 6.0, FILL_2);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, 6.0, FILL_1);
+                }
+                if !previews.contains_key(&fam.name) {
+                    if budget > 0 {
+                        budget -= 1;
+                        let pv = font_preview(ui.ctx(), &fam.name, &fam.regular().style);
+                        previews.insert(fam.name.clone(), pv);
+                    } else {
+                        ui.ctx().request_repaint();
+                    }
+                }
+                match previews.get(&fam.name) {
+                    Some(Some((tex, size))) => {
+                        let img = Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - size.y * 0.5), *size);
+                        ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).image(
+                            tex.id(),
+                            img,
+                            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    _ => {
+                        ui.painter().text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, &fam.name, FontId::proportional(theme::TEXT_BODY), INK_2);
+                    }
+                }
+                if resp.clicked() {
                     *family = fam.name.clone();
                     *style = fam.regular().style.clone();
                     changed = true;
+                    ui.close();
                 }
             }
         }));
@@ -3304,6 +3453,74 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
         });
     }
     changed
+}
+
+/// Scales by `s` and rotates by `th` (radians, clockwise on screen) about `c`,
+/// starting from the untouched original layer each time (no drift).
+pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
+    let (sin, cos) = th.sin_cos();
+    let map = |p: Pos2| {
+        let d = (p - c) * s;
+        c + vec2(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
+    };
+    let mut l = o.clone();
+    match &mut l.kind {
+        LayerKind::Image(im) => {
+            im.center = map(im.center);
+            im.scale *= s;
+            im.rotation += th;
+        }
+        LayerKind::Text(t) => {
+            // text can't rotate yet: its centre orbits and its size scales
+            let r = crate::text::layout(t).rect(t.pos);
+            let nc = map(r.center());
+            t.size *= s;
+            t.wrap *= s;
+            let ns = crate::text::layout(t).size;
+            t.pos = nc - ns * 0.5;
+        }
+        LayerKind::Shape(sh) => {
+            sh.width *= s;
+            match sh.kind {
+                ShapeKind::Line | ShapeKind::Arrow => {
+                    sh.a = map(sh.a);
+                    sh.b = map(sh.b);
+                }
+                ShapeKind::Rect | ShapeKind::Ellipse => {
+                    // axis-aligned shapes: centre orbits, extents scale
+                    let r = Rect::from_two_pos(sh.a, sh.b);
+                    let nc = map(r.center());
+                    let h = r.size() * 0.5 * s;
+                    sh.a = nc - h;
+                    sh.b = nc + h;
+                }
+            }
+        }
+        LayerKind::Vector(v) => {
+            let off = v.offset;
+            v.strokes = v
+                .strokes
+                .iter()
+                .map(|st| {
+                    let pts = st
+                        .pts
+                        .iter()
+                        .map(|q| {
+                            let p = map(pos2(q[0], q[1]) + off) - off;
+                            [p.x, p.y, q[2] * s]
+                        })
+                        .collect();
+                    Arc::new(VStroke::new(pts, st.color))
+                })
+                .collect();
+        }
+        LayerKind::Raster(r) => {
+            if let Some(n) = crate::raster::transformed(r, c, s, th) {
+                *r = n;
+            }
+        }
+    }
+    l
 }
 
 fn handle_box(painter: &egui::Painter, p: Pos2, c: Color32) {
