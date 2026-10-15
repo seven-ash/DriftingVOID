@@ -106,7 +106,14 @@ fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, sca
             let o = (t.pos - region.min) * scale;
             let (ix, iy) = (o.x.floor(), o.y.floor());
             if let Some(tp) = crate::text::render(t, &lay, scale, vec2(o.x - ix, o.y - iy)) {
-                pm.draw_pixmap(ix as i32, iy as i32, tp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                if t.rotation == 0.0 {
+                    pm.draw_pixmap(ix as i32, iy as i32, tp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                } else {
+                    let c = o + lay.size * scale * 0.5;
+                    let ts = Transform::from_translate(ix, iy).post_concat(Transform::from_rotate_at(t.rotation.to_degrees(), c.x, c.y));
+                    let paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
+                    pm.draw_pixmap(0, 0, tp.as_ref(), &paint, ts, None);
+                }
             }
         }
         LayerKind::Shape(s) => {
@@ -144,12 +151,14 @@ fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, sca
                     } else {
                         PathBuilder::from_oval(tr)
                     };
+                    let c = r.center();
+                    let ts = base.pre_concat(Transform::from_rotate_at(s.rotation.to_degrees(), c.x, c.y));
                     if let Some(path) = path {
                         if let Some(f) = s.fill {
-                            pm.fill_path(&path, &paint_of(f), FillRule::Winding, base, None);
+                            pm.fill_path(&path, &paint_of(f), FillRule::Winding, ts, None);
                         }
                         if s.width > 0.0 {
-                            pm.stroke_path(&path, &sp, &stroke, base, None);
+                            pm.stroke_path(&path, &sp, &stroke, ts, None);
                         }
                     }
                 }

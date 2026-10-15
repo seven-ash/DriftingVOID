@@ -47,6 +47,7 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
             style: std::env::var("SB_STYLE").unwrap_or_else(|_| "Bold".into()),
             bg: Some(Color32::from_rgba_unmultiplied(255, 236, 150, 230)),
             wrap: 0.0,
+            rotation: 0.0,
         }),
         None,
     );
@@ -57,7 +58,7 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
     ] {
         doc.insert(
             "shape".into(),
-            LayerKind::Shape(ShapeLayer { kind, a, b, color: Color32::from_rgb(230, 57, 70), width: 5.0, fill: None }),
+            LayerKind::Shape(ShapeLayer { kind, a, b, color: Color32::from_rgb(230, 57, 70), width: 5.0, fill: None, rotation: 0.0 }),
             None,
         );
     }

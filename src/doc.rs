@@ -149,6 +149,26 @@ pub struct TextLayer {
     pub bg: Option<Color32>,
     /// Wrap width of the box (0 = no wrapping).
     pub wrap: f32,
+    /// Radians, about the box centre.
+    pub rotation: f32,
+}
+
+/// Rotates `p` by `th` (clockwise on screen) about `c`.
+pub fn rot_about(p: Pos2, c: Pos2, th: f32) -> Pos2 {
+    if th == 0.0 {
+        return p;
+    }
+    let (s, co) = th.sin_cos();
+    let d = p - c;
+    c + vec2(d.x * co - d.y * s, d.x * s + d.y * co)
+}
+
+fn rotated_bounds(r: Rect, th: f32) -> Rect {
+    if th == 0.0 {
+        return r;
+    }
+    let c = r.center();
+    Rect::from_points(&[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| rot_about(p, c, th)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -167,6 +187,8 @@ pub struct ShapeLayer {
     pub color: Color32,
     pub width: f32,
     pub fill: Option<Color32>,
+    /// Radians about the centre (rectangles and ellipses; lines use their end points).
+    pub rotation: f32,
 }
 
 impl ShapeLayer {
@@ -246,9 +268,12 @@ impl Layer {
     pub fn bounds(&self) -> Option<Rect> {
         match &self.kind {
             LayerKind::Image(im) => Some(Rect::from_points(&im.corners())),
-            LayerKind::Text(t) => Some(crate::text::layout(t).rect(t.pos)),
+            LayerKind::Text(t) => Some(rotated_bounds(crate::text::layout(t).rect(t.pos), t.rotation)),
             LayerKind::Shape(s) => {
                 let mut r = Rect::from_two_pos(s.a, s.b);
+                if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+                    r = rotated_bounds(r, s.rotation);
+                }
                 if s.kind == ShapeKind::Arrow {
                     let (_, h) = s.arrow_head();
                     for p in h {

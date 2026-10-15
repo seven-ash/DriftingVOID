@@ -28,12 +28,13 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | Ctrl + drag (brush, pen, eraser, shapes) | Change size / stroke width |
 | Alt + click | OKHSV colour palette |
 | Shift + drag (select tool) | Box selection by centre (Shift+Ctrl: entirely inside); pen strokes and brush pixels are picked individually; Shift+click toggles |
-| Group handles (several selected) | Scale / rotate about the common centre |
+| Group handles (several selected) | Scale / rotate about the common centre (Shift/Ctrl: 15° from start, Alt: absolute 15°) |
+| Layer list | Drag to reorder, double-click to rename |
 | Number fields | Accept maths: `40*1.5`, `2^3+1` |
 | Tab | Hide/show UI |
 | F12 | Input log (pen flags, mouse/touch events) |
 
-Tools: V select, H pan, B brush (raster), P pen (vector), E eraser, T text,
+Tools: V select, Q lasso, H pan, B brush (raster), P pen (vector), E eraser, T text,
 L line, A arrow, R rectangle, O ellipse, C crop, F export frame, I eyedropper.
 
 Drawing layers are created when you first draw, reused afterwards, and removed
@@ -42,7 +43,7 @@ when empty. Photos are placed under drawing layers.
 ## Files
 
 - `.void` project: zip with `doc.json`, the original photo files, and raw raster tiles.
-- Settings: `%APPDATA%\DriftingVOID\settings.json` (glass, shadow, edge strength).
+- Settings: `%APPDATA%\DriftingVOID\settings.json` (glass look) and `prefs.json` (tools, recent colours, export).
 
 ## Developer flags
 

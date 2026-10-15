@@ -979,6 +979,7 @@ impl App {
             style: self.s.text_style.clone(),
             bg: self.s.text_bg.then_some(self.s.text_bg_color),
             wrap: 0.0,
+            rotation: 0.0,
         };
         self.doc.insert("글".into(), LayerKind::Text(t), self.sel)
     }
@@ -1156,7 +1157,10 @@ impl App {
             }
             let hit = match &l.kind {
                 LayerKind::Image(im) => im.contains(w),
-                LayerKind::Text(t) => crate::text::layout(t).rect(t.pos).expand(tol).contains(w),
+                LayerKind::Text(t) => {
+                    let r = crate::text::layout(t).rect(t.pos);
+                    r.expand(tol).contains(crate::doc::rot_about(w, r.center(), -t.rotation))
+                }
                 LayerKind::Shape(s) => shape_hit(s, w, tol),
                 LayerKind::Vector(v) => v.strokes.iter().any(|s| s.hit(w - v.offset, tol)),
                 LayerKind::Raster(r) => r.alpha_at_world(w) > 8,
@@ -1578,7 +1582,10 @@ impl App {
             }
             Tool::Text => {
                 let hit = self.doc.layers.iter().rev().find(|l| {
-                    l.visible && !l.locked && matches!(&l.kind, LayerKind::Text(t) if crate::text::layout(t).rect(t.pos).expand(tol).contains(w))
+                    l.visible && !l.locked && matches!(&l.kind, LayerKind::Text(t) if {
+                        let r = crate::text::layout(t).rect(t.pos);
+                        r.expand(tol).contains(crate::doc::rot_about(w, r.center(), -t.rotation))
+                    })
                 });
                 if let Some(l) = hit {
                     let id = l.id;
@@ -1612,6 +1619,7 @@ impl App {
                     color: self.s.color,
                     width: self.s.shape_width,
                     fill: (self.s.shape_fill && matches!(kind, ShapeKind::Rect | ShapeKind::Ellipse)).then_some(self.s.fill_color),
+                    rotation: 0.0,
                 };
                 let name = match kind {
                     ShapeKind::Line => "선",
@@ -2957,6 +2965,11 @@ impl App {
                         ui.label("색");
                         changed |= ui.color_edit_button_srgba(&mut t.color).changed();
                     });
+                    let mut deg = t.rotation.to_degrees();
+                    if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
+                        t.rotation = deg.to_radians();
+                        changed = true;
+                    }
                     ui.horizontal(|ui| {
                         let mut wrap = t.wrap > 0.0;
                         if ui.checkbox(&mut wrap, "줄바꿈 폭").changed() {
@@ -2976,6 +2989,13 @@ impl App {
                             changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).custom_parser(crate::calc::parse).text("굵기")).changed();
                         }
                     });
+                    if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+                        let mut deg = s.rotation.to_degrees();
+                        if ui.add(egui::Slider::new(&mut deg, -180.0..=180.0).custom_parser(crate::calc::parse).text("회전 °")).changed() {
+                            s.rotation = deg.to_radians();
+                            changed = true;
+                        }
+                    }
                     if !shape_tool && matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         ui.horizontal(|ui| {
                             let mut has = s.fill.is_some();
@@ -4021,7 +4041,7 @@ fn font_preview(ctx: &egui::Context, name: &str, style: &str) -> Option<(egui::T
     if !name.chars().all(|c| c == ' ' || face.font.glyph_id(c).0 != 0) {
         return None;
     }
-    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK, family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0 };
+    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK, family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0, rotation: 0.0 };
     let ppp = ctx.pixels_per_point();
     let lay = crate::text::layout(&t);
     let pm = crate::text::render(&t, &lay, ppp, Vec2::ZERO)?;
@@ -4143,6 +4163,7 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
             let nc = map(r.center());
             t.size *= s;
             t.wrap *= s;
+            t.rotation += th;
             let ns = crate::text::layout(t).size;
             t.pos = nc - ns * 0.5;
         }
@@ -4154,12 +4175,13 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
                     sh.b = map(sh.b);
                 }
                 ShapeKind::Rect | ShapeKind::Ellipse => {
-                    // axis-aligned shapes: centre orbits, extents scale
+                    // centre orbits, extents scale, own rotation turns
                     let r = Rect::from_two_pos(sh.a, sh.b);
                     let nc = map(r.center());
                     let h = r.size() * 0.5 * s;
                     sh.a = nc - h;
                     sh.b = nc + h;
+                    sh.rotation += th;
                 }
             }
         }
@@ -4257,6 +4279,7 @@ fn constrain_shape(kind: ShapeKind, anchor: Pos2, p: Pos2, shift: bool) -> Pos2 
 
 fn shape_hit(s: &ShapeLayer, w: Pos2, tol: f32) -> bool {
     let t = s.width * 0.5 + tol;
+    let w = crate::doc::rot_about(w, Rect::from_two_pos(s.a, s.b).center(), -s.rotation);
     let seg = |a: Pos2, b: Pos2| {
         let ab = b - a;
         let k = ((w - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);

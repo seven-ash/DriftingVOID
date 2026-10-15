@@ -77,8 +77,19 @@ enum FileKind {
         style: String,
         bg: Option<[u8; 4]>,
         wrap: f32,
+        #[serde(default)]
+        rotation: f32,
     },
-    Shape { kind: ShapeKind, a: [f32; 2], b: [f32; 2], color: [u8; 4], width: f32, fill: Option<[u8; 4]> },
+    Shape {
+        kind: ShapeKind,
+        a: [f32; 2],
+        b: [f32; 2],
+        color: [u8; 4],
+        width: f32,
+        fill: Option<[u8; 4]>,
+        #[serde(default)]
+        rotation: f32,
+    },
     Vector { offset: [f32; 2], strokes: Vec<FileStroke> },
     Raster { offset: [f32; 2], tiles: Vec<[i32; 2]> },
 }
@@ -142,6 +153,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     style: t.style.clone(),
                     bg: t.bg.map(c2a),
                     wrap: t.wrap,
+                    rotation: t.rotation,
                 },
                 LayerKind::Shape(s) => FileKind::Shape {
                     kind: s.kind,
@@ -150,6 +162,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     color: c2a(s.color),
                     width: s.width,
                     fill: s.fill.map(c2a),
+                    rotation: s.rotation,
                 },
                 LayerKind::Vector(v) => FileKind::Vector {
                     offset: [v.offset.x, v.offset.y],
@@ -203,7 +216,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 };
                 LayerKind::Image(ImageLayer { src, center: pos2(center[0], center[1]), scale, rotation, crop: a2r(crop), adjust })
             }
-            FileKind::Text { pos, text, size, color, family, style, bg, wrap } => LayerKind::Text(TextLayer {
+            FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation } => LayerKind::Text(TextLayer {
                 pos: pos2(pos[0], pos[1]),
                 text,
                 size,
@@ -212,14 +225,16 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 style,
                 bg: bg.map(a2c),
                 wrap,
+                rotation,
             }),
-            FileKind::Shape { kind, a, b, color, width, fill } => LayerKind::Shape(ShapeLayer {
+            FileKind::Shape { kind, a, b, color, width, fill, rotation } => LayerKind::Shape(ShapeLayer {
                 kind,
                 a: pos2(a[0], a[1]),
                 b: pos2(b[0], b[1]),
                 color: a2c(color),
                 width,
                 fill: fill.map(a2c),
+                rotation,
             }),
             FileKind::Vector { offset, strokes } => LayerKind::Vector(VectorLayer {
                 offset: vec2(offset[0], offset[1]),

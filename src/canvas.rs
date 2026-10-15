@@ -186,16 +186,31 @@ pub fn draw_shape(painter: &Painter, s: &ShapeLayer, xf: &Xf, opacity: f32) {
         }
         ShapeKind::Rect => {
             let r = xf.rect_w2s(Rect::from_two_pos(s.a, s.b));
-            if let Some(f) = s.fill {
-                painter.rect_filled(r, 0.0, f.gamma_multiply(opacity));
-            }
-            if s.width > 0.0 {
-                painter.rect_stroke(r, 0.0, stroke, StrokeKind::Middle);
+            if s.rotation == 0.0 {
+                if let Some(f) = s.fill {
+                    painter.rect_filled(r, 0.0, f.gamma_multiply(opacity));
+                }
+                if s.width > 0.0 {
+                    painter.rect_stroke(r, 0.0, stroke, StrokeKind::Middle);
+                }
+            } else {
+                let c = r.center();
+                let pts: Vec<Pos2> = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+                    .iter()
+                    .map(|p| crate::doc::rot_about(*p, c, s.rotation))
+                    .collect();
+                if let Some(f) = s.fill {
+                    painter.add(Shape::convex_polygon(pts.clone(), f.gamma_multiply(opacity), Stroke::NONE));
+                }
+                if s.width > 0.0 {
+                    painter.add(Shape::closed_line(pts, stroke));
+                }
             }
         }
         ShapeKind::Ellipse => {
             let n = ((Rect::from_two_pos(s.a, s.b).size().max_elem() * xf.zoom) as usize / 3).clamp(24, 256);
-            let pts: Vec<Pos2> = s.ellipse_points(n).iter().map(|p| xf.w2s(*p)).collect();
+            let c = Rect::from_two_pos(s.a, s.b).center();
+            let pts: Vec<Pos2> = s.ellipse_points(n).iter().map(|p| xf.w2s(crate::doc::rot_about(*p, c, s.rotation))).collect();
             if let Some(f) = s.fill {
                 painter.add(Shape::convex_polygon(pts.clone(), f.gamma_multiply(opacity), Stroke::NONE));
             }
@@ -284,7 +299,16 @@ pub fn draw_doc(
                         (size.y * scale).ceil() + 1.0,
                     );
                     let sr = Rect::from_min_size(xf.w2s(t.pos), pm_size / scale * xf.zoom);
-                    painter.image(tex, sr, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), tint(op));
+                    let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+                    if t.rotation == 0.0 {
+                        painter.image(tex, sr, uv, tint(op));
+                    } else {
+                        // rotate about the text box centre (not the padded texture's)
+                        let c = xf.w2s(Rect::from_min_size(t.pos, size).center());
+                        let corners = [sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom()]
+                            .map(|p| crate::doc::rot_about(p, c, t.rotation));
+                        painter.add(Shape::mesh(image_mesh(tex, corners, uv, tint(op))));
+                    }
                 }
             }
             LayerKind::Shape(s) => draw_shape(painter, s, xf, op),
