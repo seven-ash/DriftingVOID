@@ -2824,7 +2824,7 @@ impl App {
                         }
                     }
                 });
-                ui.add(crate::dial::Dial::new(&mut s.brush_size, 1.0..=400.0).logarithmic(true).text("크기"));
+                ui.add(crate::dial::Dial::new(&mut s.brush_size, 1.0..=400.0).step(2.0).text("크기"));
                 ui.add(crate::dial::Dial::new(&mut s.brush_opacity, 0.05..=1.0).text("불투명도").default(1.0));
                 ui.add(crate::dial::Dial::new(&mut s.brush_hardness, 0.0..=1.0).text("경도"));
                 ui.checkbox(&mut s.brush_pressure_size, "필압 → 크기");
@@ -2834,14 +2834,14 @@ impl App {
             }
             Tool::Pen => {
                 ui.strong("펜 (벡터)");
-                ui.add(crate::dial::Dial::new(&mut s.pen_size, 0.5..=100.0).logarithmic(true).text("굵기"));
+                ui.add(crate::dial::Dial::new(&mut s.pen_size, 0.5..=100.0).step(0.5).text("굵기"));
                 ui.checkbox(&mut s.pen_pressure, "필압 → 굵기");
                 ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
                 ui.small("획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기");
             }
             Tool::Eraser => {
                 ui.strong("지우개");
-                ui.add(crate::dial::Dial::new(&mut s.eraser_size, 2.0..=400.0).logarithmic(true).text("크기"));
+                ui.add(crate::dial::Dial::new(&mut s.eraser_size, 2.0..=400.0).step(2.0).text("크기"));
                 ui.checkbox(&mut s.eraser_pressure, "필압 → 크기");
                 ui.small("브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기");
             }
@@ -2849,7 +2849,7 @@ impl App {
                 ui.strong("글자");
                 if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
                     let s0 = crate::text::layout(t).size;
-                    layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
+                    layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         let mut has = t.bg.is_some();
@@ -2874,7 +2874,7 @@ impl App {
                     }
                     ui.small("선택한 글자에 적용 · 새 글자도 이 설정으로 시작");
                 } else {
-                    ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).logarithmic(true).text("크기"));
+                    ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).step(2.0).text("크기"));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut s.text_bg, "배경 상자");
@@ -3002,7 +3002,7 @@ impl App {
                 LayerKind::Image(im) => {
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.rgba.width(), im.src.rgba.height(), im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).logarithmic(true).text("크기 %").default(100.0)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0)).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
@@ -3048,7 +3048,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();

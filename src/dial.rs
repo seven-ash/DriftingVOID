@@ -11,7 +11,7 @@ use crate::theme::{ACCENT, FILL_1, INK, INK_2, INK_3};
 pub struct Dial<'a> {
     value: &'a mut f32,
     range: RangeInclusive<f32>,
-    log: bool,
+    step: Option<f32>,
     text: String,
     suffix: String,
     default: Option<f32>,
@@ -19,11 +19,13 @@ pub struct Dial<'a> {
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, log: false, text: String::new(), suffix: String::new(), default: None }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None }
     }
 
-    pub fn logarithmic(mut self, on: bool) -> Self {
-        self.log = on;
+    /// Value per tick. Every tick is worth the same amount so the ring reads like a
+    /// ruler; defaults to a 1-2-5 step giving about 60 ticks over the range.
+    pub fn step(mut self, st: f32) -> Self {
+        self.step = Some(st);
         self
     }
 
@@ -74,16 +76,16 @@ fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
 
 impl Widget for Dial<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let Dial { value, range, log, text, suffix, default } = self;
+        let Dial { value, range, step, text, suffix, default } = self;
         let (lo, hi) = (*range.start(), *range.end());
-        let to_u = |v: f32| if log { v.max(1e-6).ln() } else { v };
-        let from_u = |u: f32| if log { u.exp() } else { u };
-        let (ulo, uhi) = (to_u(lo), to_u(hi));
-        let span = (uhi - ulo).max(1e-6);
-        let dt = span / TICKS_PER_RANGE;
+        let span = (hi - lo).max(1e-6);
+        // value per tick; the ring moves TICK_PX per step so ticks track the pointer
+        let dt = step.unwrap_or_else(|| nice_step(span / TICKS_PER_RANGE));
+        // ticks are counted from the default (else 0) so it sits on a major tick
+        let anchor = default.unwrap_or(0.0);
         let before = *value;
 
-        let decimals = if log || span > 50.0 { 0 } else if span > 5.0 { 1 } else { 2 };
+        let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
         let width = ui.available_width();
         let row_h = 24.0;
         let mut out = ui
@@ -100,26 +102,23 @@ impl Widget for Dial<'_> {
 
                 // ---- the ring
                 let (r, resp) = ui.allocate_exact_size(vec2(ring_w, row_h - 4.0), Sense::click_and_drag());
-                let mut u = to_u(*value).clamp(ulo, uhi);
+                let mut u = value.clamp(lo, hi);
                 let mut moved = false;
                 if resp.dragged() && resp.drag_delta().x != 0.0 {
                     moved = true;
                     let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
-                    u = (u - resp.drag_delta().x / TICK_PX * dt * fine).clamp(ulo, uhi);
+                    u = (u - resp.drag_delta().x / TICK_PX * dt * fine).clamp(lo, hi);
                 }
                 if resp.hovered() {
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
                     if scroll != 0.0 {
                         moved = true;
-                        // one tick per notch, snapped onto the tick grid when linear
-                        let st = if log { dt } else { nice_step(dt) };
-                        let anchor = to_u(default.unwrap_or(if log { 1.0 } else { 0.0 }));
-                        u = (anchor + (((u - anchor) / st).round() + scroll.signum()) * st).clamp(ulo, uhi);
+                        // one tick per notch, snapped onto the tick grid
+                        u = (anchor + (((u - anchor) / dt).round() + scroll.signum()) * dt).clamp(lo, hi);
                     }
                 }
-                let nv = from_u(u).clamp(lo, hi);
+                let nv = u;
                 // only a real drag or scroll writes, so hovering never nudges the value
-                // (a log round trip is not exact)
                 if moved && (nv - *value).abs() > f32::EPSILON {
                     *value = nv;
                 }
@@ -130,22 +129,19 @@ impl Widget for Dial<'_> {
                 // pixels per unit stay TICK_PX/dt so the ticks follow the pointer 1:1
                 let ang_per_u = TICK_PX / radius / dt;
                 let (vis_lo, vis_hi) = (u - 1.55 / ang_per_u, u + 1.55 / ang_per_u);
-                // evenly spaced ticks, major every 5 (....|....|), anchored on the default
-                // (else 0, or 1 on log dials) so the default sits on a major tick; the
-                // range start may fall anywhere between ticks
-                let step = if log { dt } else { nice_step(dt) };
-                let anchor = to_u(default.unwrap_or(if log { 1.0 } else { 0.0 }));
+                // evenly spaced ticks worth `dt` each, major every 5 (....|....|), counted
+                // from the anchor; the range start may fall anywhere between ticks
                 let mut ticks: Vec<(f32, u8)> = Vec::new(); // (value, 0 minor / 2 major)
-                let (k0, k1) = (((vis_lo.max(ulo) - anchor) / step).floor() as i64, ((vis_hi.min(uhi) - anchor) / step).ceil() as i64);
+                let (k0, k1) = (((vis_lo.max(lo) - anchor) / dt).floor() as i64, ((vis_hi.min(hi) - anchor) / dt).ceil() as i64);
                 for k in k0..=k1 {
-                    let tu = anchor + k as f32 * step;
-                    if tu >= ulo - step * 1e-3 && tu <= uhi + step * 1e-3 {
-                        ticks.push((from_u(tu), if k.rem_euclid(5) == 0 { 2 } else { 0 }));
+                    let t = anchor + k as f32 * dt;
+                    if t >= lo - dt * 1e-3 && t <= hi + dt * 1e-3 {
+                        ticks.push((t, if k.rem_euclid(5) == 0 { 2 } else { 0 }));
                     }
                 }
                 let y = r.center().y;
                 let draw = |t: f32, kind: u8, end: bool| {
-                    let a = (to_u(t) - u) * ang_per_u;
+                    let a = (t - u) * ang_per_u;
                     if a.abs() > 1.5 {
                         return;
                     }
@@ -172,7 +168,7 @@ impl Widget for Dial<'_> {
                 // ---- number (typing and maths)
                 let mut dv = egui::DragValue::new(value)
                     .range(lo..=hi)
-                    .speed(dt as f64 * if log { 1.0 } else { 0.5 })
+                    .speed(dt as f64 * 0.5)
                     .fixed_decimals(decimals)
                     .custom_parser(crate::calc::parse);
                 if !suffix.is_empty() {
