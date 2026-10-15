@@ -118,6 +118,74 @@ impl RasterLayer {
 
 }
 
+impl RasterLayer {
+    /// Splits off the pixels inside the given world rectangles:
+    /// returns (patch, rest), both with this layer's offset.
+    pub fn lift(&self, rects: &[Rect]) -> (RasterLayer, RasterLayer) {
+        let mut patch = RasterLayer { offset: self.offset, tiles: Default::default() };
+        let mut rest = self.clone();
+        for r in rects {
+            let lr = r.translate(-self.offset);
+            let (x0, y0, x1, y1) = (lr.min.x.floor() as i32, lr.min.y.floor() as i32, lr.max.x.ceil() as i32, lr.max.y.ceil() as i32);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            for ty in y0.div_euclid(TILE)..=(y1 - 1).div_euclid(TILE) {
+                for tx in x0.div_euclid(TILE)..=(x1 - 1).div_euclid(TILE) {
+                    let key = (tx, ty);
+                    let Some(src) = self.tiles.get(&key) else { continue };
+                    let (ox, oy) = (tx * TILE, ty * TILE);
+                    let (sx0, sx1) = (x0.max(ox) - ox, x1.min(ox + TILE) - ox);
+                    let (sy0, sy1) = (y0.max(oy) - oy, y1.min(oy + TILE) - oy);
+                    let pt = Arc::make_mut(patch.tiles.entry(key).or_insert_with(|| Arc::new(Tile::empty())));
+                    let rt = Arc::make_mut(rest.tiles.get_mut(&key).unwrap());
+                    for y in sy0..sy1 {
+                        let a = ((y * TILE + sx0) * 4) as usize;
+                        let b = ((y * TILE + sx1) * 4) as usize;
+                        pt.px[a..b].copy_from_slice(&src.px[a..b]);
+                        rt.px[a..b].fill(0);
+                    }
+                    pt.rev = next_rev();
+                    rt.rev = next_rev();
+                }
+            }
+        }
+        patch.tiles.retain(|_, t| !t.is_empty());
+        rest.tiles.retain(|_, t| !t.is_empty());
+        (patch, rest)
+    }
+
+    /// Paints `top` over this layer (src-over). Offsets are whole pixels.
+    pub fn composite_over(&mut self, top: &RasterLayer) {
+        let d = top.offset - self.offset;
+        let (dx, dy) = (d.x.round() as i32, d.y.round() as i32);
+        let mut touched = std::collections::HashSet::new();
+        for (&(tx, ty), t) in &top.tiles {
+            for y in 0..TILE {
+                for x in 0..TILE {
+                    let si = ((y * TILE + x) * 4) as usize;
+                    let sa = t.px[si + 3];
+                    if sa == 0 {
+                        continue;
+                    }
+                    let (k, i) = tile_of(tx * TILE + x + dx, ty * TILE + y + dy);
+                    touched.insert(k);
+                    let dt = Arc::make_mut(self.tiles.entry(k).or_insert_with(|| Arc::new(Tile::empty())));
+                    let f = 1.0 - sa as f32 / 255.0;
+                    for c in 0..4 {
+                        dt.px[i + c] = (t.px[si + c] as f32 + dt.px[i + c] as f32 * f).round().min(255.0) as u8;
+                    }
+                }
+            }
+        }
+        for k in touched {
+            if let Some(t) = self.tiles.get_mut(&k) {
+                Arc::make_mut(t).rev = next_rev();
+            }
+        }
+    }
+}
+
 /// Resamples a raster layer scaled by `s` and rotated by `th` about world point `c`.
 pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<RasterLayer> {
     let b = src.bounds()?;

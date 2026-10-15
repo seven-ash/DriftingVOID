@@ -124,10 +124,102 @@ enum Drag {
     VErase { id: LayerId, r: f32 },
     Zoom { anchor: Pos2 },
     Size { anchor: Pos2, start: f32, x0: f32 },
-    Marquee { start: Pos2, cur: Pos2 },
-    MoveMany { start: Pos2, origs: Vec<Layer> },
+    /// `full`: Ctrl held — only items entirely inside count (else: centre inside).
+    Marquee { start: Pos2, cur: Pos2, full: bool },
+    MoveMany { start: Pos2, origs: Vec<(Layer, Part)>, d: Vec2 },
     /// Group scale/rotate about the selection's common centre.
-    Group { rotate: bool, center: Pos2, start: Pos2, box_: Rect, origs: Vec<Layer> },
+    Group { rotate: bool, center: Pos2, start: Pos2, box_: Rect, origs: Vec<(Layer, Part)>, s: f32, th: f32 },
+}
+
+/// Which part of a layer a selection covers.
+#[derive(Clone)]
+pub(crate) enum Part {
+    Whole,
+    /// Indices of selected pen strokes.
+    Strokes(Vec<usize>),
+    /// World rectangles of selected brush pixels.
+    Pixels(Vec<Rect>),
+}
+
+/// Selections inside drawing layers (pen strokes, brush pixel boxes).
+#[derive(Clone, Default)]
+struct SubSel {
+    strokes: Vec<(LayerId, Vec<usize>)>,
+    pixels: Vec<(LayerId, Vec<Rect>)>,
+}
+
+impl SubSel {
+    fn is_empty(&self) -> bool {
+        self.strokes.is_empty() && self.pixels.is_empty()
+    }
+}
+
+/// Applies p -> c + R(th)·s·(p - c) + d to the selected part of a layer,
+/// always starting from the untouched original.
+pub(crate) fn apply_part(o: &Layer, part: &Part, c: Pos2, s: f32, th: f32, d: Vec2) -> Layer {
+    let plain_move = s == 1.0 && th == 0.0;
+    match part {
+        Part::Whole => {
+            let mut l = if plain_move { o.clone() } else { transform_layer(o, c, s, th) };
+            if d != Vec2::ZERO {
+                l.translate(d);
+            }
+            l
+        }
+        Part::Strokes(idx) => {
+            let mut l = o.clone();
+            if let LayerKind::Vector(v) = &mut l.kind {
+                let (sin, cos) = th.sin_cos();
+                let off = v.offset;
+                let map = |p: Pos2| {
+                    let q = (p - c) * s;
+                    c + vec2(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + d
+                };
+                for &i in idx {
+                    if let Some(st) = v.strokes.get(i) {
+                        let pts = st
+                            .pts
+                            .iter()
+                            .map(|q| {
+                                let p = map(pos2(q[0], q[1]) + off) - off;
+                                [p.x, p.y, q[2] * s]
+                            })
+                            .collect();
+                        v.strokes[i] = Arc::new(VStroke::new(pts, st.color));
+                    }
+                }
+            }
+            l
+        }
+        Part::Pixels(rects) => {
+            let mut l = o.clone();
+            if let LayerKind::Raster(r) = &mut l.kind {
+                let (mut patch, mut rest) = r.lift(rects);
+                if plain_move {
+                    patch.offset += d.round();
+                } else if let Some(t) = crate::raster::transformed(&patch, c, s, th) {
+                    patch = t;
+                }
+                rest.composite_over(&patch);
+                *r = rest;
+            }
+            l
+        }
+    }
+}
+
+/// Where a selected pixel box ends up after the same transform.
+fn map_rect(r: Rect, c: Pos2, s: f32, th: f32, d: Vec2) -> Rect {
+    if s == 1.0 && th == 0.0 {
+        return r.translate(d.round());
+    }
+    let (sin, cos) = th.sin_cos();
+    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| {
+        let q = (p - c) * s;
+        c + vec2(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + d
+    });
+    let b = Rect::from_points(&pts);
+    Rect::from_min_max(b.min.floor(), b.max.ceil())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -419,6 +511,7 @@ pub struct App {
     /// Tool indicator glide: (from y, to y, start time).
     ind_anim: (f32, f32, f64),
     extra_sel: Vec<LayerId>,
+    sub: SubSel,
     pan_latch: bool,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
@@ -474,6 +567,7 @@ impl App {
             space_held: false,
             ind_anim: (f32::NAN, f32::NAN, 0.0),
             extra_sel: Vec::new(),
+            sub: SubSel::default(),
             pan_latch: false,
             middle_moved: false,
             input_log: Default::default(),
@@ -567,6 +661,8 @@ impl App {
     }
 
     fn fix_sel(&mut self) {
+        // stroke indices and pixel boxes don't survive undo/redo reliably
+        self.sub = SubSel::default();
         if let Some(id) = self.sel {
             if self.doc.get(id).is_none() {
                 self.sel = None;
@@ -591,6 +687,72 @@ impl App {
     fn select_only(&mut self, id: Option<LayerId>) {
         self.sel = id;
         self.extra_sel.clear();
+        self.sub = SubSel::default();
+    }
+
+    /// Everything selected, as (original layer, part) pairs; locked layers skipped.
+    fn sel_parts(&self) -> Vec<(Layer, Part)> {
+        let mut out = Vec::new();
+        for id in self.selected_ids() {
+            if let Some(l) = self.doc.get(id).filter(|l| !l.locked) {
+                out.push((l.clone(), Part::Whole));
+            }
+        }
+        for (id, idx) in &self.sub.strokes {
+            if let Some(l) = self.doc.get(*id).filter(|l| !l.locked) {
+                out.push((l.clone(), Part::Strokes(idx.clone())));
+            }
+        }
+        for (id, rects) in &self.sub.pixels {
+            if let Some(l) = self.doc.get(*id).filter(|l| !l.locked) {
+                out.push((l.clone(), Part::Pixels(rects.clone())));
+            }
+        }
+        out
+    }
+
+    fn sub_bounds(&self) -> Option<Rect> {
+        let mut acc: Option<Rect> = None;
+        let mut add = |b: Rect| acc = Some(acc.map_or(b, |a| a.union(b)));
+        for (id, idx) in &self.sub.strokes {
+            if let Some(LayerKind::Vector(v)) = self.doc.get(*id).map(|l| &l.kind) {
+                for &i in idx {
+                    if let Some(st) = v.strokes.get(i) {
+                        add(st.bounds.translate(v.offset));
+                    }
+                }
+            }
+        }
+        for (_, rects) in &self.sub.pixels {
+            for r in rects {
+                add(*r);
+            }
+        }
+        acc
+    }
+
+    /// Does a world point land on something selected (to start a group move)?
+    fn hits_selection(&self, w: Pos2, tol: f32) -> bool {
+        if self.hit_layer(w, tol).is_some_and(|id| self.is_selected(id)) {
+            return true;
+        }
+        for (id, idx) in &self.sub.strokes {
+            if let Some(LayerKind::Vector(v)) = self.doc.get(*id).map(|l| &l.kind) {
+                if idx.iter().filter_map(|&i| v.strokes.get(i)).any(|st| st.hit(w - v.offset, tol)) {
+                    return true;
+                }
+            }
+        }
+        self.sub.pixels.iter().any(|(_, rs)| rs.iter().any(|r| r.contains(w)))
+    }
+
+    /// Applies a finished move/transform to the stored pixel boxes.
+    fn remap_pixel_sel(&mut self, c: Pos2, s: f32, th: f32, d: Vec2) {
+        for (_, rects) in &mut self.sub.pixels {
+            for r in rects.iter_mut() {
+                *r = map_rect(*r, c, s, th, d);
+            }
+        }
     }
 
     fn toggle_selected(&mut self, id: LayerId) {
@@ -820,6 +982,26 @@ impl App {
 
     fn delete_selected(&mut self) {
         let ids = self.selected_ids();
+        let sub = std::mem::take(&mut self.sub);
+        for (id, mut idx) in sub.strokes {
+            if let Some(LayerKind::Vector(v)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                idx.sort_unstable();
+                for i in idx.into_iter().rev() {
+                    if i < v.strokes.len() {
+                        v.strokes.remove(i);
+                    }
+                }
+                self.changed = true;
+                self.modified = true;
+            }
+        }
+        for (id, rects) in sub.pixels {
+            if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                *r = r.lift(&rects).1;
+                self.changed = true;
+                self.modified = true;
+            }
+        }
         if ids.is_empty() {
             return;
         }
@@ -949,10 +1131,14 @@ impl App {
     /// Handles of the selection in screen space: (id, position).
     /// Union of the selected layers' bounds (multi-selection only).
     fn group_box(&self) -> Option<Rect> {
-        if self.extra_sel.is_empty() {
+        if self.extra_sel.is_empty() && self.sub.is_empty() {
             return None;
         }
-        self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b))
+        let whole = self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b));
+        match (whole, self.sub_bounds()) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Group handles in screen space: 30..=33 corners, 34 rotate.
@@ -1070,14 +1256,8 @@ impl App {
                 for (h, hp) in self.group_handles() {
                     if hp.distance(sp) <= 9.0 {
                         let box_ = self.group_box().unwrap();
-                        let origs: Vec<Layer> = self
-                            .selected_ids()
-                            .iter()
-                            .filter_map(|i| self.doc.get(*i))
-                            .filter(|l| !l.locked)
-                            .cloned()
-                            .collect();
-                        self.drag = Some(Drag::Group { rotate: h == 34, center: box_.center(), start: w, box_, origs });
+                        let origs = self.sel_parts();
+                        self.drag = Some(Drag::Group { rotate: h == 34, center: box_.center(), start: w, box_, origs, s: 1.0, th: 0.0 });
                         return;
                     }
                 }
@@ -1099,21 +1279,17 @@ impl App {
                     }
                 }
                 if mods.shift {
-                    // Shift: drag a selection box (a plain Shift+click toggles one layer)
-                    self.drag = Some(Drag::Marquee { start: w, cur: w });
+                    // Shift: drag a selection box (a plain Shift+click toggles one layer);
+                    // Shift+Ctrl: only things entirely inside the box
+                    self.drag = Some(Drag::Marquee { start: w, cur: w, full: mods.ctrl });
+                    return;
+                }
+                if (!self.extra_sel.is_empty() || !self.sub.is_empty()) && self.hits_selection(w, tol) {
+                    let origs = self.sel_parts();
+                    self.drag = Some(Drag::MoveMany { start: w, origs, d: Vec2::ZERO });
                     return;
                 }
                 match self.hit_layer(w, tol) {
-                    Some(id) if self.is_selected(id) && !self.extra_sel.is_empty() => {
-                        let origs: Vec<Layer> = self
-                            .selected_ids()
-                            .iter()
-                            .filter_map(|i| self.doc.get(*i))
-                            .filter(|l| !l.locked)
-                            .cloned()
-                            .collect();
-                        self.drag = Some(Drag::MoveMany { start: w, origs });
-                    }
                     Some(id) => {
                         self.select_only(Some(id));
                         let orig = self.doc.get(id).unwrap().clone();
@@ -1328,8 +1504,8 @@ impl App {
                 }
                 return;
             }
-            Some(Drag::Marquee { start, .. }) => {
-                self.drag = Some(Drag::Marquee { start, cur: w });
+            Some(Drag::Marquee { start, full, .. }) => {
+                self.drag = Some(Drag::Marquee { start, cur: w, full });
                 return;
             }
             _ => {}
@@ -1337,7 +1513,7 @@ impl App {
         let Some(drag) = self.drag.as_mut() else { return };
         match drag {
             Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } => {}
-            Drag::Group { rotate, center, start, origs, .. } => {
+            Drag::Group { rotate, center, start, origs, s: s_out, th: th_out, .. } => {
                 let c = *center;
                 let (mut s, mut th) = (1.0f32, 0.0f32);
                 if *rotate {
@@ -1354,8 +1530,10 @@ impl App {
                         s = ((s * 20.0).round() / 20.0).max(0.05);
                     }
                 }
-                for o in origs.iter() {
-                    let l = transform_layer(o, c, s, th);
+                *s_out = s;
+                *th_out = th;
+                for (o, part) in origs.iter() {
+                    let l = apply_part(o, part, c, s, th, Vec2::ZERO);
                     if let Some(i) = self.doc.index_of(l.id) {
                         self.doc.layers[i] = l;
                     }
@@ -1363,14 +1541,14 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
-            Drag::MoveMany { start, origs } => {
+            Drag::MoveMany { start, origs, d: d_out } => {
                 let mut d = w - *start;
                 if mods.shift {
                     if d.x.abs() > d.y.abs() { d.y = 0.0 } else { d.x = 0.0 }
                 }
-                for o in origs.iter() {
-                    let mut l = o.clone();
-                    l.translate(d);
+                *d_out = d;
+                for (o, part) in origs.iter() {
+                    let l = apply_part(o, part, Pos2::ZERO, 1.0, 0.0, d);
                     if let Some(i) = self.doc.index_of(l.id) {
                         self.doc.layers[i] = l;
                     }
@@ -1556,26 +1734,68 @@ impl App {
     fn finish_drag(&mut self, drag: Option<Drag>, sp: Pos2) {
         let Some(drag) = drag else { return };
         match drag {
-            Drag::Marquee { start, cur } => {
+            Drag::Marquee { start, cur, full } => {
                 let r = Rect::from_two_pos(start, cur);
                 if r.width().max(r.height()) * self.zoom < 4.0 {
                     if let Some(id) = self.hit_layer(start, 6.0 / self.zoom) {
                         self.toggle_selected(id);
                     }
                 } else {
-                    // layers fully inside the box, topmost first
-                    let ids: Vec<LayerId> = self
-                        .doc
-                        .layers
-                        .iter()
-                        .rev()
-                        .filter(|l| l.visible && !l.locked && l.bounds().is_some_and(|b| r.contains_rect(b)))
-                        .map(|l| l.id)
-                        .collect();
+                    // photos, text, shapes: centre inside (Ctrl: entirely inside);
+                    // pen layers: individual strokes by the same rule;
+                    // brush layers: the pixels inside the box
+                    let inside = |b: Rect| if full { r.contains_rect(b) } else { r.contains(b.center()) };
+                    let mut ids = Vec::new();
+                    let mut sub = SubSel::default();
+                    for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked) {
+                        match &l.kind {
+                            LayerKind::Vector(v) => {
+                                let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| inside(v.strokes[i].bounds.translate(v.offset))).collect();
+                                if !idx.is_empty() {
+                                    sub.strokes.push((l.id, idx));
+                                }
+                            }
+                            LayerKind::Raster(rl) => {
+                                if let Some(b) = rl.bounds() {
+                                    let ir = r.intersect(b);
+                                    if ir.width() >= 1.0 && ir.height() >= 1.0 {
+                                        sub.pixels.push((l.id, vec![Rect::from_min_max(ir.min.floor(), ir.max.ceil())]));
+                                    }
+                                }
+                            }
+                            _ => {
+                                if l.bounds().is_some_and(inside) {
+                                    ids.push(l.id);
+                                }
+                            }
+                        }
+                    }
+                    let (ns, np) = (sub.strokes.iter().map(|x| x.1.len()).sum::<usize>(), sub.pixels.len());
                     self.sel = ids.first().copied();
                     self.extra_sel = ids.iter().skip(1).copied().collect();
-                    self.status = if ids.is_empty() { "영역 안에 레이어 없음".into() } else { format!("{}개 선택", ids.len()) };
+                    self.sub = sub;
+                    self.status = if ids.is_empty() && ns == 0 && np == 0 {
+                        "영역 안에 선택할 것 없음".into()
+                    } else {
+                        let mut parts = Vec::new();
+                        if !ids.is_empty() {
+                            parts.push(format!("레이어 {}", ids.len()));
+                        }
+                        if ns > 0 {
+                            parts.push(format!("펜 획 {ns}"));
+                        }
+                        if np > 0 {
+                            parts.push(format!("브러시 영역 {np}"));
+                        }
+                        format!("선택: {}", parts.join(" · "))
+                    };
                 }
+            }
+            Drag::MoveMany { d, .. } => {
+                self.remap_pixel_sel(Pos2::ZERO, 1.0, 0.0, d);
+            }
+            Drag::Group { center, s, th, .. } => {
+                self.remap_pixel_sel(center, s, th, Vec2::ZERO);
             }
             Drag::Raster { id, stroke: Some(st), .. } => {
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
@@ -1923,15 +2143,15 @@ impl App {
             }
         }
         if nudge != Vec2::ZERO {
-            for id in self.selected_ids() {
-                if let Some(l) = self.doc.get_mut(id) {
-                    if !l.locked {
-                        l.translate(nudge);
-                        self.changed = true;
-                        self.modified = true;
-                    }
+            for (o, part) in self.sel_parts() {
+                let l = apply_part(&o, &part, Pos2::ZERO, 1.0, 0.0, nudge);
+                if let Some(i) = self.doc.index_of(l.id) {
+                    self.doc.layers[i] = l;
+                    self.changed = true;
+                    self.modified = true;
                 }
             }
+            self.remap_pixel_sel(Pos2::ZERO, 1.0, 0.0, nudge);
         }
     }
 
@@ -2337,7 +2557,7 @@ impl App {
             }
             Tool::Select => {
                 ui.strong("선택");
-                ui.small("클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택 · Shift+클릭: 추가/빼기 · 모서리: 크기 · 위 동그라미: 회전");
+                ui.small("클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전");
             }
             Tool::Hand => {
                 ui.strong("화면 이동");
@@ -2358,7 +2578,14 @@ impl App {
 
     fn properties(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.sel else {
-            ui.weak("선택된 레이어 없음");
+            if self.sub.is_empty() {
+                ui.weak("선택된 레이어 없음");
+            } else {
+                let ns: usize = self.sub.strokes.iter().map(|x| x.1.len()).sum();
+                let np = self.sub.pixels.len();
+                ui.label(format!("펜 획 {ns}개 · 브러시 영역 {np}개"));
+                ui.small("끌어서 이동 · 모서리/위 동그라미: 크기·회전 · Del: 지우기");
+            }
             return;
         };
         if !self.extra_sel.is_empty() {
@@ -3151,7 +3378,28 @@ impl App {
                 INK,
             );
         }
-        if let Some(Drag::Marquee { start, cur }) = &self.drag {
+        // selected pen strokes and brush pixel boxes
+        if !matches!(self.drag, Some(Drag::MoveMany { .. }) | Some(Drag::Group { .. })) {
+            for (id, idx) in &self.sub.strokes {
+                if let Some(LayerKind::Vector(v)) = self.doc.get(*id).map(|l| &l.kind) {
+                    for &i in idx {
+                        if let Some(st) = v.strokes.get(i) {
+                            let sr = xf.rect_w2s(st.bounds.translate(v.offset)).expand(2.0);
+                            painter.rect_stroke(sr, 2.0, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)), StrokeKind::Outside);
+                        }
+                    }
+                }
+            }
+            for (_, rects) in &self.sub.pixels {
+                for r in rects {
+                    let sr = xf.rect_w2s(*r);
+                    let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+                    painter.extend(Shape::dashed_line(&pts, Stroke::new(1.5, Color32::WHITE), 5.0, 5.0));
+                    painter.extend(Shape::dashed_line_with_offset(&pts, Stroke::new(1.5, Color32::BLACK), &[5.0], &[5.0], 5.0));
+                }
+            }
+        }
+        if let Some(Drag::Marquee { start, cur, .. }) = &self.drag {
             let r = xf.rect_w2s(Rect::from_two_pos(*start, *cur));
             painter.rect_filled(r, 0.0, ACCENT.gamma_multiply(0.08));
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);

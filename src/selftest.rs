@@ -121,6 +121,32 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
         }
     }
 
+    // sub-selection check: lift the left half of the brush ring and move it up,
+    // and move every other pen stroke point-set (here: the only stroke) right
+    if std::env::var_os("SB_SUB").is_some() {
+        use crate::app::{Part, apply_part};
+        let ids: Vec<(LayerId, bool)> = doc
+            .layers
+            .iter()
+            .filter_map(|l| match l.kind {
+                LayerKind::Raster(_) => Some((l.id, true)),
+                LayerKind::Vector(_) => Some((l.id, false)),
+                _ => None,
+            })
+            .collect();
+        for (id, raster) in ids {
+            let i = doc.index_of(id).unwrap();
+            let o = doc.layers[i].clone();
+            let part = if raster {
+                Part::Pixels(vec![Rect::from_min_max(pos2(520.0, 480.0), pos2(640.0, 640.0))])
+            } else {
+                Part::Strokes(vec![0])
+            };
+            let d = if raster { vec2(0.0, -120.0) } else { vec2(60.0, 0.0) };
+            doc.layers[i] = apply_part(&o, &part, egui::Pos2::ZERO, 1.0, 0.0, d);
+        }
+    }
+
     // round-trip through the project format
     let proj = out.with_extension("void");
     crate::io::save_project(&doc, &proj)?;
