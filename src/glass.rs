@@ -205,6 +205,7 @@ struct Res {
     cur: Option<Tex>,
     small: Option<Tex>,
     small1: Option<Tex>,
+    small2: Option<Tex>,
     tmp: Option<Tex>,
     /// Screen-sized snapshot of the scene layer (before overlays), and its frame id.
     scene: Option<Tex>,
@@ -284,6 +285,7 @@ uniform sampler2D u_ov;      // + overlay layer
 uniform sampler2D u_cur;     // + panels already drawn (what is on screen now)
 uniform sampler2D u_blur;    // heavy blur of u_scene over the region
 uniform sampler2D u_blur1;   // heavy blur of u_cur over the region
+uniform sampler2D u_blur2;   // heavy blur of u_ov over the region
 uniform vec2 u_alloc;        // allocated size of the screen-sized textures
 uniform vec4 u_region;       // captured region x y w h (GL pixels)
 uniform vec2 u_bfit;         // used fraction of the blur textures
@@ -340,18 +342,12 @@ void main() {
     // overlay layer (cursors, selection, tool indicator): lightly blurred, full strength;
     // panels below this card: how much they differ from what was under them
     vec3 od = vec3(0.0);
-    float ui = 0.0;
     float ws = 0.0;
     for (int i = -2; i <= 2; i++) {
         for (int j = -2; j <= 2; j++) {
             vec2 q = suv(frag + vec2(float(i), float(j)) * 1.5 * u_ppp);
             float wt = exp(-float(i * i + j * j) / 3.0);
-            vec3 sc = texture(u_scene, q).rgb;
-            vec3 ov = texture(u_ov, q).rgb;
-            vec3 cu = texture(u_cur, q).rgb;
-            od += (ov - sc) * wt;
-            vec3 dd = abs(cu - ov);
-            ui += max(dd.r, max(dd.g, dd.b)) * wt;
+            od += (texture(u_ov, q).rgb - texture(u_scene, q).rgb) * wt;
             ws += wt;
         }
     }
@@ -359,10 +355,18 @@ void main() {
         col = clamp(col + od / ws, 0.0, 1.0);
     }
     if (u_has_ui > 0.5) {
-        // another panel underneath: show it blurred only (no second tint/dispersion)
-        float m = smoothstep(0.015, 0.06, ui / ws);
-        col = mix(col, texture(u_blur1, buv(frag)).rgb, m);
+        // another panel underneath: decided on heavily blurred images so the
+        // transition is smooth (no seams at text), shown blurred with half the tint
+        // so stacked cards still read as separate layers; dispersion stays single
+        vec2 bq = buv(frag);
+        vec3 bc = texture(u_blur1, bq).rgb;
+        vec3 dd = abs(bc - texture(u_blur2, bq).rgb);
+        float m = smoothstep(0.02, 0.09, max(dd.r, max(dd.g, dd.b)));
+        vec3 under = mix(bc, u_tint.rgb, u_tint.a * 0.5);
+        col = mix(col, under, m);
     }
+    // neutral hairline so cards separate from what is behind them
+    col = mix(col, vec3(1.0), 0.07 * smoothstep(-1.6 * u_ppp, -0.4 * u_ppp, d));
     float a = clamp(0.5 - d, 0.0, 1.0);
     o = vec4(col * a, a);
 }
@@ -549,7 +553,7 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, small2: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 
@@ -593,6 +597,7 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         if ensure(gl, &mut res.cur, sw, sh).is_none()
             || ensure(gl, &mut res.small, sw4, sh4).is_none()
             || ensure(gl, &mut res.small1, sw4, sh4).is_none()
+            || ensure(gl, &mut res.small2, sw4, sh4).is_none()
             || ensure(gl, &mut res.tmp, sw4, sh4).is_none()
         {
             return;
@@ -607,7 +612,8 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         let scene = if has_ov { res.scene.as_ref().unwrap() } else { cur };
         let ov = if has_ui { res.ov.as_ref().unwrap() } else { cur };
         // 2-3. quarter-size separable gaussian of a region of a screen-sized texture
-        let (small, small1, tmp) = (res.small.as_ref().unwrap(), res.small1.as_ref().unwrap(), res.tmp.as_ref().unwrap());
+        let (small, small1, small2, tmp) =
+            (res.small.as_ref().unwrap(), res.small1.as_ref().unwrap(), res.small2.as_ref().unwrap(), res.tmp.as_ref().unwrap());
         let blur_into = |src: &Tex, small: &Tex| {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src.fbo));
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
@@ -632,6 +638,7 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
         blur_into(scene, small);
         if has_ui {
             blur_into(cur, small1);
+            blur_into(ov, small2);
         }
 
         // 4. composite onto the screen
@@ -670,6 +677,7 @@ unsafe fn paint(gl: &glow::Context, info: &egui::PaintCallbackInfo, card: Rect, 
             (2, "u_cur", cur.tex),
             (3, "u_blur", small.tex),
             (4, "u_blur1", small1.tex),
+            (5, "u_blur2", small2.tex),
         ] {
             gl.active_texture(glow::TEXTURE0 + unit);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));

@@ -2578,7 +2578,13 @@ impl App {
             .resizable(false)
             .default_width(320.0)
             .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .default_pos(
+                // DV_EXPORT_AT="x,y" places it for screenshots (e.g. over the inspector)
+                std::env::var("DV_EXPORT_AT")
+                    .ok()
+                    .and_then(|v| v.split_once(',').and_then(|(x, y)| Some(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))))
+                    .unwrap_or(ctx.content_rect().center()),
+            )
             .show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("내보내기").font(FontId::new(15.0, theme::ui_bold())).color(INK));
