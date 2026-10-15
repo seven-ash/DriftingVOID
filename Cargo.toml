@@ -11,7 +11,7 @@ path = "src/main.rs"
 ab_glyph = "0.2.32"
 arboard = "3.7.0"
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
-egui = { version = "0.36.2", default-features = false }
+egui = { version = "0.36.2", default-features = false, features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 memmap2 = "0.9.11"
 raw-window-handle = "0.6"

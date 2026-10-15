@@ -59,6 +59,8 @@ const PALETTE: &[Color32] = &[
     Color32::from_rgb(120, 120, 120),
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub color: Color32,
     pub brush_size: f32,
@@ -443,20 +445,41 @@ enum Pending {
     Quit,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum ExportRegion {
     Frame,
     Content,
     View,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum ExportBg {
     Transparent,
     White,
     Custom,
 }
 
+/// Remembered between runs: %APPDATA%/DriftingVOID/prefs.json
+#[derive(serde::Serialize)]
+struct PrefsOut<'a> {
+    settings: &'a Settings,
+    recent: &'a [Color32],
+    export: Option<&'a ExportDlg>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct PrefsIn {
+    settings: Option<Settings>,
+    recent: Vec<Color32>,
+    export: Option<ExportDlg>,
+}
+
+fn prefs_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("DriftingVOID").join("prefs.json"))
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ExportDlg {
     region: ExportRegion,
     padding: f32,
@@ -508,6 +531,8 @@ pub struct App {
     frames: u64,
     rail_active: Option<Rect>,
     space_held: bool,
+    last_export: Option<ExportDlg>,
+    prefs_saved: String,
     now: f64,
     ime_guard_until: f64,
     /// Tool indicator glide: (from y, to y, start time).
@@ -567,6 +592,8 @@ impl App {
             frames: 0,
             rail_active: None,
             space_held: false,
+            last_export: None,
+            prefs_saved: String::new(),
             now: 0.0,
             ime_guard_until: 0.0,
             ind_anim: (f32::NAN, f32::NAN, 0.0),
@@ -578,6 +605,16 @@ impl App {
             show_log: false,
         };
         crate::penhook::install(cc);
+        if let Some(text) = prefs_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+            if let Ok(pr) = serde_json::from_str::<PrefsIn>(&text) {
+                if let Some(st) = pr.settings {
+                    app.s = st;
+                }
+                app.recent = pr.recent;
+                app.last_export = pr.export;
+                app.prefs_saved = text;
+            }
+        }
         if let Some(p) = open {
             app.open_path(p);
         }
@@ -941,6 +978,7 @@ impl App {
                 }
             }
             Pending::Quit => {
+                self.save_prefs();
                 self.modified = false;
                 self.pending = None;
                 std::process::exit(0);
@@ -1100,6 +1138,21 @@ impl App {
             }
         }
         None
+    }
+
+    fn save_prefs(&mut self) {
+        let out = PrefsOut { settings: &self.s, recent: &self.recent, export: self.last_export.as_ref() };
+        let Ok(text) = serde_json::to_string_pretty(&out) else { return };
+        if text != self.prefs_saved {
+            if let Some(p) = prefs_path() {
+                if let Some(dir) = p.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if std::fs::write(p, &text).is_ok() {
+                    self.prefs_saved = text;
+                }
+            }
+        }
     }
 
     fn drop_stale_ime(&self, ctx: &egui::Context) {
@@ -2197,14 +2250,21 @@ impl App {
     fn open_export(&mut self) {
         self.finish_text_edit();
         if self.export.is_none() {
-            self.export = Some(ExportDlg {
-                region: if self.doc.export_frame.is_some() { ExportRegion::Frame } else { ExportRegion::Content },
+            let mut d = self.last_export.clone().unwrap_or(ExportDlg {
+                region: ExportRegion::Content,
                 padding: 20.0,
                 scale: 1.0,
                 bg: ExportBg::White,
                 bg_color: Color32::from_rgb(250, 247, 240),
                 jpeg_quality: 92,
             });
+            if self.doc.export_frame.is_some() && self.last_export.is_none() {
+                d.region = ExportRegion::Frame;
+            }
+            if self.doc.export_frame.is_none() && d.region == ExportRegion::Frame {
+                d.region = ExportRegion::Content;
+            }
+            self.export = Some(d);
         }
     }
 
@@ -2354,6 +2414,7 @@ impl App {
                 self.copy_region(r, d.scale, bg);
             }
         }
+        self.last_export = Some(d.clone());
         if open {
             self.export = Some(d);
         }
@@ -3945,6 +4006,9 @@ impl eframe::App for App {
             self.import_paths(dropped, at);
         }
 
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.save_prefs();
+        }
         if ctx.input(|i| i.viewport().close_requested()) && self.modified && self.pending.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending = Some(Pending::Quit);
@@ -3998,6 +4062,9 @@ impl eframe::App for App {
             self.title = title;
         }
         self.frames += 1;
+        if self.frames % 90 == 0 {
+            self.save_prefs();
+        }
         if self.drag.is_some() || crate::penhook::state().barrel || self.frames < 6 {
             ctx.request_repaint();
         }
