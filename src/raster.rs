@@ -119,38 +119,56 @@ impl RasterLayer {
 }
 
 impl RasterLayer {
-    /// Splits off the pixels inside the given world rectangles:
-    /// returns (patch, rest), both with this layer's offset.
-    pub fn lift(&self, rects: &[Rect]) -> (RasterLayer, RasterLayer) {
+    /// Splits off the pixels whose centres lie inside the given world polygons
+    /// (even-odd rule): returns (patch, rest), both with this layer's offset.
+    pub fn lift(&self, polys: &[Vec<Pos2>]) -> (RasterLayer, RasterLayer) {
         let mut patch = RasterLayer { offset: self.offset, tiles: Default::default() };
         let mut rest = self.clone();
-        for r in rects {
-            let lr = r.translate(-self.offset);
-            let (x0, y0, x1, y1) = (lr.min.x.floor() as i32, lr.min.y.floor() as i32, lr.max.x.ceil() as i32, lr.max.y.ceil() as i32);
-            if x1 <= x0 || y1 <= y0 {
+        let mut touched = std::collections::HashSet::new();
+        for poly in polys {
+            if poly.len() < 3 {
                 continue;
             }
-            for ty in y0.div_euclid(TILE)..=(y1 - 1).div_euclid(TILE) {
-                for tx in x0.div_euclid(TILE)..=(x1 - 1).div_euclid(TILE) {
-                    let key = (tx, ty);
-                    let Some(src) = self.tiles.get(&key) else { continue };
-                    let (ox, oy) = (tx * TILE, ty * TILE);
-                    let (sx0, sx1) = (x0.max(ox) - ox, x1.min(ox + TILE) - ox);
-                    let (sy0, sy1) = (y0.max(oy) - oy, y1.min(oy + TILE) - oy);
-                    let pt = Arc::make_mut(patch.tiles.entry(key).or_insert_with(|| Arc::new(Tile::empty())));
-                    let rt = Arc::make_mut(rest.tiles.get_mut(&key).unwrap());
-                    for y in sy0..sy1 {
-                        let a = ((y * TILE + sx0) * 4) as usize;
-                        let b = ((y * TILE + sx1) * 4) as usize;
-                        pt.px[a..b].copy_from_slice(&src.px[a..b]);
-                        rt.px[a..b].fill(0);
+            let lp: Vec<Pos2> = poly.iter().map(|p| *p - self.offset).collect();
+            let b = Rect::from_points(&lp);
+            let (y0, y1) = (b.min.y.floor() as i32, b.max.y.ceil() as i32);
+            let mut xs: Vec<f32> = Vec::new();
+            for y in y0..y1 {
+                let yc = y as f32 + 0.5;
+                xs.clear();
+                for i in 0..lp.len() {
+                    let (a, c) = (lp[i], lp[(i + 1) % lp.len()]);
+                    if (a.y <= yc) != (c.y <= yc) {
+                        xs.push(a.x + (yc - a.y) / (c.y - a.y) * (c.x - a.x));
                     }
-                    pt.rev = next_rev();
-                    rt.rev = next_rev();
+                }
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                for pair in xs.chunks_exact(2) {
+                    let xa = (pair[0] - 0.5).ceil() as i32;
+                    let xb = (pair[1] - 0.5).floor() as i32;
+                    for x in xa..=xb {
+                        let (k, i) = tile_of(x, y);
+                        let Some(src) = self.tiles.get(&k) else { continue };
+                        if src.px[i + 3] == 0 {
+                            continue;
+                        }
+                        let pt = Arc::make_mut(patch.tiles.entry(k).or_insert_with(|| Arc::new(Tile::empty())));
+                        pt.px[i..i + 4].copy_from_slice(&src.px[i..i + 4]);
+                        let rt = Arc::make_mut(rest.tiles.get_mut(&k).unwrap());
+                        rt.px[i..i + 4].fill(0);
+                        touched.insert(k);
+                    }
                 }
             }
         }
-        patch.tiles.retain(|_, t| !t.is_empty());
+        for k in touched {
+            if let Some(t) = patch.tiles.get_mut(&k) {
+                Arc::make_mut(t).rev = next_rev();
+            }
+            if let Some(t) = rest.tiles.get_mut(&k) {
+                Arc::make_mut(t).rev = next_rev();
+            }
+        }
         rest.tiles.retain(|_, t| !t.is_empty());
         (patch, rest)
     }

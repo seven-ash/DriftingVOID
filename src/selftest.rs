@@ -138,7 +138,11 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
             let i = doc.index_of(id).unwrap();
             let o = doc.layers[i].clone();
             let part = if raster {
-                Part::Pixels(vec![Rect::from_min_max(pos2(520.0, 480.0), pos2(640.0, 640.0))])
+                if std::env::var("SB_SUB").as_deref() == Ok("tri") {
+                    Part::Pixels(vec![vec![pos2(520.0, 470.0), pos2(760.0, 560.0), pos2(520.0, 650.0)]])
+                } else {
+                    Part::Pixels(vec![vec![pos2(520.0, 480.0), pos2(640.0, 480.0), pos2(640.0, 640.0), pos2(520.0, 640.0)]])
+                }
             } else {
                 Part::Strokes(vec![0])
             };

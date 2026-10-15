@@ -16,6 +16,7 @@ use crate::vector::{VStroke, radius_for};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     Select,
+    Lasso,
     Hand,
     Brush,
     Pen,
@@ -32,6 +33,7 @@ pub enum Tool {
 
 const TOOLS: &[(Tool, &str, &str, Key)] = &[
     (Tool::Select, "선택", "V", Key::V),
+    (Tool::Lasso, "올가미 선택", "Q", Key::Q),
     (Tool::Hand, "화면 이동", "H", Key::H),
     (Tool::Brush, "브러시", "B", Key::B),
     (Tool::Pen, "펜 (벡터)", "P", Key::P),
@@ -128,6 +130,8 @@ enum Drag {
     Size { anchor: Pos2, start: f32, x0: f32 },
     /// `full`: Ctrl held — only items entirely inside count (else: centre inside).
     Marquee { start: Pos2, cur: Pos2, full: bool },
+    /// Free-form selection outline (world points).
+    Lasso { pts: Vec<Pos2> },
     MoveMany { start: Pos2, origs: Vec<(Layer, Part)>, d: Vec2 },
     /// Group scale/rotate about the selection's common centre.
     Group { rotate: bool, center: Pos2, start: Pos2, box_: Rect, origs: Vec<(Layer, Part)>, s: f32, th: f32 },
@@ -139,15 +143,15 @@ pub(crate) enum Part {
     Whole,
     /// Indices of selected pen strokes.
     Strokes(Vec<usize>),
-    /// World rectangles of selected brush pixels.
-    Pixels(Vec<Rect>),
+    /// World polygons of selected brush pixels (boxes are 4-point polygons).
+    Pixels(Vec<Vec<Pos2>>),
 }
 
 /// Selections inside drawing layers (pen strokes, brush pixel boxes).
 #[derive(Clone, Default)]
 struct SubSel {
     strokes: Vec<(LayerId, Vec<usize>)>,
-    pixels: Vec<(LayerId, Vec<Rect>)>,
+    pixels: Vec<(LayerId, Vec<Vec<Pos2>>)>,
 }
 
 impl SubSel {
@@ -193,10 +197,10 @@ pub(crate) fn apply_part(o: &Layer, part: &Part, c: Pos2, s: f32, th: f32, d: Ve
             }
             l
         }
-        Part::Pixels(rects) => {
+        Part::Pixels(polys) => {
             let mut l = o.clone();
             if let LayerKind::Raster(r) = &mut l.kind {
-                let (mut patch, mut rest) = r.lift(rects);
+                let (mut patch, mut rest) = r.lift(polys);
                 if plain_move {
                     patch.offset += d.round();
                 } else if let Some(t) = crate::raster::transformed(&patch, c, s, th) {
@@ -210,18 +214,34 @@ pub(crate) fn apply_part(o: &Layer, part: &Part, c: Pos2, s: f32, th: f32, d: Ve
     }
 }
 
-/// Where a selected pixel box ends up after the same transform.
-fn map_rect(r: Rect, c: Pos2, s: f32, th: f32, d: Vec2) -> Rect {
+/// Where a selected pixel outline ends up after the same transform.
+fn map_poly(poly: &[Pos2], c: Pos2, s: f32, th: f32, d: Vec2) -> Vec<Pos2> {
     if s == 1.0 && th == 0.0 {
-        return r.translate(d.round());
+        return poly.iter().map(|p| *p + d.round()).collect();
     }
     let (sin, cos) = th.sin_cos();
-    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| {
-        let q = (p - c) * s;
-        c + vec2(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + d
-    });
-    let b = Rect::from_points(&pts);
-    Rect::from_min_max(b.min.floor(), b.max.ceil())
+    poly.iter()
+        .map(|p| {
+            let q = (*p - c) * s;
+            c + vec2(q.x * cos - q.y * sin, q.x * sin + q.y * cos) + d
+        })
+        .collect()
+}
+
+fn rect_poly(r: Rect) -> Vec<Pos2> {
+    vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+}
+
+/// Even-odd point-in-polygon test.
+fn in_poly(p: Pos2, poly: &[Pos2]) -> bool {
+    let mut inside = false;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        if (a.y <= p.y) != (b.y <= p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -752,9 +772,9 @@ impl App {
                 out.push((l.clone(), Part::Strokes(idx.clone())));
             }
         }
-        for (id, rects) in &self.sub.pixels {
+        for (id, polys) in &self.sub.pixels {
             if let Some(l) = self.doc.get(*id).filter(|l| !l.locked) {
-                out.push((l.clone(), Part::Pixels(rects.clone())));
+                out.push((l.clone(), Part::Pixels(polys.clone())));
             }
         }
         out
@@ -772,9 +792,9 @@ impl App {
                 }
             }
         }
-        for (_, rects) in &self.sub.pixels {
-            for r in rects {
-                add(*r);
+        for (_, polys) in &self.sub.pixels {
+            for p in polys {
+                add(Rect::from_points(p));
             }
         }
         acc
@@ -792,14 +812,14 @@ impl App {
                 }
             }
         }
-        self.sub.pixels.iter().any(|(_, rs)| rs.iter().any(|r| r.contains(w)))
+        self.sub.pixels.iter().any(|(_, ps)| ps.iter().any(|p| in_poly(w, p)))
     }
 
     /// Applies a finished move/transform to the stored pixel boxes.
     fn remap_pixel_sel(&mut self, c: Pos2, s: f32, th: f32, d: Vec2) {
-        for (_, rects) in &mut self.sub.pixels {
-            for r in rects.iter_mut() {
-                *r = map_rect(*r, c, s, th, d);
+        for (_, polys) in &mut self.sub.pixels {
+            for p in polys.iter_mut() {
+                *p = map_poly(p, c, s, th, d);
             }
         }
     }
@@ -1045,9 +1065,9 @@ impl App {
                 self.modified = true;
             }
         }
-        for (id, rects) in sub.pixels {
+        for (id, polys) in sub.pixels {
             if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                *r = r.lift(&rects).1;
+                *r = r.lift(&polys).1;
                 self.changed = true;
                 self.modified = true;
             }
@@ -1203,7 +1223,7 @@ impl App {
                     LayerKind::Vector(v) => idx.iter().filter_map(|&i| v.strokes.get(i)).map(|s| s.bounds.translate(v.offset)).reduce(|a, b| a.union(b)),
                     _ => None,
                 },
-                Part::Pixels(rs) => rs.iter().copied().reduce(|a, b| a.union(b)),
+                Part::Pixels(ps) => ps.iter().map(|p| Rect::from_points(p)).reduce(|a, b| a.union(b)),
             }
         };
         let items: Vec<(usize, Rect)> = parts.iter().enumerate().filter_map(|(i, p)| bounds(p).map(|b| (i, b))).collect();
@@ -1253,8 +1273,8 @@ impl App {
             }
             if let Part::Pixels(_) = part {
                 if let Some(e) = self.sub.pixels.iter_mut().find(|x| x.0 == o.id) {
-                    for r in e.1.iter_mut() {
-                        *r = r.translate(d.round());
+                    for p in e.1.iter_mut() {
+                        *p = map_poly(p, Pos2::ZERO, 1.0, 0.0, d);
                     }
                 }
             }
@@ -1475,6 +1495,17 @@ impl App {
                     }
                 }
             }
+            Tool::Lasso => {
+                // drag inside the current selection moves it; anywhere else draws a new outline
+                if !self.sub.is_empty() || self.sel.is_some() {
+                    if self.hits_selection(w, tol) {
+                        let origs = self.sel_parts();
+                        self.drag = Some(Drag::MoveMany { start: w, origs, d: Vec2::ZERO });
+                        return;
+                    }
+                }
+                self.drag = Some(Drag::Lasso { pts: vec![w] });
+            }
             Tool::Brush | Tool::Eraser => {
                 let erase = self.tool == Tool::Eraser;
                 let id = if erase {
@@ -1682,11 +1713,17 @@ impl App {
                 self.drag = Some(Drag::Marquee { start, cur: w, full });
                 return;
             }
+            Some(Drag::Lasso { ref mut pts }) => {
+                if pts.last().is_none_or(|q| (*q - w).length() * zoom > 2.0) {
+                    pts.push(w);
+                }
+                return;
+            }
             _ => {}
         }
         let Some(drag) = self.drag.as_mut() else { return };
         match drag {
-            Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } => {}
+            Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } | Drag::Lasso { .. } => {}
             Drag::Group { rotate, center, start, origs, s: s_out, th: th_out, .. } => {
                 let c = *center;
                 let (mut s, mut th) = (1.0f32, 0.0f32);
@@ -1935,7 +1972,7 @@ impl App {
                                 if let Some(b) = rl.bounds() {
                                     let ir = r.intersect(b);
                                     if ir.width() >= 1.0 && ir.height() >= 1.0 {
-                                        sub.pixels.push((l.id, vec![Rect::from_min_max(ir.min.floor(), ir.max.ceil())]));
+                                        sub.pixels.push((l.id, vec![rect_poly(Rect::from_min_max(ir.min.floor(), ir.max.ceil()))]));
                                     }
                                 }
                             }
@@ -1969,6 +2006,42 @@ impl App {
             }
             Drag::MoveMany { d, .. } => {
                 self.remap_pixel_sel(Pos2::ZERO, 1.0, 0.0, d);
+            }
+            Drag::Lasso { pts } => {
+                let b = Rect::from_points(&pts);
+                if pts.len() < 3 || b.width().max(b.height()) * self.zoom < 4.0 {
+                    self.select_only(None);
+                    return;
+                }
+                // same rules as the box: centres inside; pen strokes one by one;
+                // brush pixels inside the outline
+                let mut ids = Vec::new();
+                let mut sub = SubSel::default();
+                for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked) {
+                    match &l.kind {
+                        LayerKind::Vector(v) => {
+                            let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| in_poly(v.strokes[i].bounds.translate(v.offset).center(), &pts)).collect();
+                            if !idx.is_empty() {
+                                sub.strokes.push((l.id, idx));
+                            }
+                        }
+                        LayerKind::Raster(rl) => {
+                            if rl.bounds().is_some_and(|rb| rb.intersects(b)) {
+                                sub.pixels.push((l.id, vec![pts.clone()]));
+                            }
+                        }
+                        _ => {
+                            if l.bounds().is_some_and(|lb| in_poly(lb.center(), &pts)) {
+                                ids.push(l.id);
+                            }
+                        }
+                    }
+                }
+                let (ns, np) = (sub.strokes.iter().map(|x| x.1.len()).sum::<usize>(), sub.pixels.len());
+                self.sel = ids.first().copied();
+                self.extra_sel = ids.iter().skip(1).copied().collect();
+                self.sub = sub;
+                self.status = format!("선택: 레이어 {} · 펜 획 {ns} · 브러시 영역 {np}", ids.len());
             }
             Drag::Group { center, s, th, .. } => {
                 self.remap_pixel_sel(center, s, th, Vec2::ZERO);
@@ -2567,7 +2640,7 @@ impl App {
                 theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                     let groups: [&[Tool]; 4] = [
-                        &[Tool::Select, Tool::Hand],
+                        &[Tool::Select, Tool::Lasso, Tool::Hand],
                         &[Tool::Brush, Tool::Pen, Tool::Eraser],
                         &[Tool::Text, Tool::Line, Tool::Arrow, Tool::Rect, Tool::Ellipse],
                         &[Tool::Crop, Tool::Frame, Tool::Picker],
@@ -2764,6 +2837,10 @@ impl App {
             Tool::Select => {
                 ui.strong("선택");
                 ui.small("클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전");
+            }
+            Tool::Lasso => {
+                ui.strong("올가미 선택");
+                ui.small("자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽을 끌면 이동");
             }
             Tool::Hand => {
                 ui.strong("화면 이동");
@@ -3709,13 +3786,20 @@ impl App {
                     }
                 }
             }
-            for (_, rects) in &self.sub.pixels {
-                for r in rects {
-                    let sr = xf.rect_w2s(*r);
-                    let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+            for (_, polys) in &self.sub.pixels {
+                for poly in polys {
+                    let mut pts: Vec<Pos2> = poly.iter().map(|p| xf.w2s(*p)).collect();
+                    pts.push(pts[0]);
                     painter.extend(Shape::dashed_line(&pts, Stroke::new(1.5, Color32::WHITE), 5.0, 5.0));
                     painter.extend(Shape::dashed_line_with_offset(&pts, Stroke::new(1.5, Color32::BLACK), &[5.0], &[5.0], 5.0));
                 }
+            }
+        }
+        if let Some(Drag::Lasso { pts }) = &self.drag {
+            let mut sp: Vec<Pos2> = pts.iter().map(|p| xf.w2s(*p)).collect();
+            if sp.len() > 1 {
+                sp.push(sp[0]);
+                painter.add(Shape::line(sp, Stroke::new(1.5, ACCENT)));
             }
         }
         if let Some(Drag::Marquee { start, cur, .. }) = &self.drag {

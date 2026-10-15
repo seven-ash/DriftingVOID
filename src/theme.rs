@@ -261,6 +261,16 @@ pub fn tool_icon(p: &Painter, tool: crate::app::Tool, r: Rect, c: Color32) {
             let pts = vec![at(0.25, 0.12), at(0.25, 0.82), at(0.43, 0.64), at(0.56, 0.9), at(0.66, 0.85), at(0.54, 0.6), at(0.78, 0.6)];
             p.add(egui::Shape::closed_line(pts, s));
         }
+        Tool::Lasso => {
+            let pts: Vec<Pos2> = (0..=20)
+                .map(|i| {
+                    let a = i as f32 / 20.0 * std::f32::consts::TAU;
+                    at(0.52 + 0.34 * a.cos(), 0.40 + 0.24 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+            p.add(egui::Shape::line(vec![at(0.30, 0.56), at(0.24, 0.74), at(0.34, 0.86)], s));
+        }
         Tool::Hand => {
             for (i, h) in [0.42f32, 0.28, 0.3, 0.42].iter().enumerate() {
                 let x = 0.3 + i as f32 * 0.13;
