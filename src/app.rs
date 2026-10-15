@@ -473,6 +473,16 @@ impl App {
         if let Some(p) = open {
             app.open_path(p);
         }
+        if let Ok(fam) = std::env::var("DV_TEST_TEXT_FONT") {
+            // reproduces "edit a text box that uses an installed font" for testing
+            app.s.text_family = fam;
+            app.s.text_style = "Regular".into();
+            app.tool = Tool::Text;
+            let id = app.new_text_layer(pos2(0.0, 0.0), "테스트 Test".into());
+            app.sel = Some(id);
+            app.editing = Some(id);
+            app.edit_focus = true;
+        }
         if std::env::var_os("DV_SHOW_EXPORT").is_some() {
             app.open_export();
         }
@@ -2103,6 +2113,15 @@ impl App {
     }
 
     fn tool_options(&mut self, ui: &mut egui::Ui) {
+        // Text and shape tools show one set of style controls: they edit the selected
+        // layer of that kind (and become the defaults for new ones), or just the defaults.
+        let sel_idx = self.sel.and_then(|id| self.doc.index_of(id)).filter(|_| self.extra_sel.is_empty());
+        let sel_text = sel_idx.filter(|&i| matches!(self.doc.layers[i].kind, LayerKind::Text(_)) && self.tool == Tool::Text);
+        let sel_shape = sel_idx.filter(|&i| {
+            matches!(self.doc.layers[i].kind, LayerKind::Shape(_))
+                && matches!(self.tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse)
+        });
+        let mut layer_changed = false;
         let s = &mut self.s;
         match self.tool {
             Tool::Brush => {
@@ -2130,22 +2149,67 @@ impl App {
             }
             Tool::Text => {
                 ui.strong("글자");
-                ui.add(egui::Slider::new(&mut s.text_size, 6.0..=400.0).logarithmic(true).text("크기"));
-                font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_filter);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut s.text_bg, "배경 상자");
-                    ui.color_edit_button_srgba(&mut s.text_bg_color);
-                });
+                if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
+                    layer_changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
+                    layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_filter);
+                    ui.horizontal(|ui| {
+                        let mut has = t.bg.is_some();
+                        if ui.checkbox(&mut has, "배경 상자").changed() {
+                            t.bg = has.then_some(s.text_bg_color);
+                            layer_changed = true;
+                        }
+                        if let Some(bg) = &mut t.bg {
+                            layer_changed |= ui.color_edit_button_srgba(bg).changed();
+                        }
+                    });
+                    // the next new text starts from the same style
+                    s.text_size = t.size;
+                    s.text_family = t.family.clone();
+                    s.text_style = t.style.clone();
+                    s.text_bg = t.bg.is_some();
+                    if let Some(c) = t.bg {
+                        s.text_bg_color = c;
+                    }
+                    ui.small("선택한 글자에 적용 · 새 글자도 이 설정으로 시작");
+                } else {
+                    ui.add(egui::Slider::new(&mut s.text_size, 6.0..=400.0).logarithmic(true).text("크기"));
+                    font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_filter);
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut s.text_bg, "배경 상자");
+                        ui.color_edit_button_srgba(&mut s.text_bg_color);
+                    });
+                }
                 ui.small("빈 곳 클릭: 새 글 · 글 클릭: 수정 · Esc: 끝내기");
             }
             Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => {
                 ui.strong("도형");
-                ui.add(egui::Slider::new(&mut s.shape_width, 0.0..=60.0).text("선 굵기"));
-                if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut s.shape_fill, "채우기");
-                        ui.color_edit_button_srgba(&mut s.fill_color);
-                    });
+                if let Some(LayerKind::Shape(sh)) = sel_shape.map(|i| &mut self.doc.layers[i].kind) {
+                    layer_changed |= ui.add(egui::Slider::new(&mut sh.width, 0.0..=60.0).text("선 굵기")).changed();
+                    if matches!(sh.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+                        ui.horizontal(|ui| {
+                            let mut has = sh.fill.is_some();
+                            if ui.checkbox(&mut has, "채우기").changed() {
+                                sh.fill = has.then_some(s.fill_color);
+                                layer_changed = true;
+                            }
+                            if let Some(f) = &mut sh.fill {
+                                layer_changed |= ui.color_edit_button_srgba(f).changed();
+                            }
+                        });
+                    }
+                    s.shape_width = sh.width;
+                    if let Some(f) = sh.fill {
+                        s.fill_color = f;
+                    }
+                    ui.small("선택한 도형에 적용 · 새 도형도 이 설정으로 시작");
+                } else {
+                    ui.add(egui::Slider::new(&mut s.shape_width, 0.0..=60.0).text("선 굵기"));
+                    if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut s.shape_fill, "채우기");
+                            ui.color_edit_button_srgba(&mut s.fill_color);
+                        });
+                    }
                 }
                 ui.small("Shift: 수평·수직·45° / 정사각·정원 · Ctrl+드래그: 굵기 (선택한 도형에도 적용)");
             }
@@ -2184,6 +2248,9 @@ impl App {
                 ui.small("캔버스에서 색 집기");
             }
         }
+        if layer_changed {
+            self.mark();
+        }
         ui.separator();
         ui.checkbox(&mut self.s.touch_draw, "손가락 터치로도 그리기")
             .on_hover_text("끄면 손가락 한 개는 화면 이동, 두 개는 확대/축소. 펜은 항상 그려.");
@@ -2198,6 +2265,8 @@ impl App {
             ui.label(egui::RichText::new(format!("{}개 선택 · 아래는 첫 번째 항목", self.extra_sel.len() + 1)).color(INK_3));
         }
         let Some(idx) = self.doc.index_of(id) else { return };
+        let tool = self.tool;
+        let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
         let mut start_crop = false;
         {
@@ -2257,18 +2326,23 @@ impl App {
                 LayerKind::Text(t) => {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
-                    changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
-                    changed |= ui.color_edit_button_srgba(&mut t.color).changed();
-                    changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_filter);
+                    if tool != Tool::Text {
+                        changed |= ui.add(egui::Slider::new(&mut t.size, 6.0..=400.0).logarithmic(true).text("크기")).changed();
+                        changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_filter);
+                        ui.horizontal(|ui| {
+                            let mut has = t.bg.is_some();
+                            if ui.checkbox(&mut has, "배경 상자").changed() {
+                                t.bg = has.then_some(self.s.text_bg_color);
+                                changed = true;
+                            }
+                            if let Some(bg) = &mut t.bg {
+                                changed |= ui.color_edit_button_srgba(bg).changed();
+                            }
+                        });
+                    }
                     ui.horizontal(|ui| {
-                        let mut has = t.bg.is_some();
-                        if ui.checkbox(&mut has, "배경 상자").changed() {
-                            t.bg = has.then_some(self.s.text_bg_color);
-                            changed = true;
-                        }
-                        if let Some(bg) = &mut t.bg {
-                            changed |= ui.color_edit_button_srgba(bg).changed();
-                        }
+                        ui.label("색");
+                        changed |= ui.color_edit_button_srgba(&mut t.color).changed();
                     });
                     ui.horizontal(|ui| {
                         let mut wrap = t.wrap > 0.0;
@@ -2283,10 +2357,13 @@ impl App {
                 }
                 LayerKind::Shape(s) => {
                     ui.horizontal(|ui| {
+                        ui.label("색");
                         changed |= ui.color_edit_button_srgba(&mut s.color).changed();
-                        changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).text("굵기")).changed();
+                        if !shape_tool {
+                            changed |= ui.add(egui::Slider::new(&mut s.width, 0.0..=60.0).text("굵기")).changed();
+                        }
                     });
-                    if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
+                    if !shape_tool && matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         ui.horizontal(|ui| {
                             let mut has = s.fill.is_some();
                             if ui.checkbox(&mut has, "채우기").changed() {
@@ -3056,6 +3133,11 @@ impl App {
         if !t.family.is_empty() {
             if let Some(l) = crate::fontdb::load(&t.family, &t.style) {
                 let key = format!("sys:{}|{}", t.family, t.style);
+                let fam = FontFamily::Name(key.clone().into());
+                // egui applies add_font on the next frame; using the family before that panics
+                if ctx.fonts(|f| f.definitions().families.contains_key(&fam)) {
+                    return fam;
+                }
                 if self.egui_fonts.insert(key.clone()) {
                     let mut data = egui::FontData::from_owned((*l.bytes).clone());
                     data.index = l.index;
@@ -3070,7 +3152,8 @@ impl App {
                         ],
                     });
                 }
-                return FontFamily::Name(key.into());
+                self.egui_fonts.remove(&key); // re-check next frame
+                ctx.request_repaint();
             }
         }
         FontFamily::Name(if t.style.to_lowercase().contains("bold") { "doc_bold".into() } else { "doc".into() })

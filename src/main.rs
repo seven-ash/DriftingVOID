@@ -16,6 +16,7 @@ mod text;
 mod vector;
 
 fn main() -> eframe::Result {
+    install_crash_log();
     let args: Vec<String> = std::env::args().skip(1).collect();
     fontdb::start_scan();
     if args.first().map(String::as_str) == Some("--selftest") {
@@ -58,4 +59,22 @@ fn window_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../assets/icon-256.png")).expect("bundled icon").to_rgba8();
     let (w, h) = img.dimensions();
     egui::IconData { rgba: img.into_raw(), width: w, height: h }
+}
+
+/// Release builds have no console, so panics go to %APPDATA%/DriftingVOID/crash.log.
+fn install_crash_log() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = std::env::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("DriftingVOID")) {
+            let _ = std::fs::create_dir_all(&dir);
+            let bt = std::backtrace::Backtrace::force_capture();
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let text = format!("[{secs}] v{} {info}\n{bt}\n\n", env!("CARGO_PKG_VERSION"));
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        prev(info);
+    }));
 }
