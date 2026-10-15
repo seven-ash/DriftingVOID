@@ -4060,6 +4060,29 @@ fn font_preview(ctx: &egui::Context, name: &str, style: &str) -> Option<(egui::T
     Some((tex, vec2(pm.width() as f32, pm.height() as f32) / ppp))
 }
 
+/// egui family for an installed font, registering it on first use. Returns None
+/// until egui has applied it (the next frame), so callers fall back for one frame.
+fn installed_font_family(ctx: &egui::Context, family: &str, style: &str) -> Option<FontFamily> {
+    if family.is_empty() {
+        return None;
+    }
+    let key = format!("sys:{family}|{style}");
+    let fam = FontFamily::Name(key.clone().into());
+    if ctx.fonts(|f| f.definitions().families.contains_key(&fam)) {
+        return Some(fam);
+    }
+    let l = crate::fontdb::load(family, style)?;
+    let mut data = egui::FontData::from_owned((*l.bytes).clone());
+    data.index = l.index;
+    ctx.add_font(egui::epaint::text::FontInsert {
+        name: key,
+        data,
+        families: vec![egui::epaint::text::InsertFontFamily { family: fam, priority: egui::epaint::text::FontPriority::Highest }],
+    });
+    ctx.request_repaint();
+    None
+}
+
 fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut String, fui: &mut FontUi) -> bool {
     let filter = &mut fui.filter;
     let previews = &mut fui.previews;
@@ -4068,6 +4091,11 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
     let shown = if family.is_empty() { DEFAULT_FONT.to_string() } else { family.clone() };
     ui.horizontal(|ui| {
         ui.label("글꼴");
+        // the closed box shows the chosen family in its own face
+        let shown: egui::WidgetText = match installed_font_family(ui.ctx(), family, style) {
+            Some(fam) => egui::RichText::new(shown).family(fam).size(theme::TEXT_BODY + 1.0).into(),
+            None => shown.into(),
+        };
         egui::ComboBox::from_id_salt(id).selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
             let Some(fams) = &fams else {
                 ui.label("설치된 글꼴 읽는 중…");
