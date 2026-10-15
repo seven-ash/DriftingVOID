@@ -531,6 +531,10 @@ pub struct App {
     frames: u64,
     rail_active: Option<Rect>,
     space_held: bool,
+    layer_drag: Option<LayerId>,
+    renaming: Option<LayerId>,
+    rename_buf: String,
+    rename_focus: bool,
     last_export: Option<ExportDlg>,
     prefs_saved: String,
     now: f64,
@@ -592,6 +596,10 @@ impl App {
             frames: 0,
             rail_active: None,
             space_held: false,
+            layer_drag: None,
+            renaming: None,
+            rename_buf: String::new(),
+            rename_focus: false,
             last_export: None,
             prefs_saved: String::new(),
             now: 0.0,
@@ -2949,51 +2957,161 @@ impl App {
         let mut select = None;
         ui.spacing_mut().item_spacing.y = 2.0;
         let width = ui.available_width();
-        for l in self.doc.layers.iter_mut().rev() {
+        let ctx = ui.ctx().clone();
+        // thumbnails: photos show their own (cropped) texture
+        let thumbs: Vec<Option<(egui::TextureId, Rect, Vec2)>> = {
+            let tex = &mut self.tex;
+            self.doc
+                .layers
+                .iter()
+                .map(|l| match &l.kind {
+                    LayerKind::Image(im) => {
+                        let id = tex.image(&ctx, im);
+                        let size = im.src.size();
+                        let uv = Rect::from_min_max((im.crop.min.to_vec2() / size).to_pos2(), (im.crop.max.to_vec2() / size).to_pos2());
+                        Some((id, uv, im.crop.size()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let n = self.doc.layers.len();
+        let mut rows: Vec<(usize, Rect)> = Vec::with_capacity(n);
+        let renaming = self.renaming;
+        let mut rename_done = false;
+        for di in 0..n {
+            let li = n - 1 - di; // list shows the top layer first
+            let l = &mut self.doc.layers[li];
             let selected = self.sel == Some(l.id) || self.extra_sel.contains(&l.id);
-            let (r, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click_and_drag());
+            rows.push((li, r));
             let eye_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(26.0, 26.0));
             let lock_r = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(26.0, 26.0));
+            let thumb_r = Rect::from_center_size(pos2(r.left() + 44.0, r.center().y), vec2(24.0, 24.0));
             let eye = ui.interact(eye_r, ui.id().with(("eye", l.id)), Sense::click());
             let lock = ui.interact(lock_r, ui.id().with(("lock", l.id)), Sense::click());
-            let p = ui.painter();
-            if selected {
+            let p = ui.painter().clone();
+            let dragging_this = self.layer_drag == Some(l.id);
+            if selected || dragging_this {
                 p.rect_filled(r, 8.0, FILL_2);
                 p.rect_filled(Rect::from_min_size(r.min + vec2(0.0, 7.0), vec2(3.0, 16.0)), 1.5, ACCENT);
             } else if resp.hovered() {
                 p.rect_filled(r, 8.0, FILL_1);
             }
             let dim = if l.visible { 1.0 } else { 0.45 };
-            theme::eye_icon(p, eye_r.center(), l.visible, if eye.hovered() { INK } else { INK_3 });
+            theme::eye_icon(&p, eye_r.center(), l.visible, if eye.hovered() { INK } else { INK_3 });
             if l.locked {
-                theme::lock_icon(p, lock_r.center(), INK_2);
+                theme::lock_icon(&p, lock_r.center(), INK_2);
             } else if lock.hovered() || resp.hovered() {
-                theme::lock_icon(p, lock_r.center(), FILL_3);
+                theme::lock_icon(&p, lock_r.center(), FILL_3);
             }
-            let clip = p.with_clip_rect(Rect::from_min_max(pos2(r.left() + 32.0, r.top()), pos2(r.right() - 32.0, r.bottom())));
-            let kind = clip.text(
-                pos2(r.left() + 34.0, r.center().y),
-                Align2::LEFT_CENTER,
-                l.kind_label(),
-                FontId::proportional(theme::TEXT_SMALL),
-                INK_3.gamma_multiply(dim),
-            );
-            clip.text(
-                pos2(kind.right() + 8.0, r.center().y),
-                Align2::LEFT_CENTER,
-                l.display_name(),
-                FontId::proportional(theme::TEXT_BODY),
-                (if selected { INK } else { INK_2 }).gamma_multiply(dim),
-            );
+            // thumbnail / kind chip
+            p.rect_filled(thumb_r, 5.0, FILL_1);
+            match thumbs[li] {
+                Some((tid, uv, size)) => {
+                    let k = (thumb_r.width() / size.x).min(thumb_r.height() / size.y);
+                    let ir = Rect::from_center_size(thumb_r.center(), size * k);
+                    p.image(tid, ir, uv, Color32::WHITE.gamma_multiply(dim));
+                }
+                None => {
+                    let glyph = match l.kind {
+                        LayerKind::Text(_) => Tool::Text,
+                        LayerKind::Shape(ref s) => match s.kind {
+                            ShapeKind::Line => Tool::Line,
+                            ShapeKind::Arrow => Tool::Arrow,
+                            ShapeKind::Rect => Tool::Rect,
+                            ShapeKind::Ellipse => Tool::Ellipse,
+                        },
+                        LayerKind::Vector(_) => Tool::Pen,
+                        _ => Tool::Brush,
+                    };
+                    theme::tool_icon(&p, glyph, thumb_r.shrink(5.0), INK_3.gamma_multiply(dim));
+                }
+            }
+            let name_r = Rect::from_min_max(pos2(r.left() + 62.0, r.top() + 3.0), pos2(r.right() - 32.0, r.bottom() - 3.0));
+            if renaming == Some(l.id) {
+                let te = ui.put(name_r, egui::TextEdit::singleline(&mut self.rename_buf).desired_width(name_r.width()));
+                if self.rename_focus {
+                    te.request_focus();
+                    self.rename_focus = false;
+                }
+                if te.lost_focus() {
+                    let enter_or_click = !ui.input(|i| i.key_pressed(Key::Escape));
+                    if enter_or_click && !self.rename_buf.trim().is_empty() {
+                        l.name = self.rename_buf.trim().to_string();
+                        if let LayerKind::Text(_) = l.kind {
+                            l.name = self.rename_buf.trim().to_string();
+                        }
+                        changed = true;
+                    }
+                    rename_done = true;
+                }
+            } else {
+                let clip = p.with_clip_rect(name_r.intersect(ui.clip_rect()));
+                clip.text(
+                    pos2(name_r.left(), r.center().y),
+                    Align2::LEFT_CENTER,
+                    l.display_name(),
+                    FontId::proportional(theme::TEXT_BODY),
+                    (if selected { INK } else { INK_2 }).gamma_multiply(dim),
+                );
+            }
             if eye.clicked() {
                 l.visible = !l.visible;
                 changed = true;
             } else if lock.clicked() {
                 l.locked = !l.locked;
                 changed = true;
+            } else if resp.double_clicked() && !matches!(l.kind, LayerKind::Text(_)) {
+                self.renaming = Some(l.id);
+                self.rename_buf = l.name.clone();
+                self.rename_focus = true;
             } else if resp.clicked() {
                 select = Some(l.id);
             }
+            if resp.drag_started() && renaming != Some(l.id) {
+                self.layer_drag = Some(l.id);
+            }
+        }
+        if rename_done {
+            self.renaming = None;
+        }
+
+        // drag to reorder: insertion line between rows, drop on release
+        if let Some(did) = self.layer_drag {
+            let pos = ui.input(|i| i.pointer.interact_pos());
+            let released = ui.input(|i| i.pointer.any_released());
+            if let (Some(pp), false) = (pos, rows.is_empty()) {
+                // slot k = gap above display row k (k == rows.len(): below the last)
+                let mut slot = rows.len();
+                for (k, (_, r)) in rows.iter().enumerate() {
+                    if pp.y < r.center().y {
+                        slot = k;
+                        break;
+                    }
+                }
+                let y = if slot < rows.len() { rows[slot].1.top() - 1.0 } else { rows[rows.len() - 1].1.bottom() + 1.0 };
+                let x0 = rows[0].1.left();
+                ui.painter().line_segment([pos2(x0 + 6.0, y), pos2(x0 + width - 6.0, y)], Stroke::new(2.0, ACCENT));
+                if released {
+                    if let Some(from) = self.doc.index_of(did) {
+                        // display slot -> layer index (list is top-first)
+                        let n = self.doc.layers.len();
+                        let mut to = n - slot; // index the moved layer should occupy before removal adjust
+                        let layer = self.doc.layers.remove(from);
+                        if to > from {
+                            to -= 1;
+                        }
+                        let to = to.min(self.doc.layers.len());
+                        self.doc.layers.insert(to, layer);
+                        changed = true;
+                    }
+                    self.layer_drag = None;
+                }
+            } else if released {
+                self.layer_drag = None;
+            }
+            ui.ctx().request_repaint();
         }
         if let Some(id) = select {
             if self.editing.is_some_and(|e| e != id) {
