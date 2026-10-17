@@ -43,6 +43,12 @@ L line, A arrow, R rectangle, O ellipse, C crop, F export frame, K 3D space
 Drawing layers are created when you first draw, reused afterwards, and removed
 when empty. Photos are placed under drawing layers.
 
+## G/R/S and Space
+
+With the select tool, G/R/S moves/rotates/scales the selection from the keyboard (on
+the 2D canvas too; layers in a space use the 3D modal). Holding Space during any
+drag pans the view while the dragged thing stays under the pointer.
+
 ## 3D workspace (Tab)
 
 Blender-style keys. Middle drag or the pen's side button orbits; Shift pans; Ctrl

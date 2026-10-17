@@ -191,6 +191,23 @@ impl Proj {
         }
     }
 
+    /// The 2D canvas itself as a projection (G/R/S on the canvas): the matched
+    /// camera followed by the canvas pan and zoom.
+    pub fn for_canvas(cam: &Camera, xf: &Xf, rect: Rect) -> Self {
+        let k = xf.zoom;
+        let off = xf.min.to_vec2() + xf.pan;
+        Self {
+            rect,
+            r: cam.r,
+            eye: cam.center,
+            f: cam.f * k as f64,
+            c: [off.x as f64 + cam.c[0] * k as f64, off.y as f64 + cam.c[1] * k as f64],
+            ppu: None,
+            near: 1e-3 * cam.f,
+            canvas: Some((k, off)),
+        }
+    }
+
     /// Canvas drawing transform in camera view.
     pub fn canvas_xf(&self) -> Option<Xf> {
         self.canvas.map(|(k, off)| Xf { min: Pos2::ZERO, pan: off, zoom: k })
@@ -389,7 +406,14 @@ pub fn pick(doc: &Document, proj: &Proj, space: u64, s: Pos2) -> Option<LayerId>
             continue;
         }
         let x = sub(add(o, scale(d, tt)), t);
-        let q = pos2((dot(x, u) / dot(u, u)) as f32 + pl.anchor.x, (dot(x, v) / dot(v, v)) as f32 + pl.anchor.y);
+        // plane coordinates; u and v may be oblique (walls follow their quad)
+        let (uu, uv, vv) = (dot(u, u), dot(u, v), dot(v, v));
+        let det = uu * vv - uv * uv;
+        if det.abs() < 1e-18 {
+            continue;
+        }
+        let (xu, xv) = (dot(x, u), dot(x, v));
+        let q = pos2(((xu * vv - xv * uv) / det) as f32 + pl.anchor.x, ((xv * uu - xu * uv) / det) as f32 + pl.anchor.y);
         if b.contains(q) && best.is_none_or(|(bt, _)| tt < bt) {
             best = Some((tt, l.id));
         }
@@ -563,7 +587,8 @@ impl Modal {
                 }
                 let w = mul_mm(&self.orig.base_r, &persp::euler_xyz(self.orig.rot));
                 let w2 = mul_mm(&persp::rodrigues(scale(normalize(u), th)), &w);
-                pl.rot = persp::euler_from(&mul_mm(&transpose(&self.orig.base_r), &w2));
+                let inv = persp::invert(&self.orig.base_r).unwrap_or_else(|| transpose(&self.orig.base_r));
+                pl.rot = persp::euler_from(&mul_mm(&inv, &w2));
             }
             Op::Scale => {
                 let mut f = match self.typed_value() {

@@ -174,17 +174,21 @@ pub struct Wall {
     /// Moves the plane along its normal (world units).
     #[serde(default)]
     pub offset: f64,
-    /// Snap the normal to the nearest space axis when it is within 15°.
-    #[serde(default = "yes")]
-    pub snap: bool,
+    /// Snap the normal to the nearest space axis when it is within 15° (off by
+    /// default: the quad itself is the truth).
+    #[serde(default)]
+    pub snap_axis: bool,
 }
 
-/// A wall in world space: `r` has columns u (right), v (down) and n = u × v (into
-/// the wall); `o` is the world point at corner 0.
+/// A wall in world space: `r` has columns u (along the top edge), v (down the side
+/// edge) and n (unit normal, into the wall); `o` is the world point at corner 0.
+/// u and v follow the quad's edges exactly, so they need not be perpendicular when
+/// the quad or the camera is slightly off; `skew_deg` says by how much.
 #[derive(Clone, Debug)]
 pub struct WallFrame {
     pub r: M3,
     pub o: V3,
+    pub skew_deg: f64,
 }
 
 impl WallFrame {
@@ -207,7 +211,13 @@ impl WallFrame {
     /// Wall coordinates (u, v) of a world point.
     pub fn uv(&self, x: V3) -> [f64; 2] {
         let d = sub(x, self.o);
-        [dot(d, self.col(0)), dot(d, self.col(1))]
+        match invert(&self.r) {
+            Some(ri) => {
+                let c = mul_mv(&ri, d);
+                [c[0], c[1]]
+            }
+            None => [dot(d, self.col(0)), dot(d, self.col(1))],
+        }
     }
 
     pub fn point(&self, uv: [f64; 2]) -> V3 {
@@ -237,23 +247,22 @@ pub fn wall_frame(cam: &Camera, w: &Wall) -> Option<WallFrame> {
         }
         Some(mul_mv(&rt, d))
     };
-    let d1 = dir(tl, tr, bl, br)?;
-    let d2 = dir(tl, bl, tr, br)?;
+    let d1 = normalize(dir(tl, tr, bl, br)?);
+    let d2 = normalize(dir(tl, bl, tr, br)?);
     let mut n = normalize(cross(d1, d2));
-    if w.snap {
+    // u and v are the quad's own edge directions, so grid lines run along its edges
+    let (mut u, mut v) = (d1, d2);
+    if w.snap_axis {
         let i = (0..3).max_by(|&a, &b| n[a].abs().partial_cmp(&n[b].abs()).unwrap()).unwrap();
         if n[i].abs() > 15f64.to_radians().cos() {
             let mut e = [0.0; 3];
             e[i] = n[i].signum();
             n = e;
+            u = normalize(sub(d1, scale(n, dot(d1, n))));
+            v = normalize(sub(d2, scale(n, dot(d2, n))));
         }
     }
-    let u = normalize(sub(d1, scale(n, dot(d1, n))));
-    let mut v = cross(n, u);
-    if dot(v, d2) < 0.0 {
-        v = scale(v, -1.0);
-    }
-    let n = cross(u, v);
+    let skew_deg = 90.0 - dot(u, v).clamp(-1.0, 1.0).acos().to_degrees();
     // a point on the plane
     let ground = |p: Pos2| -> Option<V3> {
         let d = cam.ray(p);
@@ -276,7 +285,7 @@ pub fn wall_frame(cam: &Camera, w: &Wall) -> Option<WallFrame> {
     let d0 = cam.ray(tl);
     let den = dot(n, d0);
     let o = if den.abs() > 1e-12 { add(cam.center, scale(d0, dot(n, sub(p, cam.center)) / den)) } else { p };
-    Some(WallFrame { r, o })
+    Some(WallFrame { r, o, skew_deg })
 }
 
 fn nice125(x: f64) -> f64 {
@@ -986,7 +995,9 @@ impl Placement {
 
     /// Moves the plane by a world-space offset (expressed back in `pos`).
     pub fn shift_world(&mut self, d: V3) {
-        let l = scale(mul_mv(&transpose(&self.base_r), d), 1.0 / self.base_k);
+        // base_r may be sheared (walls follow their quad), so invert it properly
+        let inv = invert(&self.base_r).unwrap_or_else(|| transpose(&self.base_r));
+        let l = scale(mul_mv(&inv, d), 1.0 / self.base_k);
         self.pos = add(self.pos, l);
     }
 
@@ -1269,7 +1280,7 @@ mod tests {
         // a real wall: the plane x = 100, from y = -100..200, z = 0..150
         let q = [[100.0, -100.0, 150.0], [100.0, 200.0, 150.0], [100.0, 200.0, 0.0], [100.0, -100.0, 0.0]];
         let corners = q.map(|w| t.project(w).unwrap());
-        let wall = Wall { id: 9, name: "w".into(), corners, offset: 0.0, snap: true };
+        let wall = Wall { id: 9, name: "w".into(), corners, offset: 0.0, snap_axis: false };
         let f = wall_frame(&t, &wall).unwrap();
         // normal along X, plane through x = 100, origin at corner 0
         assert!((f.col(2)[0].abs() - 1.0).abs() < 1e-9, "{:?}", f.col(2));
@@ -1294,5 +1305,23 @@ mod tests {
         assert!(v.first().unwrap().0 > v.last().unwrap().0, "back first");
         assert!(v.first().unwrap().1 && v.last().unwrap().1);
         assert_eq!(v.last().unwrap().0, 0.0);
+    }
+
+    #[test]
+    fn wall_grid_runs_along_a_skewed_quad() {
+        let t = truth();
+        // a sloppy quad: one corner off the true rectangle
+        let q = [[100.0, -100.0, 150.0], [100.0, 200.0, 150.0], [100.0, 200.0, 0.0], [100.0, -100.0, 0.0]];
+        let mut corners = q.map(|w| t.project(w).unwrap());
+        corners[2] += egui::vec2(25.0, -12.0);
+        let wall = Wall { id: 9, name: "w".into(), corners, offset: 0.0, snap_axis: false };
+        let f = wall_frame(&t, &wall).unwrap();
+        let uv: Vec<[f64; 2]> = corners.iter().map(|p| f.uv(f.hit(&t, *p).unwrap())).collect();
+        let tol = 1e-3 * (uv[2][0].abs() + uv[2][1].abs());
+        assert!(uv[0][0].abs() < tol && uv[0][1].abs() < tol, "{uv:?}");
+        assert!(uv[1][1].abs() < tol, "top edge is a u line: {uv:?}");
+        assert!(uv[3][0].abs() < tol, "left edge is a v line: {uv:?}");
+        assert!((uv[2][0] - uv[1][0]).abs() < tol && (uv[2][1] - uv[3][1]).abs() < tol, "{uv:?}");
+        assert!(f.skew_deg.abs() > 0.1);
     }
 }

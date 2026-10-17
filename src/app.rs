@@ -160,6 +160,47 @@ pub(crate) enum Part {
     Pixels(Vec<Vec<Pos2>>),
 }
 
+/// G/R/S on a flat selection (layers, pen strokes, brush pixels): move, rotate and
+/// scale about the selection's centre, like the group handles but from the keyboard.
+struct Grs2d {
+    op: crate::view3d::Op,
+    origs: Vec<(Layer, Part)>,
+    /// Pointer (screen) when it started.
+    start: Pos2,
+    /// Pivot (world).
+    center: Pos2,
+    /// 0 = X, 1 = Y.
+    axis: Option<usize>,
+    typed: String,
+    s: f32,
+    th: f32,
+    d: Vec2,
+}
+
+impl Grs2d {
+    fn typed_value(&self) -> Option<f32> {
+        let t = self.typed.trim_start_matches('-');
+        let v: f32 = t.parse().ok()?;
+        Some(if self.typed.starts_with('-') { -v } else { v })
+    }
+
+    fn label(&self) -> String {
+        use crate::view3d::Op;
+        let op = match self.op {
+            Op::Grab => "이동",
+            Op::Rotate => "회전",
+            Op::Scale => "크기",
+        };
+        let axis = match self.axis {
+            Some(0) => " · X 축",
+            Some(_) => " · Y 축",
+            None => "",
+        };
+        let typed = if self.typed.is_empty() { String::new() } else { format!(" · {}", self.typed) };
+        format!("{op}{axis}{typed}   X/Y 축 · 숫자 입력 · Ctrl 스냅 · Shift 정밀 · Enter/클릭 확정 · Esc/우클릭 취소")
+    }
+}
+
 /// Selections inside drawing layers (pen strokes, brush pixel boxes).
 #[derive(Clone, Default)]
 struct SubSel {
@@ -668,6 +709,7 @@ pub struct App {
     /// Selected wall of the active space, and whether the next drag draws a new one.
     wall_sel: Option<u64>,
     wall_new: bool,
+    grs2d: Option<Grs2d>,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -748,6 +790,7 @@ impl App {
             space_mask_draw: false,
             wall_sel: None,
             wall_new: false,
+            grs2d: None,
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -850,7 +893,7 @@ impl App {
                             .collect();
                         if pts.len() == 4 {
                             let wid = app.doc.new_id();
-                            app.doc.spaces.last_mut().unwrap().walls.push(crate::persp::Wall { id: wid, name: "벽 1".into(), corners: [pts[0], pts[1], pts[2], pts[3]], offset: 0.0, snap: true });
+                            app.doc.spaces.last_mut().unwrap().walls.push(crate::persp::Wall { id: wid, name: "벽 1".into(), corners: [pts[0], pts[1], pts[2], pts[3]], offset: 0.0, snap_axis: false });
                             app.wall_sel = Some(wid);
                             app.put_in_wall(t2, id, wid);
                         }
@@ -2040,6 +2083,188 @@ impl App {
         }
     }
 
+    fn grs_flat(&mut self, ctx: &egui::Context) {
+        use crate::view3d::Op;
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let (mut confirm, mut cancel) = (false, false);
+        for ev in &events {
+            match ev {
+                egui::Event::Text(t) => {
+                    if let Some(g) = self.grs2d.as_mut() {
+                        for c in t.chars() {
+                            match c {
+                                '-' => {
+                                    if g.typed.starts_with('-') {
+                                        g.typed.remove(0);
+                                    } else {
+                                        g.typed.insert(0, '-');
+                                    }
+                                }
+                                '0'..='9' | '.' => g.typed.push(c),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                egui::Event::PointerButton { button: PointerButton::Primary, pressed: true, .. } => confirm = true,
+                egui::Event::PointerButton { button: PointerButton::Secondary, pressed: true, .. } => cancel = true,
+                egui::Event::Touch { phase: TouchPhase::Start, force: Some(_), .. } => confirm = true,
+                _ => {}
+            }
+        }
+        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        for (key, a) in [(Key::X, 0usize), (Key::Y, 1)] {
+            if k(Modifiers::NONE, key) || k(Modifiers::SHIFT, key) {
+                if let Some(g) = self.grs2d.as_mut() {
+                    g.axis = if g.axis == Some(a) { None } else { Some(a) };
+                }
+            }
+        }
+        if k(Modifiers::NONE, Key::Backspace) {
+            if let Some(g) = self.grs2d.as_mut() {
+                g.typed.pop();
+            }
+        }
+        if k(Modifiers::NONE, Key::Enter) {
+            confirm = true;
+        }
+        if k(Modifiers::NONE, Key::Escape) {
+            cancel = true;
+        }
+        let xf = self.xf();
+        let zoom = self.zoom;
+        let Some(g) = self.grs2d.as_mut() else { return };
+        let cur = hover.unwrap_or(g.start);
+        let cs = xf.w2s(g.center);
+        let fine = if mods.shift { 0.1 } else { 1.0 };
+        let (mut s, mut th, mut d) = (1.0f32, 0.0f32, Vec2::ZERO);
+        match g.op {
+            Op::Grab => {
+                d = match (g.typed_value(), g.axis) {
+                    (Some(v), Some(1)) => vec2(0.0, v),
+                    (Some(v), _) => vec2(v, 0.0),
+                    (None, _) => (cur - g.start) / zoom * fine,
+                };
+                match g.axis {
+                    Some(0) => d.y = 0.0,
+                    Some(_) => d.x = 0.0,
+                    None => {}
+                }
+                if mods.ctrl {
+                    d = (d / 10.0).round() * 10.0;
+                }
+            }
+            Op::Rotate => {
+                th = match g.typed_value() {
+                    Some(v) => v.to_radians(),
+                    None => ((cur - cs).angle() - (g.start - cs).angle()) * fine,
+                };
+                if mods.ctrl {
+                    th = (th.to_degrees() / 5.0).round().to_radians() * 5.0;
+                }
+            }
+            Op::Scale => {
+                s = match g.typed_value() {
+                    Some(v) => v,
+                    None => 1.0 + ((cur - cs).length() / (g.start - cs).length().max(1.0) - 1.0) * fine,
+                };
+                if mods.ctrl {
+                    s = (s * 10.0).round() / 10.0;
+                }
+                s = s.max(0.02);
+            }
+        }
+        g.s = s;
+        g.th = th;
+        g.d = d;
+        let c = g.center;
+        let news: Vec<Layer> = if cancel {
+            g.origs.iter().map(|(o, _)| o.clone()).collect()
+        } else {
+            g.origs.iter().map(|(o, part)| apply_part(o, part, c, s, th, d)).collect()
+        };
+        for l in news {
+            if let Some(i) = self.doc.index_of(l.id) {
+                self.doc.layers[i] = l;
+            }
+        }
+        if cancel {
+            self.grs2d = None;
+        } else if confirm {
+            self.grs2d = None;
+            self.remap_pixel_sel(c, s, th, d);
+            self.mark();
+        }
+    }
+
+    /// The space camera as a projection of the 2D canvas.
+    fn canvas_proj(&self, space: u64) -> Option<crate::view3d::Proj> {
+        let cam = self.doc.spaces.iter().find(|s| s.id == space).and_then(|s| crate::persp::solve(s).ok())?;
+        Some(crate::view3d::Proj::for_canvas(&cam, &self.xf(), self.canvas_rect))
+    }
+
+    /// G/R/S running on the 2D canvas: same keys as in the 3D workspace.
+    fn modal_2d(&mut self, ctx: &egui::Context) {
+        let Some(space) = self.modal3d.as_ref().and_then(|m| self.doc.get(m.id)).and_then(|l| l.place.as_ref()).map(|p| p.space) else {
+            self.modal3d = None;
+            return;
+        };
+        let Some(proj) = self.canvas_proj(space) else {
+            self.cancel_modal3d();
+            return;
+        };
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let (mut confirm, mut cancel) = (false, false);
+        for ev in &events {
+            match ev {
+                egui::Event::Text(t) => {
+                    if let Some(m) = self.modal3d.as_mut() {
+                        for c in t.chars() {
+                            m.type_char(c);
+                        }
+                    }
+                }
+                egui::Event::PointerButton { button: PointerButton::Primary, pressed: true, .. } => confirm = true,
+                egui::Event::PointerButton { button: PointerButton::Secondary, pressed: true, .. } => cancel = true,
+                egui::Event::Touch { phase: TouchPhase::Start, force: Some(_), .. } => confirm = true,
+                _ => {}
+            }
+        }
+        let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        for (key, a) in [(Key::X, 0usize), (Key::Y, 1), (Key::Z, 2)] {
+            if k(Modifiers::NONE, key) || k(Modifiers::SHIFT, key) {
+                if let Some(m) = self.modal3d.as_mut() {
+                    m.press_axis(a);
+                }
+            }
+        }
+        if k(Modifiers::NONE, Key::Backspace) {
+            if let Some(m) = self.modal3d.as_mut() {
+                m.typed.pop();
+            }
+        }
+        if k(Modifiers::NONE, Key::Enter) {
+            confirm = true;
+        }
+        if k(Modifiers::NONE, Key::Escape) {
+            cancel = true;
+        }
+        if let Some(m) = &self.modal3d {
+            let pl = m.apply(&proj, hover.unwrap_or(m.start), mods.ctrl, mods.shift);
+            if let Some(l) = self.doc.get_mut(m.id) {
+                l.place = Some(pl);
+            }
+        }
+        if cancel {
+            self.cancel_modal3d();
+        } else if confirm {
+            self.modal3d = None;
+            self.mark();
+        }
+    }
+
     fn cancel_modal3d(&mut self) {
         if let Some(m) = self.modal3d.take() {
             if let Some(l) = self.doc.get_mut(m.id) {
@@ -2437,7 +2662,7 @@ impl App {
                 let sid = self.doc.spaces[i].id;
                 let wid = self.doc.new_id();
                 let n = self.doc.spaces[i].walls.len() + 1;
-                self.doc.spaces[i].walls.push(crate::persp::Wall { id: wid, name: format!("벽 {n}"), corners: [w; 4], offset: 0.0, snap: true });
+                self.doc.spaces[i].walls.push(crate::persp::Wall { id: wid, name: format!("벽 {n}"), corners: [w; 4], offset: 0.0, snap_axis: false });
                 self.wall_sel = Some(wid);
                 self.wall_new = false;
                 self.drag = Some(Drag::WallRect { sid, wid, start: w });
@@ -2544,6 +2769,12 @@ impl App {
         self.last_screen = sp;
         let smoothing = self.s.smoothing.clamp(0.0, 0.95);
         let zoom = self.zoom;
+        // Space held mid-drag: the view pans with the pointer while the dragged thing
+        // stays under it; letting go of Space carries on from the same spot
+        if self.space_held && self.drag.as_ref().is_some_and(|d| !matches!(d, Drag::Pan | Drag::Zoom { .. } | Drag::Size { .. })) {
+            self.pan += delta_s;
+            return;
+        }
         match self.drag {
             Some(Drag::Zoom { anchor }) => {
                 self.zoom_at(anchor, ((delta_s.x - delta_s.y) * 0.006).exp());
@@ -3335,7 +3566,7 @@ impl App {
             }
             ctx.request_repaint();
         }
-        if self.modal3d.is_some() {
+        if self.modal3d.is_some() || self.grs2d.is_some() {
             return;
         }
         let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
@@ -3369,6 +3600,46 @@ impl App {
         if self.ws3d {
             // the 3D workspace handles its own keys (G/R/S, views, Esc)
             return;
+        }
+        // G/R/S on a layer in a space, right on the canvas (before R picks the
+        // rectangle tool)
+        if self.tool == Tool::Select && self.drag.is_none() && self.grs2d.is_none() {
+            let placed = self.sel_layer().filter(|_| self.extra_sel.is_empty()).and_then(|l| l.place.clone().map(|p| (l.id, p)));
+            if placed.is_none() {
+                use crate::view3d::Op;
+                for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
+                    let origs = self.sel_parts();
+                    if origs.is_empty() {
+                        break;
+                    }
+                    if k(Modifiers::NONE, key) {
+                        let center = self.group_box().or_else(|| self.sel_layer().and_then(|l| l.bounds())).map(|b| b.center());
+                        if let (Some(center), Some(hp)) = (center, ctx.input(|i| i.pointer.hover_pos())) {
+                            self.grs2d = Some(Grs2d { op, origs, start: hp, center, axis: None, typed: String::new(), s: 1.0, th: 0.0, d: Vec2::ZERO });
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some((id, pl)) = placed {
+                use crate::view3d::Op;
+                for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
+                    if k(Modifiers::ALT, key) {
+                        if let Some(p) = self.doc.get_mut(id).and_then(|l| l.place.as_mut()) {
+                            match op {
+                                Op::Grab => p.pos = [0.0; 3],
+                                Op::Rotate => p.rot = [0.0; 3],
+                                Op::Scale => p.scale = 1.0,
+                            }
+                        }
+                        self.mark();
+                    } else if k(Modifiers::NONE, key) {
+                        if let (Some(proj), Some(hp)) = (self.canvas_proj(pl.space), ctx.input(|i| i.pointer.hover_pos())) {
+                            self.modal3d = Some(crate::view3d::Modal::new(op, id, pl.clone(), hp, &proj));
+                        }
+                    }
+                }
+            }
         }
         if k(cs, Key::C) {
             self.quick_copy();
@@ -4290,6 +4561,7 @@ impl App {
         let mut headers: Vec<(u64, Option<u64>, Rect)> = Vec::new();
         let mut space_click: Option<(u64, Option<u64>)> = None;
         let mut drop_space: Option<(LayerId, u64, Option<u64>)> = None;
+        let mut move_out: Option<LayerId> = None;
         let wall_count = |layers: &[Layer], wid: u64| layers.iter().filter(|m| m.place.as_ref().is_some_and(|p| p.wall == Some(wid))).count();
         // empty spaces first (with their walls)
         for sp in &self.doc.spaces {
@@ -4489,6 +4761,20 @@ impl App {
                         let to = to.min(self.doc.layers.len());
                         self.doc.layers.insert(to, layer);
                         changed = true;
+                        let layers = &self.doc.layers;
+                        let at = |j: Option<usize>| j.and_then(|j| layers.get(j)).and_then(|l| l.place.as_ref()).map(|p| (p.space, p.wall));
+                        let (below, above) = (at(to.checked_sub(1)), at(Some(to + 1)));
+                        match layers[to].place.as_ref().map(|p| p.space) {
+                            Some(s) if below.map(|b| b.0) != Some(s) && above.map(|a| a.0) != Some(s) => move_out = Some(did),
+                            None => {
+                                if let (Some(a), Some(b)) = (above, below) {
+                                    if a.0 == b.0 {
+                                        drop_space = Some((did, a.0, if a.1 == b.1 { a.1 } else { None }));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     self.layer_drag = None;
                 }
@@ -4513,6 +4799,9 @@ impl App {
             if wid.is_some() {
                 self.wall_sel = wid;
             }
+        }
+        if let Some(did) = move_out {
+            self.take_out_of_space(did);
         }
         match drop_space {
             Some((did, sid, None)) => self.put_in_space(did, sid),
@@ -4990,7 +5279,13 @@ impl App {
             }
             self.ws3d = false;
         }
-        self.handle_canvas_input(&ctx, rect, ui.layer_id());
+        if self.modal3d.is_some() {
+            self.modal_2d(&ctx);
+        } else if self.grs2d.is_some() {
+            self.grs_flat(&ctx);
+        } else {
+            self.handle_canvas_input(&ctx, rect, ui.layer_id());
+        }
 
         let painter = ui.painter_at(rect);
         let xf = self.xf();
@@ -5030,6 +5325,24 @@ impl App {
         self.draw_overlays(&painter, &xf);
         self.text_editor(&ctx, &xf);
         self.draw_loupe(&ctx, &painter, rect);
+        if let Some(g) = &self.grs2d {
+            crate::view3d::hud(&painter, rect, &g.label());
+            if g.op != crate::view3d::Op::Grab {
+                if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+                    painter.extend(Shape::dashed_line(&[xf.w2s(g.center), hp], Stroke::new(1.0, INK_2), 4.0, 4.0));
+                }
+            }
+            ctx.request_repaint();
+        }
+        if let Some(m) = &self.modal3d {
+            crate::view3d::hud(&painter, rect, &m.label());
+            if m.op != crate::view3d::Op::Grab {
+                if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+                    painter.extend(Shape::dashed_line(&[m.center, hp], Stroke::new(1.0, INK_2), 4.0, 4.0));
+                }
+            }
+            ctx.request_repaint();
+        }
 
         let size_anchor = match &self.drag {
             Some(Drag::Size { anchor, .. }) => Some(*anchor),
@@ -5224,17 +5537,20 @@ impl App {
         });
         let mut wall_edit: Option<(f64, bool, bool)> = None;
         if let Some(w) = self.wall_sel.and_then(|id| sp.walls.iter().find(|w| w.id == id)) {
-            let (mut off, mut snap, mut wdel, mut ch2) = (w.offset as f32, w.snap, false, false);
+            let (mut off, mut snap, mut wdel, mut ch2) = (w.offset as f32, w.snap_axis, false, false);
             ch2 |= ui
                 .add(crate::dial::Dial::new(&mut off, -5000.0..=5000.0).step(5.0).text("벽 거리").default(0.0))
                 .on_hover_text("벽을 앞뒤로 옮겨 (바닥 경계로 잡은 위치가 어긋날 때)")
                 .changed();
             ui.horizontal(|ui| {
-                ch2 |= ui.checkbox(&mut snap, "축에 맞추기").on_hover_text("방향이 공간 축과 15° 안이면 딱 맞춰").changed();
+                ch2 |= ui.checkbox(&mut snap, "공간 축에 스냅").on_hover_text("방향이 공간 축과 15° 안이면 그 축에 맞춰 (사각형과 조금 어긋날 수 있어)").changed();
                 wdel = ui.button("벽 삭제").clicked();
             });
             if ch2 || wdel {
                 wall_edit = Some((off as f64, snap, wdel));
+            }
+            if let Some(f) = crate::persp::solve(sp).ok().and_then(|c| crate::persp::wall_frame(&c, w)) {
+                ui.small(format!("모서리 직각 오차 {:.1}° · 크면 모서리나 소실선을 다시 확인해 줘", f.skew_deg.abs()));
             }
         }
         let (mut clear, mut fit, mut del) = (false, false, false);
@@ -5290,7 +5606,7 @@ impl App {
                 self.wall_sel = None;
             } else if let Some(w) = self.doc.spaces[i].walls.iter_mut().find(|w| w.id == wid) {
                 w.offset = off;
-                w.snap = snap;
+                w.snap_axis = snap;
             }
             ch = true;
         }
