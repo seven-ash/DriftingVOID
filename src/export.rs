@@ -49,8 +49,12 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
             let out_m = [[s, 0.0, -region.min.x as f64 * s], [0.0, s, -region.min.y as f64 * s], [0.0, 0.0, 1.0]];
             let h = crate::persp::mul_mm(&out_m, &pl.homography(cam));
             let res = magnification(&h, layer.bounds().unwrap_or(region)).clamp(0.05, 4.0);
+            let clip = doc.spaces.iter().find(|s| s.id == pl.space).map(|sp| {
+                let m = sp.clip();
+                Rect::from_min_max(((m.min - region.min) * scale).to_pos2(), ((m.max - region.min) * scale).to_pos2())
+            });
             if let Some((src, rect, res)) = flatten_layer(layer, res) {
-                warp_onto(&mut out, &src, rect, res, &h, layer.opacity);
+                warp_onto(&mut out, &src, rect, res, &h, layer.opacity, clip);
             }
             continue;
         }
@@ -110,7 +114,7 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg:
 
 fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
     match &layer.kind {
-        LayerKind::Image(im) => draw_image(pm, im, base, scale),
+        LayerKind::Image(im) => draw_image(pm, im, base, scale, region),
         LayerKind::Raster(r) => {
             let local = region.translate(-r.offset);
             let Some(b) = r.bounds().map(|b| b.translate(-r.offset)) else { return };
@@ -251,7 +255,7 @@ pub fn flatten_layer(layer: &Layer, res: f32) -> Option<(Pixmap, Rect, f32)> {
 
 /// Draws a flattened layer through `h` (content -> `dst` pixels), sampling the source
 /// bilinearly at each destination pixel (exact perspective, no mesh).
-pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate::persp::M3, opacity: f32) {
+pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate::persp::M3, opacity: f32, clip: Option<Rect>) {
     use crate::persp::{apply_h, invert};
     let Some(hi) = invert(h) else { return };
     let Some(q) = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()]
@@ -261,7 +265,13 @@ pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate
     else {
         return;
     };
-    let bb = Rect::from_points(&q);
+    let mut bb = Rect::from_points(&q);
+    if let Some(c) = clip {
+        bb = bb.intersect(c);
+        if !bb.is_positive() {
+            return;
+        }
+    }
     let (dw, dh) = (dst.width() as i32, dst.height() as i32);
     let x0 = (bb.min.x.floor() as i32 - 1).max(0);
     let y0 = (bb.min.y.floor() as i32 - 1).max(0);
@@ -343,7 +353,18 @@ pub fn image_pixmap(im: &ImageLayer, target_scale: f32) -> Option<(Pixmap, f32)>
     Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h)?).map(|p| (p, factor))
 }
 
-fn draw_image(pm: &mut Pixmap, im: &ImageLayer, base: Transform, scale: f32) {
+fn draw_image(pm: &mut Pixmap, im: &ImageLayer, base: Transform, scale: f32, region: Rect) {
+    // only the source pixels the region needs (small regions: eyedropper, magnifier)
+    let win = Rect::from_points(&[region.left_top(), region.right_top(), region.right_bottom(), region.left_bottom()].map(|p| im.world_to_src(p)))
+        .expand(3.0)
+        .intersect(im.crop);
+    if !win.is_positive() {
+        return;
+    }
+    let mut sub = im.clone();
+    sub.crop = Rect::from_min_max(win.min.floor(), win.max.ceil()).intersect(im.crop);
+    sub.center = im.src_to_world(sub.crop.center());
+    let im = &sub;
     let Some((src, factor)) = image_pixmap(im, im.scale * scale) else { return };
     let (cw, ch) = (src.width() as f32 * factor, src.height() as f32 * factor);
     let (sin, cos) = im.rotation.sin_cos();

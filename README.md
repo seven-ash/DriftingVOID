@@ -32,13 +32,13 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | Layer list | Drag to reorder, double-click to rename |
 | Number fields | Accept maths: `40*1.5`, `2^3+1` |
 | Dials | Drag the tick ring (Shift: fine, wheel: one step); ↺ resets to the default |
-| Tab | With a solvable 3D space: tap switches 2D ↔ 3D workspace, hold peeks at the other one. Otherwise hides the UI |
-| Shift+Tab | Hide the UI |
+| Tab | Tap: switch 2D ↔ 3D workspace (needs a solvable 3D space). Hold: peek at the other one |
+| Ctrl+H | Hide/show the UI |
 | F12 | Input log (pen flags, mouse/touch events) |
 
 Tools: V select, Q lasso, H pan, B brush (raster), P pen (vector), E eraser, T text,
 L line, A arrow, R rectangle, O ellipse, C crop, F export frame, K 3D space
-(perspective match from vanishing lines, see `docs/SPACES.md`), I eyedropper.
+(perspective match from vanishing lines with a magnifier, optional mask; see `docs/SPACES.md`), I eyedropper.
 
 Drawing layers are created when you first draw, reused afterwards, and removed
 when empty. Photos are placed under drawing layers.
@@ -70,6 +70,7 @@ right-click cancels. Alt+G/R/S clears the value.
 - `DV_SPACE_LINES="x1,y1,x2,y2,axis;..."` (+ `DV_SPACE_ORIGIN="x,y"`, photo pixels) opens the
   space tool on a space fitted to the first photo. `DV_SPACE_DEMO=space|select` also drops
   two text layers into it, and `DV_SPACE_EXPORT=out.png` exports the result.
+  `DV_SPACE_MASK="x0,y0,x1,y1"` sets a mask, `DV_LOUPE=1` holds a line end mid-drag (magnifier).
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
 

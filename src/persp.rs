@@ -177,12 +177,21 @@ pub struct Space {
     pub free_pp: bool,
     #[serde(default = "yes")]
     pub grid: bool,
+    /// Where the space shows on the canvas: its layers and grid are clipped to this
+    /// (None: the whole frame). Separate from `frame`, which defines the camera.
+    #[serde(default)]
+    pub mask: Option<Rect>,
 }
 
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None }
+    }
+
+    /// The canvas area the space shows in.
+    pub fn clip(&self) -> Rect {
+        self.mask.unwrap_or(self.frame)
     }
 
     pub fn count(&self, axis: u8) -> usize {
@@ -780,8 +789,9 @@ pub fn depth_grid(cam: &Camera, frame: Rect) -> Vec<(V3, V3, u8)> {
         let m = x / e;
         (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
     };
-    let ea = (frame.width() as f64 * 0.5 / g).ceil() * g;
-    let eb = (frame.height() as f64 * 0.5 / g).ceil() * g;
+    // wide enough to reach the whole frame even when the view is strongly tilted
+    let ea = (frame.width() as f64 * 1.5 / g).ceil() * g;
+    let eb = (frame.height() as f64 * 1.5 / g).ceil() * g;
     let pt = |td: f64, ua: f64, ub: f64| {
         let mut p = [0.0; 3];
         p[d] = td;
@@ -792,7 +802,7 @@ pub fn depth_grid(cam: &Camera, frame: Rect) -> Vec<(V3, V3, u8)> {
     // with Z (up) across the slices they stand on the floor instead of straddling it
     let (blo, bhi) = if b == 2 { (0.0, 2.0 * eb) } else { (-eb, eb) };
     let mut out = Vec::new();
-    let (k0, k1) = (-3i32, 12i32);
+    let (k0, k1) = (-8i32, 60i32);
     for k in k0..=k1 {
         let t = k as f64 * g * sd;
         let w = if k == 0 { 2 } else { 1 };

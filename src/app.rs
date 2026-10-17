@@ -145,6 +145,7 @@ enum Drag {
     /// Vanishing line: `end` 0 = a, 1 = b, 2 = whole line.
     SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
     SpaceOrigin { id: u64 },
+    SpaceMask { id: u64, start: Pos2 },
 }
 
 /// Which part of a layer a selection covers.
@@ -660,6 +661,10 @@ pub struct App {
     /// Tab presses taken out of the raw input (pressed, shift) before egui could use
     /// them for focus traversal.
     tab_raw: Vec<(bool, bool)>,
+    /// The next drag in the space tool draws the active space's mask.
+    space_mask_draw: bool,
+    /// Magnifier texture and the (target, scale) it was rendered for.
+    loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
     show_log: bool,
@@ -735,6 +740,8 @@ impl App {
             tab_t0: None,
             peek: false,
             tab_raw: Vec::new(),
+            space_mask_draw: false,
+            loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
             show_log: false,
@@ -799,6 +806,20 @@ impl App {
                 app.doc.spaces.push(sp);
                 app.space_sel = Some(id);
                 app.tool = Tool::Space;
+                if let Ok(m) = std::env::var("DV_SPACE_MASK") {
+                    let n: Vec<f32> = m.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 4 {
+                        let r = Rect::from_two_pos(im.src_to_world(pos2(n[0], n[1])), im.src_to_world(pos2(n[2], n[3])));
+                        app.doc.spaces.last_mut().unwrap().mask = Some(r);
+                    }
+                }
+                if std::env::var_os("DV_LOUPE").is_some() {
+                    // a line end held mid-drag, to screenshot the magnifier
+                    if let Some(l) = app.doc.spaces.last().and_then(|s| s.lines.first()).copied() {
+                        app.space_line = Some(0);
+                        app.drag = Some(Drag::SpaceLine { id, idx: 0, end: 1, start: l.b, orig: l });
+                    }
+                }
                 if let Ok(mode) = std::env::var("DV_SPACE_DEMO") {
                     // two text layers dropped in: one kept camera-facing, one snapped to
                     // the space axes; "select" leaves the first selected in the select tool
@@ -1382,6 +1403,11 @@ impl App {
                 continue;
             }
             // placed layers: test in their 2D content coordinates
+            if let Some(pl) = &l.place {
+                if self.doc.spaces.iter().find(|s| s.id == pl.space).is_some_and(|s| !s.clip().contains(w0)) {
+                    continue;
+                }
+            }
             let (w, tol) = match l.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| pl.homography(c))) {
                 Some(h) => {
                     let Some(q) = crate::persp::invert(&h).and_then(|hi| crate::persp::apply_h(&hi, w0)) else { continue };
@@ -2237,6 +2263,90 @@ impl App {
     }
 
 
+    /// While a vanishing-line end or the origin pin is dragged: a round magnifier of
+    /// the pixels around it with a thin X reticle, set off from the pen tip.
+    fn draw_loupe(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: Rect) {
+        let (target, line) = match &self.drag {
+            Some(Drag::SpaceLine { id, idx, end, .. }) if *end < 2 => {
+                let Some(l) = self.doc.spaces.iter().find(|s| s.id == *id).and_then(|s| s.lines.get(*idx)) else { return };
+                (if *end == 0 { l.a } else { l.b }, Some((l.a, l.b, crate::persp::AXIS_COLORS[(l.axis as usize).min(2)])))
+            }
+            Some(Drag::SpaceOrigin { id }) => match self.doc.spaces.iter().find(|s| s.id == *id) {
+                Some(s) => (s.origin, None),
+                None => return,
+            },
+            _ => return,
+        };
+        let xf = self.xf();
+        let ts = xf.w2s(target);
+        let (r, gap) = (72.0f32, 36.0f32);
+        let mut c = ts - vec2(r + gap, r + gap);
+        if c.x - r < rect.left() + 8.0 {
+            c.x = ts.x + r + gap;
+        }
+        if c.y - r < rect.top() + 8.0 {
+            c.y = ts.y + r + gap;
+        }
+        // the pixels around the target, rendered on the CPU and drawn as a round disc
+        let zoom = (self.zoom * 6.0).max(4.0);
+        let ppp = ctx.pixels_per_point();
+        let key = [target.x, target.y, zoom];
+        if self.loupe_tex.as_ref().is_none_or(|(_, k)| *k != key) {
+            let region = Rect::from_center_size(target, vec2(2.0 * r / zoom, 2.0 * r / zoom));
+            if let Ok(pm) = crate::export::render(&self.doc, region, zoom * ppp, None) {
+                let ci = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+                let opts = egui::TextureOptions::NEAREST;
+                match &mut self.loupe_tex {
+                    Some((t, k)) => {
+                        t.set(ci, opts);
+                        *k = key;
+                    }
+                    None => self.loupe_tex = Some((ctx.load_texture("loupe", ci, opts), key)),
+                }
+            }
+        }
+        let Some((tex, _)) = &self.loupe_tex else { return };
+        painter.circle_filled(c, r, theme::VOID);
+        let mut m = egui::Mesh::with_texture(tex.id());
+        m.vertices.push(egui::epaint::Vertex { pos: c, uv: pos2(0.5, 0.5), color: Color32::WHITE });
+        let n = 72u32;
+        for i in 0..=n {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            let d = vec2(a.cos(), a.sin());
+            m.vertices.push(egui::epaint::Vertex { pos: c + d * r, uv: pos2(0.5 + 0.5 * d.x, 0.5 + 0.5 * d.y), color: Color32::WHITE });
+        }
+        for i in 1..=n {
+            m.add_triangle(0, i, i + 1);
+        }
+        painter.add(Shape::mesh(m));
+        let to_l = |p: Pos2| c + (p - target) * zoom;
+        if let Some((a, b, col)) = line {
+            let lp = painter.with_clip_rect(Rect::from_center_size(c, vec2(2.0 * r, 2.0 * r)).intersect(painter.clip_rect()));
+            // clip the line to the disc
+            let (pa, pb) = (to_l(a), to_l(b));
+            let d = pb - pa;
+            let f = pa - c;
+            let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
+            let disc = qb * qb - 4.0 * qa * qc;
+            if qa > 0.0 && disc > 0.0 {
+                let sq = disc.sqrt();
+                let t0 = ((-qb - sq) / (2.0 * qa)).max(0.0);
+                let t1 = ((-qb + sq) / (2.0 * qa)).min(1.0);
+                if t1 > t0 {
+                    lp.line_segment([pa + d * t0, pa + d * t1], Stroke::new(1.0, col.gamma_multiply(0.9)));
+                }
+            }
+        }
+        painter.circle_stroke(c, r, Stroke::new(2.5, Color32::from_black_alpha(160)));
+        painter.circle_stroke(c, r, Stroke::new(1.2, INK_2));
+        for d in [vec2(1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, -1.0)] {
+            let d = d.normalized();
+            let (p0, p1) = (c + d * 5.0, c + d * (r - 6.0));
+            painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_black_alpha(150)));
+            painter.line_segment([p0, p1], Stroke::new(0.8, Color32::WHITE));
+        }
+    }
+
     fn space_idx(&self) -> Option<usize> {
         self.space_sel.and_then(|id| self.doc.spaces.iter().position(|s| s.id == id))
     }
@@ -2255,6 +2365,15 @@ impl App {
 
     fn space_down(&mut self, sp: Pos2, w: Pos2) {
         let xf = self.xf();
+        if self.space_mask_draw {
+            if let Some(i) = self.space_idx() {
+                let id = self.doc.spaces[i].id;
+                self.doc.spaces[i].mask = Some(Rect::from_min_max(w, w));
+                self.drag = Some(Drag::SpaceMask { id, start: w });
+                self.mark();
+                return;
+            }
+        }
         if let (Some(i), false) = (self.space_idx(), self.space_new) {
             let s = &self.doc.spaces[i];
             let id = s.id;
@@ -2575,6 +2694,14 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::SpaceMask { id, start } => {
+                let (id, start) = (*id, *start);
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    s.mask = Some(Rect::from_two_pos(start, w));
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::Frame { handle, start, orig } => {
                 let p = w.round();
                 let mut r = *orig;
@@ -2774,6 +2901,15 @@ impl App {
                 }
                 self.changed = true;
                 self.modified = true;
+            }
+            Drag::SpaceMask { id, .. } => {
+                self.space_mask_draw = false;
+                let zoom = self.zoom;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    if s.mask.is_some_and(|m| m.width() * zoom < 6.0 || m.height() * zoom < 6.0) {
+                        s.mask = None;
+                    }
+                }
             }
             Drag::SpaceLine { id, idx, .. } => {
                 let zoom = self.zoom;
@@ -3047,10 +3183,14 @@ impl App {
         }
         let tabs = std::mem::take(&mut self.tab_raw);
         let can3d = self.ws3d || self.ws_space().is_some();
+        // Tab only switches workspaces now; hiding the UI moved to Ctrl+H
         for (pressed, shift) in tabs {
-            if shift || !can3d {
+            if shift {
+                continue;
+            }
+            if !can3d {
                 if pressed {
-                    self.ui_hidden = !self.ui_hidden;
+                    self.status = "3D로 볼 공간이 없어 · K 도구로 공간을 만들고 소실선을 그어 줘".into();
                 }
                 continue;
             }
@@ -3075,6 +3215,9 @@ impl App {
             return;
         }
         let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+        if k(Modifiers::COMMAND, Key::H) {
+            self.ui_hidden = !self.ui_hidden;
+        }
         if k(cs, Key::Z) || k(cmd, Key::Y) {
             self.redo();
         }
@@ -3882,7 +4025,7 @@ impl App {
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.pos[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -5000.0..=5000.0).step(10.0).text(format!("위치 {ax}")).default(0.0)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0)).changed() {
                             pl.pos[i] = v as f64;
                             changed = true;
                         }
@@ -4243,7 +4386,7 @@ impl App {
             if ui.button("100%  Ctrl+1").clicked() {
                 self.set_zoom_center(1.0);
             }
-            if ui.button("UI 숨기기  Tab").clicked() {
+            if ui.button("UI 숨기기  Ctrl+H").clicked() {
                 self.ui_hidden = true;
             }
             ui.separator();
@@ -4682,6 +4825,7 @@ impl App {
         }
         self.draw_overlays(&painter, &xf);
         self.text_editor(&ctx, &xf);
+        self.draw_loupe(&ctx, &painter, rect);
 
         let size_anchor = match &self.drag {
             Some(Drag::Size { anchor, .. }) => Some(*anchor),
@@ -4848,6 +4992,17 @@ impl App {
         let mut ch = ui.checkbox(&mut grid, "격자").changed();
         ch |= ui.add_enabled(all3, egui::Checkbox::new(&mut fpp, "주점도 추정 (세 축 모두 2개 이상)")).changed();
         let img_b = self.sel.and_then(|id| self.doc.get(id)).filter(|l| matches!(l.kind, LayerKind::Image(_))).and_then(|l| l.bounds());
+        let has_mask = sp.mask.is_some();
+        let (mut mask_draw, mut mask_clear) = (false, false);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.label(if has_mask { "마스크: 지정됨" } else { "마스크: 공간 영역 전체" });
+            mask_draw = ui
+                .selectable_label(self.space_mask_draw, "마스크 그리기")
+                .on_hover_text("공간 안 레이어와 격자가 보일 영역을 끌어서 지정해 (카메라 계산과는 별개)")
+                .clicked();
+            mask_clear = ui.add_enabled(has_mask, egui::Button::new("마스크 해제")).clicked();
+        });
         let (mut clear, mut fit, mut del) = (false, false, false);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
@@ -4855,7 +5010,17 @@ impl App {
             fit = ui.add_enabled(img_b.is_some(), egui::Button::new("선택한 사진에 맞추기")).clicked();
             del = ui.button("공간 삭제").clicked();
         });
+        if mask_draw {
+            self.space_mask_draw = !self.space_mask_draw;
+            if self.space_mask_draw {
+                self.status = "캔버스에서 끌어서 마스크 영역을 그려 줘".into();
+            }
+        }
         let s = &mut self.doc.spaces[i];
+        if mask_clear {
+            s.mask = None;
+            ch = true;
+        }
         if ch {
             s.grid = grid;
             s.free_pp = fpp;
@@ -4904,7 +5069,7 @@ impl App {
                 continue;
             }
             let cam = crate::persp::solve(s).ok();
-            let pc = painter.with_clip_rect(sr.intersect(painter.clip_rect()));
+            let pc = painter.with_clip_rect(xf.rect_w2s(s.clip()).intersect(painter.clip_rect()));
             if let Some(cam) = &cam {
                 let seg = |a: V3, b: V3| cam.project_segment(a, b).map(|(p, q)| [xf.w2s(p), xf.w2s(q)]);
                 if s.grid {
@@ -4943,6 +5108,12 @@ impl App {
             }
             if !editing {
                 continue;
+            }
+            if let Some(m) = s.mask {
+                let mr = xf.rect_w2s(m);
+                let pts = vec![mr.left_top(), mr.right_top(), mr.right_bottom(), mr.left_bottom(), mr.left_top()];
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(1.4, ACCENT), 4.0, 4.0));
+                painter.text(mr.left_bottom() + vec2(0.0, 4.0), Align2::LEFT_TOP, "마스크", FontId::proportional(11.0), ACCENT);
             }
             for (i, l) in s.lines.iter().enumerate() {
                 let c = AXIS_COLORS[(l.axis as usize).min(2)];

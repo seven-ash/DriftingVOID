@@ -353,7 +353,11 @@ pub fn draw_doc(
         }
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
             if skip_text != Some(layer.id) {
-                draw_placed(painter, ctx, layer, &pl.homography(cam), xf, cache, view_w);
+                let clip = match doc.spaces.iter().find(|s| s.id == pl.space) {
+                    Some(sp) => painter.clip_rect().intersect(xf.rect_w2s(sp.clip())),
+                    None => painter.clip_rect(),
+                };
+                draw_placed(&painter.with_clip_rect(clip), ctx, layer, &pl.homography(cam), xf, cache, view_w);
             }
             continue;
         }
