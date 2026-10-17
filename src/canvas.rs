@@ -219,39 +219,63 @@ pub fn content_key(l: &Layer) -> u64 {
     h.finish()
 }
 
+/// Side colour of an extrusion: the content darkened.
+pub const SIDE_SHADE: f32 = 0.55;
+
 /// Draws a layer placed in a space: its flattened 2D content on a subdivided mesh
-/// through the space camera's homography.
-fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, h: &crate::persp::M3, xf: &Xf, cache: &mut TexCache, view_w: Rect) {
+/// through the space camera's homography; with thickness, as stacked slices along
+/// the plane normal (darker in between, far to near).
+#[allow(clippy::too_many_arguments)]
+fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::persp::Placement, cam: &crate::persp::Camera, xf: &Xf, cache: &mut TexCache, view_w: Rect) {
     use crate::persp::apply_h;
+    let h = pl.homography(cam);
     let Some(b) = layer.bounds() else { return };
-    let corners: Option<Vec<Pos2>> = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].iter().map(|p| apply_h(h, *p)).collect();
+    let corners: Option<Vec<Pos2>> = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].iter().map(|p| apply_h(&h, *p)).collect();
     let Some(corners) = corners else { return };
-    if !Rect::from_points(&corners).intersects(view_w) {
+    if pl.thick <= 0.0 && !Rect::from_points(&corners).intersects(view_w) {
         return;
     }
-    let mag = crate::export::magnification(h, b) * xf.zoom * ctx.pixels_per_point();
+    let ppp = ctx.pixels_per_point();
+    let mag = crate::export::magnification(&h, b) * xf.zoom * ppp;
     let res = 2f32.powf(mag.max(1e-3).log2().ceil()).clamp(1.0 / 16.0, 2.0);
     let Some((tex, rect, size)) = cache.placed(ctx, layer, res) else { return };
+    let op = layer.opacity.clamp(0.0, 1.0);
+    let cap = tint(op);
+    let side = {
+        let v = (255.0 * op * SIDE_SHADE) as u8;
+        Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
+    };
+    let slices = pl.slices(|w| cam.project(w).map(|p| xf.w2s(p)), |w| cam.to_cam(w)[2]);
     const N: usize = 12;
-    let mut m = Mesh::with_texture(tex);
-    let color = tint(layer.opacity);
-    for j in 0..=N {
-        for i in 0..=N {
-            let t = vec2(i as f32 / N as f32, j as f32 / N as f32);
-            let p = rect.min + rect.size() * t;
-            let Some(s) = apply_h(h, p) else { return };
-            let uv = ((p - rect.min) / size).to_pos2();
-            m.vertices.push(egui::epaint::Vertex { pos: xf.w2s(s), uv, color });
+    for (off, is_cap) in slices {
+        let h = if off == 0.0 { h } else { pl.homography_at(cam, off) };
+        let color = if is_cap { cap } else { side };
+        let mut m = Mesh::with_texture(tex);
+        let mut ok = true;
+        for j in 0..=N {
+            for i in 0..=N {
+                let t = vec2(i as f32 / N as f32, j as f32 / N as f32);
+                let p = rect.min + rect.size() * t;
+                let Some(s) = apply_h(&h, p) else {
+                    ok = false;
+                    break;
+                };
+                let uv = ((p - rect.min) / size).to_pos2();
+                m.vertices.push(egui::epaint::Vertex { pos: xf.w2s(s), uv, color });
+            }
         }
-    }
-    for j in 0..N as u32 {
-        for i in 0..N as u32 {
-            let a = j * (N as u32 + 1) + i;
-            let c = a + N as u32 + 1;
-            m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+        if !ok {
+            continue;
         }
+        for j in 0..N as u32 {
+            for i in 0..N as u32 {
+                let a = j * (N as u32 + 1) + i;
+                let c = a + N as u32 + 1;
+                m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+            }
+        }
+        painter.add(Shape::mesh(m));
     }
-    painter.add(Shape::mesh(m));
 }
 
 fn tint(op: f32) -> Color32 {
@@ -357,7 +381,7 @@ pub fn draw_doc(
                     Some(sp) => painter.clip_rect().intersect(xf.rect_w2s(sp.clip())),
                     None => painter.clip_rect(),
                 };
-                draw_placed(&painter.with_clip_rect(clip), ctx, layer, &pl.homography(cam), xf, cache, view_w);
+                draw_placed(&painter.with_clip_rect(clip), ctx, layer, pl, cam, xf, cache, view_w);
             }
             continue;
         }

@@ -163,6 +163,184 @@ fn yes() -> bool {
     true
 }
 
+/// A wall (any plane) matched by fitting a quad to a rectangle in the photo: corners
+/// top-left, top-right, bottom-right, bottom-left. Layers put on it move in its
+/// local axes (u along the top edge, v down the side).
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Wall {
+    pub id: u64,
+    pub name: String,
+    pub corners: [Pos2; 4],
+    /// Moves the plane along its normal (world units).
+    #[serde(default)]
+    pub offset: f64,
+    /// Snap the normal to the nearest space axis when it is within 15°.
+    #[serde(default = "yes")]
+    pub snap: bool,
+}
+
+/// A wall in world space: `r` has columns u (right), v (down) and n = u × v (into
+/// the wall); `o` is the world point at corner 0.
+#[derive(Clone, Debug)]
+pub struct WallFrame {
+    pub r: M3,
+    pub o: V3,
+}
+
+impl WallFrame {
+    pub fn col(&self, i: usize) -> V3 {
+        [self.r[0][i], self.r[1][i], self.r[2][i]]
+    }
+
+    /// Where the camera ray through canvas point `p` meets the wall.
+    pub fn hit(&self, cam: &Camera, p: Pos2) -> Option<V3> {
+        let n = self.col(2);
+        let d = cam.ray(p);
+        let den = dot(n, d);
+        if den.abs() < 1e-12 {
+            return None;
+        }
+        let t = dot(n, sub(self.o, cam.center)) / den;
+        (t > 0.0).then(|| add(cam.center, scale(d, t)))
+    }
+
+    /// Wall coordinates (u, v) of a world point.
+    pub fn uv(&self, x: V3) -> [f64; 2] {
+        let d = sub(x, self.o);
+        [dot(d, self.col(0)), dot(d, self.col(1))]
+    }
+
+    pub fn point(&self, uv: [f64; 2]) -> V3 {
+        add(self.o, add(scale(self.col(0), uv[0]), scale(self.col(1), uv[1])))
+    }
+}
+
+/// Plane of a wall quad. The orientation comes from the quad's two vanishing
+/// points; the position from where its bottom edge meets the floor (z = 0) for
+/// standing walls, the floor itself for floor-like quads, else the origin's depth.
+pub fn wall_frame(cam: &Camera, w: &Wall) -> Option<WallFrame> {
+    let [tl, tr, br, bl] = w.corners;
+    let h = |p: Pos2| [p.x as f64, p.y as f64, 1.0];
+    let rt = transpose(&cam.r);
+    // camera-space direction of the lines a0-a1 and b0-b1, pointing from a0 to a1
+    let dir = |a0: Pos2, a1: Pos2, b0: Pos2, b1: Pos2| -> Option<V3> {
+        let vp = cross(cross(h(a0), h(a1)), cross(h(b0), h(b1)));
+        let mut d = normalize([(vp[0] - cam.c[0] * vp[2]) / cam.f, (vp[1] - cam.c[1] * vp[2]) / cam.f, vp[2]]);
+        if !d.iter().all(|x| x.is_finite()) || norm(d) < 0.5 {
+            return None;
+        }
+        let (a, b) = ((a0.x as f64 - cam.c[0]) / cam.f, (a0.y as f64 - cam.c[1]) / cam.f);
+        let motion = [d[0] - a * d[2], d[1] - b * d[2]];
+        let want = [(a1.x - a0.x) as f64, (a1.y - a0.y) as f64];
+        if motion[0] * want[0] + motion[1] * want[1] < 0.0 {
+            d = scale(d, -1.0);
+        }
+        Some(mul_mv(&rt, d))
+    };
+    let d1 = dir(tl, tr, bl, br)?;
+    let d2 = dir(tl, bl, tr, br)?;
+    let mut n = normalize(cross(d1, d2));
+    if w.snap {
+        let i = (0..3).max_by(|&a, &b| n[a].abs().partial_cmp(&n[b].abs()).unwrap()).unwrap();
+        if n[i].abs() > 15f64.to_radians().cos() {
+            let mut e = [0.0; 3];
+            e[i] = n[i].signum();
+            n = e;
+        }
+    }
+    let u = normalize(sub(d1, scale(n, dot(d1, n))));
+    let mut v = cross(n, u);
+    if dot(v, d2) < 0.0 {
+        v = scale(v, -1.0);
+    }
+    let n = cross(u, v);
+    // a point on the plane
+    let ground = |p: Pos2| -> Option<V3> {
+        let d = cam.ray(p);
+        if d[2].abs() < 1e-12 {
+            return None;
+        }
+        let t = -cam.center[2] / d[2];
+        (t > 0.0).then(|| add(cam.center, scale(d, t)))
+    };
+    let mid = pos2((tl.x + tr.x + br.x + bl.x) * 0.25, (tl.y + tr.y + br.y + bl.y) * 0.25);
+    let p = if n[2].abs() < 0.5 {
+        ground(bl).or_else(|| ground(br))
+    } else {
+        ground(mid)
+    };
+    let p = p.unwrap_or_else(|| add(cam.center, scale(cam.ray(tl), cam.origin_depth().max(1.0))));
+    let p = add(p, scale(n, w.offset));
+    let r = [[u[0], v[0], n[0]], [u[1], v[1], n[1]], [u[2], v[2], n[2]]];
+    // origin: corner 0 on the plane
+    let d0 = cam.ray(tl);
+    let den = dot(n, d0);
+    let o = if den.abs() > 1e-12 { add(cam.center, scale(d0, dot(n, sub(p, cam.center)) / den)) } else { p };
+    Some(WallFrame { r, o })
+}
+
+fn nice125(x: f64) -> f64 {
+    let e = 10f64.powf(x.max(1e-9).log10().floor());
+    let m = x / e;
+    (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
+}
+
+/// Grid on a wall's plane around its quad (weight 2 every fifth line).
+pub fn wall_grid(cam: &Camera, w: &Wall) -> Vec<(V3, V3, u8)> {
+    let Some(f) = wall_frame(cam, w) else { return Vec::new() };
+    let uvs: Vec<[f64; 2]> = w.corners.iter().filter_map(|p| f.hit(cam, *p)).map(|x| f.uv(x)).collect();
+    if uvs.len() < 2 {
+        return Vec::new();
+    }
+    let (mut u0, mut u1, mut v0, mut v1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for [u, v] in &uvs {
+        u0 = u0.min(*u);
+        u1 = u1.max(*u);
+        v0 = v0.min(*v);
+        v1 = v1.max(*v);
+    }
+    let g = nice125((u1 - u0).max(v1 - v0).max(1.0) / 6.0);
+    let (u0, u1) = (((u0 / g).floor() - 2.0) * g, ((u1 / g).ceil() + 2.0) * g);
+    let (v0, v1) = (((v0 / g).floor() - 2.0) * g, ((v1 / g).ceil() + 2.0) * g);
+    let mut out = Vec::new();
+    let weight = |x: f64| if ((x / g).round() as i64).rem_euclid(5) == 0 { 2 } else { 1 };
+    let mut u = u0;
+    while u <= u1 + g * 1e-6 {
+        out.push((f.point([u, v0]), f.point([u, v1]), weight(u)));
+        u += g;
+    }
+    let mut v = v0;
+    while v <= v1 + g * 1e-6 {
+        out.push((f.point([u0, v]), f.point([u1, v]), weight(v)));
+        v += g;
+    }
+    out
+}
+
+/// Re-derives the base of every layer that sits on a wall from the wall's current
+/// frame, so editing a wall (or the camera) carries its layers along.
+pub fn sync_walls(doc: &mut crate::doc::Document) {
+    let cams = cameras(&doc.spaces);
+    let mut frames: std::collections::HashMap<u64, WallFrame> = std::collections::HashMap::new();
+    for sp in &doc.spaces {
+        if let Some(cam) = cams.get(&sp.id) {
+            for w in &sp.walls {
+                if let Some(f) = wall_frame(cam, w) {
+                    frames.insert(w.id, f);
+                }
+            }
+        }
+    }
+    for l in &mut doc.layers {
+        if let Some(pl) = l.place.as_mut() {
+            if let Some(f) = pl.wall.and_then(|w| frames.get(&w)) {
+                pl.base_r = f.r;
+                pl.base_t = f.point(pl.wall_uv);
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Space {
     pub id: u64,
@@ -181,12 +359,14 @@ pub struct Space {
     /// (None: the whole frame). Separate from `frame`, which defines the camera.
     #[serde(default)]
     pub mask: Option<Rect>,
+    #[serde(default)]
+    pub walls: Vec<Wall>,
 }
 
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new() }
     }
 
     /// The canvas area the space shows in.
@@ -670,6 +850,16 @@ pub struct Placement {
     /// Degrees, XYZ order.
     pub rot: V3,
     pub scale: f64,
+    /// Thickness: the content is extruded this far behind its plane (world units,
+    /// along `normal`); 0 = flat.
+    #[serde(default)]
+    pub thick: f64,
+    /// Wall the layer sits on: `base` then follows that wall (see `sync_walls`).
+    #[serde(default)]
+    pub wall: Option<u64>,
+    /// Where the plane origin sits on the wall (wall units).
+    #[serde(default)]
+    pub wall_uv: [f64; 2],
 }
 
 impl Placement {
@@ -689,7 +879,32 @@ impl Placement {
             pos: [0.0; 3],
             rot: [0.0; 3],
             scale: 1.0,
+            thick: 0.0,
+            wall: None,
+            wall_uv: [0.0; 2],
         }
+    }
+
+    /// On a wall: the plane through the wall point under `anchor`, lying flat on the
+    /// wall, with a scale that keeps the layer about its 2D size there.
+    pub fn on_wall(space: u64, cam: &Camera, wall: &Wall, anchor: Pos2) -> Option<Self> {
+        let fr = wall_frame(cam, wall)?;
+        let x = fr.hit(cam, anchor)?;
+        let d = sub(x, fr.o);
+        let (u, v) = (fr.col(0), fr.col(1));
+        Some(Self {
+            space,
+            anchor,
+            base_r: fr.r,
+            base_t: x,
+            base_k: cam.to_cam(x)[2].max(1e-6) / cam.f,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            scale: 1.0,
+            thick: 0.0,
+            wall: Some(wall.id),
+            wall_uv: [dot(d, u), dot(d, v)],
+        })
     }
 
     /// Plane → world as (linear part, translation).
@@ -712,7 +927,13 @@ impl Placement {
 
     /// Homography from 2D content coordinates to canvas pixels.
     pub fn homography(&self, cam: &Camera) -> M3 {
+        self.homography_at(cam, 0.0)
+    }
+
+    /// Homography of the plane moved `off` world units along its normal (extrusion).
+    pub fn homography_at(&self, cam: &Camera, off: f64) -> M3 {
         let (m, t) = self.world_affine();
+        let t = if off != 0.0 { add(t, scale(self.normal(), off)) } else { t };
         let a = mul_mm(&cam.r, &m);
         let b = mul_mv(&cam.r, sub(t, cam.center));
         let k = [[cam.f, 0.0, cam.c[0]], [0.0, cam.f, cam.c[1]], [0.0, 0.0, 1.0]];
@@ -720,6 +941,28 @@ impl Placement {
         let (ax, ay) = (self.anchor.x as f64, self.anchor.y as f64);
         let sh = [[1.0, 0.0, -ax], [0.0, 1.0, -ay], [0.0, 0.0, 1.0]];
         mul_mm(&mul_mm(&k, &p), &sh)
+    }
+
+    /// Extrusion slices as (offset along the normal, is an end cap), far to near.
+    /// `project` maps world points to screen pixels; slices are about 0.75 px apart.
+    pub fn slices(&self, project: impl Fn(V3) -> Option<Pos2>, view_depth: impl Fn(V3) -> f64) -> Vec<(f64, bool)> {
+        if self.thick <= 0.0 {
+            return vec![(0.0, true)];
+        }
+        let (_, t) = self.world_affine();
+        let back = add(t, scale(self.normal(), self.thick));
+        let px = match (project(t), project(back)) {
+            (Some(a), Some(b)) => a.distance(b) as f64,
+            _ => 48.0,
+        };
+        let k = (px / 0.75).ceil().clamp(1.0, 160.0) as usize;
+        let mut v: Vec<(f64, bool)> = (0..=k).map(|i| (self.thick * i as f64 / k as f64, i == 0 || i == k)).collect();
+        if view_depth(t) > view_depth(back) {
+            // the back is nearer (seen from behind): draw from the front face on
+            return v;
+        }
+        v.reverse();
+        v
     }
 
     /// Camera depth of the plane origin (for back-to-front sorting).
@@ -1018,5 +1261,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wall_from_a_quad() {
+        let t = truth();
+        // a real wall: the plane x = 100, from y = -100..200, z = 0..150
+        let q = [[100.0, -100.0, 150.0], [100.0, 200.0, 150.0], [100.0, 200.0, 0.0], [100.0, -100.0, 0.0]];
+        let corners = q.map(|w| t.project(w).unwrap());
+        let wall = Wall { id: 9, name: "w".into(), corners, offset: 0.0, snap: true };
+        let f = wall_frame(&t, &wall).unwrap();
+        // normal along X, plane through x = 100, origin at corner 0
+        assert!((f.col(2)[0].abs() - 1.0).abs() < 1e-9, "{:?}", f.col(2));
+        assert!(norm(sub(f.o, q[0])) < 1e-2, "{:?}", f.o);
+        // u runs along the top edge, v down the side
+        assert!(dot(f.col(0), normalize(sub(q[1], q[0]))) > 0.999);
+        assert!(dot(f.col(1), normalize(sub(q[3], q[0]))) > 0.999);
+        // a layer put on it lands exactly on the wall point under its anchor
+        let anchor = t.project([100.0, 50.0, 60.0]).unwrap();
+        let pl = Placement::on_wall(1, &t, &wall, anchor).unwrap();
+        assert!(norm(sub(pl.base_t, [100.0, 50.0, 60.0])) < 1e-2);
+        assert!(apply_h(&pl.homography(&t), anchor).unwrap().distance(anchor) < 1e-3);
+    }
+
+    #[test]
+    fn slices_run_far_to_near() {
+        let t = truth();
+        let mut pl = Placement::facing(1, &t, pos2(700.0, 450.0));
+        pl.thick = 50.0;
+        let v = pl.slices(|w| t.project(w), |w| t.to_cam(w)[2]);
+        assert!(v.len() > 2);
+        assert!(v.first().unwrap().0 > v.last().unwrap().0, "back first");
+        assert!(v.first().unwrap().1 && v.last().unwrap().1);
+        assert_eq!(v.last().unwrap().0, 0.0);
     }
 }

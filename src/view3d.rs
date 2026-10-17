@@ -10,6 +10,9 @@ use crate::doc::{Document, Layer, LayerId};
 use crate::persp::{self, Camera, M3, Placement, V3, add, cross, dot, mul_mm, mul_mv, normalize, scale, sub, transpose};
 use crate::theme::{ACCENT, INK_2, INK_3};
 
+/// Walls are drawn in this colour everywhere.
+pub const WALL_COLOR: Color32 = Color32::from_rgb(80, 220, 230);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct View3d {
     pub space: u64,
@@ -239,6 +242,19 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         }
     }
     camera_gizmo(painter, proj, cam);
+    if let Some(sp) = doc.spaces.iter().find(|s| s.id == view.space) {
+        for w in &sp.walls {
+            let Some(f) = persp::wall_frame(cam, w) else { continue };
+            let q: Vec<V3> = w.corners.iter().filter_map(|p| f.hit(cam, *p)).collect();
+            if q.len() == 4 {
+                for i in 0..4 {
+                    if let Some(s) = proj.segment(q[i], q[(i + 1) % 4]) {
+                        painter.line_segment(s, Stroke::new(1.2, WALL_COLOR));
+                    }
+                }
+            }
+        }
+    }
 
     // placed layers, far to near
     let mut list: Vec<(&Layer, &Placement, f64)> = members(doc, view.space)
@@ -274,29 +290,39 @@ fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj:
     };
     let Some((tex, rect, size)) = cache.placed(ctx, l, res) else { return };
     const N: usize = 12;
-    let color = Color32::WHITE.gamma_multiply(l.opacity.clamp(0.0, 1.0));
-    let mut mesh = Mesh::with_texture(tex);
-    let mut ok = Vec::with_capacity((N + 1) * (N + 1));
-    for j in 0..=N {
-        for i in 0..=N {
-            let tt = vec2(i as f32 / N as f32, j as f32 / N as f32);
-            let p = rect.min + rect.size() * tt;
-            let s = proj.project(content_to_world(pl, &m, t, p));
-            ok.push(s.is_some());
-            mesh.vertices.push(egui::epaint::Vertex { pos: s.unwrap_or(Pos2::ZERO), uv: ((p - rect.min) / size).to_pos2(), color });
-        }
-    }
-    for j in 0..N {
-        for i in 0..N {
-            let a = j * (N + 1) + i;
-            let c = a + N + 1;
-            if ok[a] && ok[a + 1] && ok[c] && ok[c + 1] {
-                let (a, c) = (a as u32, c as u32);
-                mesh.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+    let op = l.opacity.clamp(0.0, 1.0);
+    let cap = Color32::WHITE.gamma_multiply(op);
+    let side = {
+        let v = (255.0 * op * crate::canvas::SIDE_SHADE) as u8;
+        Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
+    };
+    let n = pl.normal();
+    for (off, is_cap) in pl.slices(|w| proj.project(w), |w| proj.to_view(w)[2]) {
+        let color = if is_cap { cap } else { side };
+        let t = add(t, scale(n, off));
+        let mut mesh = Mesh::with_texture(tex);
+        let mut ok = Vec::with_capacity((N + 1) * (N + 1));
+        for j in 0..=N {
+            for i in 0..=N {
+                let tt = vec2(i as f32 / N as f32, j as f32 / N as f32);
+                let p = rect.min + rect.size() * tt;
+                let s = proj.project(content_to_world(pl, &m, t, p));
+                ok.push(s.is_some());
+                mesh.vertices.push(egui::epaint::Vertex { pos: s.unwrap_or(Pos2::ZERO), uv: ((p - rect.min) / size).to_pos2(), color });
             }
         }
+        for j in 0..N {
+            for i in 0..N {
+                let a = j * (N + 1) + i;
+                let c = a + N + 1;
+                if ok[a] && ok[a + 1] && ok[c] && ok[c + 1] {
+                    let (a, c) = (a as u32, c as u32);
+                    mesh.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+                }
+            }
+        }
+        painter.add(Shape::mesh(mesh));
     }
-    painter.add(Shape::mesh(mesh));
 }
 
 fn draw_selection(painter: &Painter, doc: &Document, proj: &Proj, sel: Option<LayerId>) {

@@ -479,7 +479,9 @@ impl Document {
         let cams = crate::persp::cameras(&self.spaces);
         let mut acc: Option<Rect> = None;
         for l in self.layers.iter().filter(|l| l.visible) {
-            if let Some(b) = l.shown_bounds(&cams) {
+            // layers in a space only show inside its mask
+            let clip = l.place.as_ref().and_then(|pl| self.spaces.iter().find(|s| s.id == pl.space)).map(|s| s.clip());
+            if let Some(b) = l.shown_bounds(&cams).map(|b| clip.map_or(b, |c| b.intersect(c))).filter(|b| b.is_positive()) {
                 acc = Some(acc.map_or(b, |a| a.union(b)));
             }
         }

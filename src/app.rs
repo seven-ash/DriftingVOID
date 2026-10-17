@@ -146,6 +146,8 @@ enum Drag {
     SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
     SpaceOrigin { id: u64 },
     SpaceMask { id: u64, start: Pos2 },
+    WallRect { sid: u64, wid: u64, start: Pos2 },
+    WallCorner { sid: u64, wid: u64, idx: usize },
 }
 
 /// Which part of a layer a selection covers.
@@ -663,6 +665,9 @@ pub struct App {
     tab_raw: Vec<(bool, bool)>,
     /// The next drag in the space tool draws the active space's mask.
     space_mask_draw: bool,
+    /// Selected wall of the active space, and whether the next drag draws a new one.
+    wall_sel: Option<u64>,
+    wall_new: bool,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -741,6 +746,8 @@ impl App {
             peek: false,
             tab_raw: Vec::new(),
             space_mask_draw: false,
+            wall_sel: None,
+            wall_new: false,
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -832,6 +839,30 @@ impl App {
                         pl.align_to_axes();
                         pl.pos = [0.0, 0.0, 0.0];
                     }
+                    // DV_WALL="x,y;x,y;x,y;x,y" (photo pixels): a wall, with the second text on it
+                    if let (Ok(v), Some(im)) = (std::env::var("DV_WALL"), app.doc.layers.iter().find_map(|l| match &l.kind {
+                        LayerKind::Image(im) => Some(im.clone()),
+                        _ => None,
+                    })) {
+                        let pts: Vec<Pos2> = v
+                            .split(';')
+                            .filter_map(|q| q.split_once(',').and_then(|(x, y)| Some(im.src_to_world(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))))
+                            .collect();
+                        if pts.len() == 4 {
+                            let wid = app.doc.new_id();
+                            app.doc.spaces.last_mut().unwrap().walls.push(crate::persp::Wall { id: wid, name: "벽 1".into(), corners: [pts[0], pts[1], pts[2], pts[3]], offset: 0.0, snap: true });
+                            app.wall_sel = Some(wid);
+                            app.put_in_wall(t2, id, wid);
+                        }
+                    }
+                    if let Some(th) = std::env::var("DV_THICK").ok().and_then(|v| v.parse::<f64>().ok()) {
+                        for t in [t1, t2] {
+                            if let Some(pl) = app.doc.get_mut(t).and_then(|l| l.place.as_mut()) {
+                                pl.thick = th;
+                            }
+                        }
+                    }
+                    crate::persp::sync_walls(&mut app.doc);
                     if mode == "select" {
                         app.tool = Tool::Select;
                         app.sel = Some(t1);
@@ -1345,6 +1376,36 @@ impl App {
             self.doc.layers.insert(to.min(self.doc.layers.len()), l);
         }
         self.status = format!("{name}에 넣음");
+        self.mark();
+    }
+
+    /// Puts a layer on a wall: its plane lies on the wall where its centre shows, and it
+    /// moves along the wall from then on.
+    fn put_in_wall(&mut self, id: LayerId, sid: u64, wid: u64) {
+        let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
+        let Ok(cam) = crate::persp::solve(sp) else {
+            self.status = "공간 카메라를 풀 수 없어 · 소실선을 확인해 줘".into();
+            return;
+        };
+        let Some(wall) = sp.walls.iter().find(|w| w.id == wid).cloned() else { return };
+        let Some(i) = self.doc.index_of(id) else { return };
+        let Some(b) = self.doc.layers[i].bounds() else { return };
+        let Some(mut pl) = crate::persp::Placement::on_wall(sid, &cam, &wall, b.center()) else {
+            self.status = "여기서는 벽에 닿지 않아 (벽이 카메라 뒤쪽)".into();
+            return;
+        };
+        if let Some(old) = &self.doc.layers[i].place {
+            pl.thick = old.thick;
+        }
+        self.doc.layers[i].place = Some(pl);
+        let same = |l: &Layer| l.id != id && l.place.as_ref().is_some_and(|p| p.wall == Some(wid));
+        let near = self.doc.layers.iter().rposition(same).or_else(|| self.doc.layers.iter().rposition(|l| l.id != id && l.place.as_ref().is_some_and(|p| p.space == sid)));
+        if let Some(top) = near {
+            let l = self.doc.layers.remove(i);
+            let to = if top > i { top } else { top + 1 };
+            self.doc.layers.insert(to.min(self.doc.layers.len()), l);
+        }
+        self.status = format!("{}에 붙임", wall.name);
         self.mark();
     }
 
@@ -2275,6 +2336,12 @@ impl App {
                 Some(s) => (s.origin, None),
                 None => return,
             },
+            Some(Drag::WallCorner { sid, wid, idx }) => {
+                match self.doc.spaces.iter().find(|s| s.id == *sid).and_then(|s| s.walls.iter().find(|x| x.id == *wid)) {
+                    Some(wl) => (wl.corners[*idx], Some((wl.corners[(*idx + 3) % 4], wl.corners[*idx], crate::view3d::WALL_COLOR))),
+                    None => return,
+                }
+            }
             _ => return,
         };
         let xf = self.xf();
@@ -2365,6 +2432,19 @@ impl App {
 
     fn space_down(&mut self, sp: Pos2, w: Pos2) {
         let xf = self.xf();
+        if self.wall_new {
+            if let Some(i) = self.space_idx() {
+                let sid = self.doc.spaces[i].id;
+                let wid = self.doc.new_id();
+                let n = self.doc.spaces[i].walls.len() + 1;
+                self.doc.spaces[i].walls.push(crate::persp::Wall { id: wid, name: format!("벽 {n}"), corners: [w; 4], offset: 0.0, snap: true });
+                self.wall_sel = Some(wid);
+                self.wall_new = false;
+                self.drag = Some(Drag::WallRect { sid, wid, start: w });
+                self.mark();
+                return;
+            }
+        }
         if self.space_mask_draw {
             if let Some(i) = self.space_idx() {
                 let id = self.doc.spaces[i].id;
@@ -2377,6 +2457,20 @@ impl App {
         if let (Some(i), false) = (self.space_idx(), self.space_new) {
             let s = &self.doc.spaces[i];
             let id = s.id;
+            // wall corners (the selected wall first)
+            let mut walls: Vec<&crate::persp::Wall> = s.walls.iter().collect();
+            walls.sort_by_key(|w| Some(w.id) != self.wall_sel);
+            for wl in walls {
+                for (ci, c) in wl.corners.iter().enumerate() {
+                    if xf.w2s(*c).distance(sp) <= 9.0 {
+                        let wid = wl.id;
+                        self.wall_sel = Some(wid);
+                        self.drag = Some(Drag::WallCorner { sid: id, wid, idx: ci });
+                        self.mark();
+                        return;
+                    }
+                }
+            }
             let mut hit: Option<Drag> = None;
             // endpoints first (the selected line wins ties)
             let order: Vec<usize> = self.space_line.into_iter().chain(0..s.lines.len()).collect();
@@ -2694,6 +2788,23 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::WallRect { sid, wid, start } => {
+                let (sid, wid, start) = (*sid, *wid, *start);
+                let rr = Rect::from_two_pos(start, w);
+                if let Some(wl) = self.doc.spaces.iter_mut().find(|s| s.id == sid).and_then(|s| s.walls.iter_mut().find(|x| x.id == wid)) {
+                    wl.corners = [rr.left_top(), rr.right_top(), rr.right_bottom(), rr.left_bottom()];
+                }
+                self.changed = true;
+                self.modified = true;
+            }
+            Drag::WallCorner { sid, wid, idx } => {
+                let (sid, wid, idx) = (*sid, *wid, *idx);
+                if let Some(wl) = self.doc.spaces.iter_mut().find(|s| s.id == sid).and_then(|s| s.walls.iter_mut().find(|x| x.id == wid)) {
+                    wl.corners[idx] = w;
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::SpaceMask { id, start } => {
                 let (id, start) = (*id, *start);
                 if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
@@ -2901,6 +3012,19 @@ impl App {
                 }
                 self.changed = true;
                 self.modified = true;
+            }
+            Drag::WallRect { sid, wid, .. } => {
+                let zoom = self.zoom;
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == sid) {
+                    let tiny = sp.walls.iter().find(|x| x.id == wid).is_some_and(|wl| {
+                        let rr = Rect::from_points(&wl.corners);
+                        rr.width() * zoom < 8.0 || rr.height() * zoom < 8.0
+                    });
+                    if tiny {
+                        sp.walls.retain(|x| x.id != wid);
+                        self.wall_sel = None;
+                    }
+                }
             }
             Drag::SpaceMask { id, .. } => {
                 self.space_mask_draw = false;
@@ -3842,8 +3966,13 @@ impl App {
         let mut pal_req: PalReq = None;
         let mut start_crop = false;
         let cams = crate::persp::cameras(&self.doc.spaces);
-        let spaces: Vec<(u64, String, bool)> = self.doc.spaces.iter().map(|s| (s.id, s.name.clone(), cams.contains_key(&s.id))).collect();
-        let mut space_req: Option<Option<u64>> = None;
+        let spaces: Vec<(u64, String, bool, Vec<(u64, String)>)> = self
+            .doc
+            .spaces
+            .iter()
+            .map(|s| (s.id, s.name.clone(), cams.contains_key(&s.id), s.walls.iter().map(|w| (w.id, w.name.clone())).collect()))
+            .collect();
+        let mut space_req: Option<Option<(u64, Option<u64>)>> = None;
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -3999,8 +4128,18 @@ impl App {
             }
             if !spaces.is_empty() {
                 ui.separator();
-                let cur = l.place.as_ref().map(|p| p.space);
-                let shown = cur.and_then(|c| spaces.iter().find(|s| s.0 == c)).map_or("없음".to_string(), |s| s.1.clone());
+                let cur = l.place.as_ref().map(|p| (p.space, p.wall));
+                let shown = match cur {
+                    Some((sid, wid)) => {
+                        let sp = spaces.iter().find(|s| s.0 == sid);
+                        let sn = sp.map_or(String::new(), |s| s.1.clone());
+                        match wid.and_then(|w| sp.and_then(|s| s.3.iter().find(|x| x.0 == w))) {
+                            Some(w) => format!("{sn} › {}", w.1),
+                            None => sn,
+                        }
+                    }
+                    None => "없음".to_string(),
+                };
                 ui.horizontal(|ui| {
                     ui.label("3D 공간");
                     egui::ComboBox::from_id_salt(("space_of", id))
@@ -4012,10 +4151,17 @@ impl App {
                                 if ui.selectable_label(cur.is_none(), "없음").clicked() && cur.is_some() {
                                     space_req = Some(None);
                                 }
-                                for (sid, name, ok) in &spaces {
+                                for (sid, name, ok, walls) in &spaces {
                                     ui.add_enabled_ui(*ok, |ui| {
-                                        if ui.selectable_label(cur == Some(*sid), name.as_str()).clicked() && cur != Some(*sid) {
-                                            space_req = Some(Some(*sid));
+                                        let here = Some((*sid, None));
+                                        if ui.selectable_label(cur == here, name.as_str()).clicked() && cur != here {
+                                            space_req = Some(here);
+                                        }
+                                        for (wid, wn) in walls {
+                                            let here = Some((*sid, Some(*wid)));
+                                            if ui.selectable_label(cur == here, format!("   {name} › {wn}")).clicked() && cur != here {
+                                                space_req = Some(here);
+                                            }
                                         }
                                     });
                                 }
@@ -4042,6 +4188,17 @@ impl App {
                         pl.scale = pct as f64 / 100.0;
                         changed = true;
                     }
+                    let mut th = pl.thick as f32;
+                    if ui
+                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0))
+                        .on_hover_text("평면 뒤로 내용을 밀어내 입체로 (옆면은 어둡게)")
+                        .changed()
+                    {
+                        pl.thick = th as f64;
+                        changed = true;
+                    }
+                    let on_wall = pl.wall.is_some();
+                    if !on_wall {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("공간 축에 맞추기").on_hover_text("가장 가까운 벽이나 바닥 방향으로 붙여").clicked() {
                             pl.align_to_axes();
@@ -4057,7 +4214,12 @@ impl App {
                             }
                         }
                     });
-                    ui.small("축은 넣을 때의 카메라 정면 기준 · 1단위 = 원점에서 1px");
+                    }
+                    ui.small(if on_wall {
+                        "벽 기준 축 · X/Y: 벽을 따라 · Z: 벽에서 떨어짐"
+                    } else {
+                        "축은 넣을 때의 카메라 정면 기준 · 1단위 = 원점에서 1px"
+                    });
                 }
             }
         }
@@ -4068,7 +4230,8 @@ impl App {
             self.open_palette_for(t, c, at);
         }
         match space_req {
-            Some(Some(sid)) => self.put_in_space(id, sid),
+            Some(Some((sid, None))) => self.put_in_space(id, sid),
+            Some(Some((sid, Some(wid)))) => self.put_in_wall(id, sid, wid),
             Some(None) => self.take_out_of_space(id),
             None => {}
         }
@@ -4123,18 +4286,28 @@ impl App {
         let n = self.doc.layers.len();
         let cams = crate::persp::cameras(&self.doc.spaces);
         let mut header_done: Vec<u64> = Vec::new();
-        let mut headers: Vec<(u64, Rect)> = Vec::new();
-        let mut space_click = None;
-        let mut drop_space = None;
-        // empty spaces first
+        let mut wall_done: Vec<u64> = Vec::new();
+        let mut headers: Vec<(u64, Option<u64>, Rect)> = Vec::new();
+        let mut space_click: Option<(u64, Option<u64>)> = None;
+        let mut drop_space: Option<(LayerId, u64, Option<u64>)> = None;
+        let wall_count = |layers: &[Layer], wid: u64| layers.iter().filter(|m| m.place.as_ref().is_some_and(|p| p.wall == Some(wid))).count();
+        // empty spaces first (with their walls)
         for sp in &self.doc.spaces {
             if !self.doc.layers.iter().any(|m| m.place.as_ref().is_some_and(|p| p.space == sp.id)) {
-                let resp = space_header(ui, &sp.name, 0, cams.contains_key(&sp.id), width, self.space_sel == Some(sp.id));
-                headers.push((sp.id, resp.rect));
+                let resp = space_header(ui, &sp.name, 0, cams.contains_key(&sp.id), width, self.space_sel == Some(sp.id), 0.0, false);
+                headers.push((sp.id, None, resp.rect));
                 if resp.clicked() {
-                    space_click = Some(sp.id);
+                    space_click = Some((sp.id, None));
                 }
                 header_done.push(sp.id);
+                for w in &sp.walls {
+                    let resp = space_header(ui, &w.name, 0, true, width, self.wall_sel == Some(w.id), 14.0, true);
+                    headers.push((sp.id, Some(w.id), resp.rect));
+                    if resp.clicked() {
+                        space_click = Some((sp.id, Some(w.id)));
+                    }
+                    wall_done.push(w.id);
+                }
             }
         }
         let mut rows: Vec<(usize, Rect)> = Vec::with_capacity(n);
@@ -4142,15 +4315,36 @@ impl App {
         let mut rename_done = false;
         for di in 0..n {
             let li = n - 1 - di; // list shows the top layer first
-            let member_of = self.doc.layers[li].place.as_ref().map(|p| p.space);
-            if let Some(sid) = member_of.filter(|s| !header_done.contains(s)) {
+            let member_of = self.doc.layers[li].place.as_ref().map(|p| (p.space, p.wall));
+            if let Some((sid, _)) = member_of.filter(|(s, _)| !header_done.contains(s)) {
                 header_done.push(sid);
                 if let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) {
                     let cnt = self.doc.layers.iter().filter(|m| m.place.as_ref().is_some_and(|p| p.space == sid)).count();
-                    let resp = space_header(ui, &sp.name, cnt, cams.contains_key(&sid), width, self.space_sel == Some(sid));
-                    headers.push((sid, resp.rect));
+                    let resp = space_header(ui, &sp.name, cnt, cams.contains_key(&sid), width, self.space_sel == Some(sid), 0.0, false);
+                    headers.push((sid, None, resp.rect));
                     if resp.clicked() {
-                        space_click = Some(sid);
+                        space_click = Some((sid, None));
+                    }
+                    // walls with nothing on them yet
+                    for w in &sp.walls {
+                        if wall_count(&self.doc.layers, w.id) == 0 {
+                            let resp = space_header(ui, &w.name, 0, true, width, self.wall_sel == Some(w.id), 14.0, true);
+                            headers.push((sid, Some(w.id), resp.rect));
+                            if resp.clicked() {
+                                space_click = Some((sid, Some(w.id)));
+                            }
+                            wall_done.push(w.id);
+                        }
+                    }
+                }
+            }
+            if let Some((sid, Some(wid))) = member_of.filter(|(_, w)| w.is_some_and(|w| !wall_done.contains(&w))) {
+                wall_done.push(wid);
+                if let Some(w) = self.doc.spaces.iter().find(|s| s.id == sid).and_then(|s| s.walls.iter().find(|w| w.id == wid)) {
+                    let resp = space_header(ui, &w.name, wall_count(&self.doc.layers, wid), true, width, self.wall_sel == Some(wid), 14.0, true);
+                    headers.push((sid, Some(wid), resp.rect));
+                    if resp.clicked() {
+                        space_click = Some((sid, Some(wid)));
                     }
                 }
             }
@@ -4159,7 +4353,12 @@ impl App {
             let (r, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click_and_drag());
             rows.push((li, r));
             // members of a space are indented under its folder row
-            let r = if member_of.is_some() { Rect::from_min_max(r.min + vec2(14.0, 0.0), r.max) } else { r };
+            let indent = match member_of {
+                Some((_, Some(_))) => 28.0,
+                Some(_) => 14.0,
+                None => 0.0,
+            };
+            let r = Rect::from_min_max(r.min + vec2(indent, 0.0), r.max);
             let eye_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(26.0, 26.0));
             let lock_r = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(26.0, 26.0));
             let thumb_r = Rect::from_center_size(pos2(r.left() + 44.0, r.center().y), vec2(24.0, 24.0));
@@ -4267,9 +4466,9 @@ impl App {
                 }
                 let y = if slot < rows.len() { rows[slot].1.top() - 1.0 } else { rows[rows.len() - 1].1.bottom() + 1.0 };
                 let x0 = rows[0].1.left();
-                let over = headers.iter().find(|(_, hr)| hr.contains(pp)).copied();
+                let over = headers.iter().find(|(_, _, hr)| hr.contains(pp)).copied();
                 match over {
-                    Some((_, hr)) => {
+                    Some((_, _, hr)) => {
                         ui.painter().rect_stroke(hr, 8.0, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
                     }
                     None => {
@@ -4277,8 +4476,8 @@ impl App {
                     }
                 }
                 if released {
-                    if let Some((sid, _)) = over {
-                        drop_space = Some((did, sid));
+                    if let Some((sid, wid, _)) = over {
+                        drop_space = Some((did, sid, wid));
                     } else if let Some(from) = self.doc.index_of(did) {
                         // display slot -> layer index (list is top-first)
                         let n = self.doc.layers.len();
@@ -4308,12 +4507,17 @@ impl App {
                 self.select_only(Some(id));
             }
         }
-        if let Some(sid) = space_click {
+        if let Some((sid, wid)) = space_click {
             self.space_sel = Some(sid);
             self.space_new = false;
+            if wid.is_some() {
+                self.wall_sel = wid;
+            }
         }
-        if let Some((did, sid)) = drop_space {
-            self.put_in_space(did, sid);
+        match drop_space {
+            Some((did, sid, None)) => self.put_in_space(did, sid),
+            Some((did, sid, Some(wid))) => self.put_in_wall(did, sid, wid),
+            None => {}
         }
         if changed {
             self.mark();
@@ -5003,6 +5207,36 @@ impl App {
                 .clicked();
             mask_clear = ui.add_enabled(has_mask, egui::Button::new("마스크 해제")).clicked();
         });
+        let walls: Vec<(u64, String)> = sp.walls.iter().map(|w| (w.id, w.name.clone())).collect();
+        let (mut wall_pick, mut wall_add) = (None, false);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.label("벽");
+            for (wid, name) in &walls {
+                if ui.selectable_label(self.wall_sel == Some(*wid), name.as_str()).clicked() {
+                    wall_pick = Some(*wid);
+                }
+            }
+            wall_add = ui
+                .selectable_label(self.wall_new, "+ 벽")
+                .on_hover_text("끌어서 사각형을 그린 뒤, 네 모서리를 사진 속 벽(평면)의 모서리에 맞춰. 그 벽에 넣은 레이어는 벽을 따라 움직여")
+                .clicked();
+        });
+        let mut wall_edit: Option<(f64, bool, bool)> = None;
+        if let Some(w) = self.wall_sel.and_then(|id| sp.walls.iter().find(|w| w.id == id)) {
+            let (mut off, mut snap, mut wdel, mut ch2) = (w.offset as f32, w.snap, false, false);
+            ch2 |= ui
+                .add(crate::dial::Dial::new(&mut off, -5000.0..=5000.0).step(5.0).text("벽 거리").default(0.0))
+                .on_hover_text("벽을 앞뒤로 옮겨 (바닥 경계로 잡은 위치가 어긋날 때)")
+                .changed();
+            ui.horizontal(|ui| {
+                ch2 |= ui.checkbox(&mut snap, "축에 맞추기").on_hover_text("방향이 공간 축과 15° 안이면 딱 맞춰").changed();
+                wdel = ui.button("벽 삭제").clicked();
+            });
+            if ch2 || wdel {
+                wall_edit = Some((off as f64, snap, wdel));
+            }
+        }
         let (mut clear, mut fit, mut del) = (false, false, false);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
@@ -5034,6 +5268,32 @@ impl App {
             s.frame = b;
             ch = true;
         }
+        if let Some(id) = wall_pick {
+            self.wall_sel = Some(id);
+            self.wall_new = false;
+        }
+        if wall_add {
+            self.wall_new = !self.wall_new;
+            if self.wall_new {
+                self.status = "캔버스에서 끌어서 벽 사각형을 그려 줘".into();
+            }
+        }
+        if let (Some((off, snap, wdel)), Some(wid)) = (wall_edit, self.wall_sel) {
+            if wdel {
+                self.doc.spaces[i].walls.retain(|w| w.id != wid);
+                // its layers stay where they are, no longer tied to the wall
+                for l in &mut self.doc.layers {
+                    if let Some(pl) = l.place.as_mut().filter(|p| p.wall == Some(wid)) {
+                        pl.wall = None;
+                    }
+                }
+                self.wall_sel = None;
+            } else if let Some(w) = self.doc.spaces[i].walls.iter_mut().find(|w| w.id == wid) {
+                w.offset = off;
+                w.snap = snap;
+            }
+            ch = true;
+        }
         if del {
             self.doc.spaces.remove(i);
             self.space_sel = self.doc.spaces.last().map(|s| s.id);
@@ -5050,6 +5310,7 @@ impl App {
         let editing = self.tool == Tool::Space;
         // outside the space tool only the grid of the selected layer's space shows
         let focus = self.sel_layer().and_then(|l| l.place.as_ref()).map(|p| p.space);
+        let focus_wall = self.sel_layer().and_then(|l| l.place.as_ref()).and_then(|p| p.wall);
         if !editing && focus.is_none() {
             return;
         }
@@ -5073,7 +5334,13 @@ impl App {
             if let Some(cam) = &cam {
                 let seg = |a: V3, b: V3| cam.project_segment(a, b).map(|(p, q)| [xf.w2s(p), xf.w2s(q)]);
                 if s.grid {
-                    for (a, b, wgt) in crate::persp::depth_grid(cam, s.frame) {
+                    // a layer on a wall shows that wall's grid; otherwise the depth grid
+                    let wall = focus_wall.filter(|_| !editing).and_then(|wid| s.walls.iter().find(|w| w.id == wid));
+                    let lines = match wall {
+                        Some(w) => crate::persp::wall_grid(cam, w),
+                        None => crate::persp::depth_grid(cam, s.frame),
+                    };
+                    for (a, b, wgt) in lines {
                         if let Some(sgm) = seg(a, b) {
                             let c = Color32::from_white_alpha([36, 72, 150][wgt as usize]);
                             pc.line_segment(sgm, Stroke::new(if wgt == 2 { 1.4 } else { 1.0 }, c));
@@ -5134,6 +5401,27 @@ impl App {
                 if let Some(e) = cam.as_ref().and_then(|cam| cam.line_err.get(i).copied()).filter(|e| e.is_finite() && *e > 1.0) {
                     painter.text(a.lerp(b, 0.5) + vec2(0.0, -6.0), Align2::CENTER_BOTTOM, format!("{e:.1}°"), FontId::proportional(11.0), Color32::from_rgb(255, 120, 120));
                 }
+            }
+            for wl in &s.walls {
+                let sel = self.wall_sel == Some(wl.id);
+                let pts: Vec<Pos2> = wl.corners.iter().map(|p| xf.w2s(*p)).collect();
+                let col = crate::view3d::WALL_COLOR;
+                painter.add(Shape::convex_polygon(pts.clone(), col.gamma_multiply(if sel { 0.16 } else { 0.08 }), Stroke::NONE));
+                if sel {
+                    if let Some(cam) = &cam {
+                        for (a, b, wgt) in crate::persp::wall_grid(cam, wl) {
+                            if let Some((p, q)) = cam.project_segment(a, b) {
+                                pc.line_segment([xf.w2s(p), xf.w2s(q)], Stroke::new(1.0, col.gamma_multiply([0.2, 0.35, 0.7][wgt as usize])));
+                            }
+                        }
+                    }
+                }
+                painter.add(Shape::closed_line(pts.clone(), Stroke::new(if sel { 1.8 } else { 1.2 }, col)));
+                for p in &pts {
+                    painter.circle_filled(*p, 4.5, col);
+                    painter.circle_stroke(*p, 4.5, Stroke::new(1.0, Color32::WHITE));
+                }
+                painter.text(pts[0] + vec2(6.0, -6.0), Align2::LEFT_BOTTOM, &wl.name, FontId::proportional(11.0), col);
             }
             for p in rect_handles(s.frame) {
                 handle_box(painter, xf.w2s(p), INK);
@@ -5703,8 +5991,10 @@ fn snap_angle(a: f32, start: f32, mods: Modifiers) -> f32 {
 }
 
 /// Folder row of a 3D space in the layer list.
-fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width: f32, active: bool) -> egui::Response {
+#[allow(clippy::too_many_arguments)]
+fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width: f32, active: bool, indent: f32, wall: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+    let r = Rect::from_min_max(r.min + vec2(indent, 0.0), r.max);
     let p = ui.painter();
     if active {
         p.rect_filled(r, 8.0, FILL_1);
@@ -5712,11 +6002,17 @@ fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width
         p.rect_filled(r, 8.0, FILL_1.gamma_multiply(0.6));
     }
     let cy = r.center().y;
-    theme::tool_icon(p, Tool::Space, Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(18.0, 18.0)), INK_2);
+    let ir = Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(18.0, 18.0));
+    if wall {
+        let q = [pos2(ir.left() + 2.0, ir.top() + 3.0), pos2(ir.right() - 2.0, ir.top() + 6.0), pos2(ir.right() - 2.0, ir.bottom() - 6.0), pos2(ir.left() + 2.0, ir.bottom() - 3.0)];
+        p.add(Shape::closed_line(q.to_vec(), Stroke::new(1.4, crate::view3d::WALL_COLOR)));
+    } else {
+        theme::tool_icon(p, Tool::Space, ir, INK_2);
+    }
     p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_BODY), INK_2);
     let info = if solved { format!("{count}") } else { "선 부족".to_string() };
     p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, info, FontId::proportional(theme::TEXT_SMALL), INK_3);
-    resp.on_hover_text("공간 폴더 · 레이어를 끌어다 놓으면 이 공간에 들어가")
+    resp.on_hover_text(if wall { "벽 폴더 · 레이어를 끌어다 놓으면 이 벽에 붙어" } else { "공간 폴더 · 레이어를 끌어다 놓으면 이 공간에 들어가" })
 }
 
 /// Distance from `p` to the segment `a`-`b`.
@@ -5871,6 +6167,7 @@ impl eframe::App for App {
         }
 
         self.handle_shortcuts(&ctx);
+        crate::persp::sync_walls(&mut self.doc);
 
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         if !self.ui_hidden {

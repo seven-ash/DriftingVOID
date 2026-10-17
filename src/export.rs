@@ -54,7 +54,12 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
                 Rect::from_min_max(((m.min - region.min) * scale).to_pos2(), ((m.max - region.min) * scale).to_pos2())
             });
             if let Some((src, rect, res)) = flatten_layer(layer, res) {
-                warp_onto(&mut out, &src, rect, res, &h, layer.opacity, clip);
+                let to_out = |w: crate::persp::V3| cam.project(w).map(|p| ((p - region.min) * scale).to_pos2());
+                for (off, cap) in pl.slices(to_out, |w| cam.to_cam(w)[2]) {
+                    let hs = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
+                    let shade = if cap { 1.0 } else { crate::canvas::SIDE_SHADE };
+                    warp_onto(&mut out, &src, rect, res, &hs, layer.opacity, clip, shade);
+                }
             }
             continue;
         }
@@ -255,7 +260,8 @@ pub fn flatten_layer(layer: &Layer, res: f32) -> Option<(Pixmap, Rect, f32)> {
 
 /// Draws a flattened layer through `h` (content -> `dst` pixels), sampling the source
 /// bilinearly at each destination pixel (exact perspective, no mesh).
-pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate::persp::M3, opacity: f32, clip: Option<Rect>) {
+#[allow(clippy::too_many_arguments)]
+pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate::persp::M3, opacity: f32, clip: Option<Rect>, shade: f32) {
     use crate::persp::{apply_h, invert};
     let Some(hi) = invert(h) else { return };
     let Some(q) = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()]
@@ -310,6 +316,9 @@ pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate
                 let top = a[k] + (b[k] - a[k]) * tx;
                 let bot = c[k] + (d[k] - c[k]) * tx;
                 s[k] = (top + (bot - top) * ty) * opacity;
+            }
+            for v in &mut s[..3] {
+                *v *= shade;
             }
             if s[3] <= 0.0 {
                 continue;
