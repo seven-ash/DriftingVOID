@@ -7118,6 +7118,8 @@ impl App {
         }
         // while editing, the renderer still draws the text (so blend modes, fonts and the
         // background box look final); only rotated text is hidden for the upright editor
+        // constraints again after this frame's input, so a following camera never trails
+        crate::anim::apply_constraints(&mut self.doc);
         canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None);
 
         // in-progress vector stroke

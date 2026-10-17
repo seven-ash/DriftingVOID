@@ -477,4 +477,56 @@ mod tests {
         let px = f.get_pixel(32, 16);
         assert!(px[0] > 200 && px[1] < 60 && px[3] == 255, "{px:?}");
     }
+
+    /// A camera following a keyed square (position and rotation): in every exported
+    /// frame the square sits dead centre, upright, with clean edges, so there is no
+    /// lag, trail or smear.
+    #[test]
+    fn follow_camera_tracks_exactly() {
+        let mut doc = Document::default();
+        let id = doc.insert(
+            "s".into(),
+            LayerKind::Shape(ShapeLayer { kind: ShapeKind::Rect, a: pos2(0.0, 0.0), b: pos2(40.0, 40.0), color: Color32::RED, width: 0.0, fill: Some(Color32::RED), rotation: 0.0 }),
+            None,
+        );
+        let l = doc.get_mut(id).unwrap();
+        let k0 = crate::anim::key_of(l, 0.0);
+        let mut k1 = k0;
+        k1.t = 1.0;
+        k1.center = [437.3, -211.9];
+        k1.rot = 1.1;
+        k1.ease = crate::anim::Ease::Linear;
+        let mut k0 = k0;
+        k0.ease = crate::anim::Ease::Linear;
+        l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], ..Default::default() });
+        doc.cameras.push(crate::anim::CanvasCam {
+            id: 7,
+            name: "c".into(),
+            rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(100.0, 100.0)),
+            anim: Default::default(),
+            rot: 0.0,
+            follow: Some(crate::anim::Follow { layer: id, pos: true, rot: true, offset: [0.0, 0.0], rot_offset: 0.0 }),
+        });
+        let dir = std::env::temp_dir().join("dv_follow");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let job = Job { doc, region: Region::Camera(7), size: (100, 100), fps: 10.0, t0: 0.0, t1: 1.0, codec: Codec::Png, quality: 0, mbps: None, gpu: false, bg: Some(Color32::WHITE), audio: Vec::new(), out: dir.join("f.png") };
+        let p = start(job);
+        while p.result.lock().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(p.result.lock().unwrap().take().unwrap().is_ok());
+        for i in 1..=10 {
+            let img = image::open(dir.join(format!("f_{i:05}.png"))).unwrap().to_rgba8();
+            // red square 40×40 centred: inside red, a few px outside white, on all sides
+            for (x, y) in [(50, 50), (33, 33), (66, 66), (33, 66), (66, 33)] {
+                let px = img.get_pixel(x, y);
+                assert!(px[0] > 230 && px[1] < 40, "frame {i} inside ({x},{y}) {px:?}");
+            }
+            for (x, y) in [(25, 50), (75, 50), (50, 25), (50, 75)] {
+                let px = img.get_pixel(x, y);
+                assert!(px[1] > 230, "frame {i} outside ({x},{y}) {px:?}");
+            }
+        }
+    }
 }
