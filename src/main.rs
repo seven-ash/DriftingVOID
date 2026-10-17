@@ -20,6 +20,7 @@ mod selftest;
 mod text;
 mod vector;
 mod video;
+mod vexport;
 mod view3d;
 
 fn main() -> eframe::Result {

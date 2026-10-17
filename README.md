@@ -56,6 +56,8 @@ Alt+A plays, `,`/`.` step frames, I keys the selection (Alt+I removes), drag key
 ends in the panel, right-click a track to set where a layer starts or ends. Canvas
 cameras live in the region tool (F) and can be keyed too. Sound files (mp3, wav, …) go
 on the timeline as clips you can move and trim; video soundtracks play along.
+Ctrl+Shift+E exports a video (camera, export frame, content or view; H.264/H.265/AV1,
+ProRes, VP9, GIF or PNG frames; size by width or height).
 
 ## G/R/S and Space
 
@@ -92,6 +94,7 @@ right-click cancels. Alt+G/R/S clears the value.
   two text layers into it, and `DV_SPACE_EXPORT=out.png` exports the result.
   `DV_SPACE_MASK="x0,y0,x1,y1"` sets a mask, `DV_LOUPE=1` holds a line end mid-drag (magnifier),
   `DV_WALL="x,y;x,y;x,y;x,y"` adds a wall with the second text on it, `DV_THICK=30` gives both texts thickness.
+- `DV_SHOW_VEXPORT=1` opens the video export window at start.
 - `DV_IMPORT="a.mp4;b.png"` imports files at start; `DV_PLAY=1` also plays the video.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
@@ -111,6 +114,7 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
 | `src/anim.rs` | Timeline, keyframes, easing, canvas cameras |
+| `src/vexport.rs` | Video export: frame rendering into ffmpeg, formats, sound mix |
 | `src/audio.rs` | Sound: ffmpeg decode, mixer on the output device |
 | `src/video.rs` | ffmpeg/ffprobe: probe, frame decode, streaming playback |
 | `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |

@@ -680,6 +680,29 @@ struct ExportDlg {
     jpeg_quality: u8,
 }
 
+/// Video export settings (one window for every region source, like image export).
+#[derive(Clone)]
+struct VideoExportDlg {
+    region: ExportRegion,
+    padding: f32,
+    /// Size given by the width (else the height).
+    by_width: bool,
+    n: u32,
+    fps: f64,
+    /// Whole timeline, or [t0, t1).
+    all: bool,
+    t0: f64,
+    t1: f64,
+    codec: crate::vexport::Codec,
+    quality: u8,
+    use_mbps: bool,
+    mbps: f64,
+    gpu: bool,
+    bg: ExportBg,
+    bg_color: Color32,
+    audio: bool,
+}
+
 pub struct App {
     doc: Document,
     undo: Vec<Document>,
@@ -707,6 +730,9 @@ pub struct App {
 
     tex: TexCache,
     export: Option<ExportDlg>,
+    vexport: Option<VideoExportDlg>,
+    vexport_last: Option<VideoExportDlg>,
+    vjob: Option<Arc<crate::vexport::Progress>>,
     pending: Option<Pending>,
     status: String,
     recent: Vec<Color32>,
@@ -821,6 +847,9 @@ impl App {
             edit_focus: false,
             tex: TexCache::default(),
             export: None,
+            vexport: None,
+            vexport_last: None,
+            vjob: None,
             pending: None,
             status: String::new(),
             recent: Vec::new(),
@@ -1070,6 +1099,9 @@ impl App {
         }
         if std::env::var_os("DV_SHOW_EXPORT").is_some() {
             app.open_export();
+        }
+        if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
+            app.open_video_export();
         }
         if let Ok(v) = std::env::var("DV_SHOW_PALETTE") {
             if let Ok(n) = u32::from_str_radix(v.trim_start_matches('#'), 16) {
@@ -1842,6 +1874,10 @@ impl App {
             if ui.button("키 지우기").on_hover_text("Alt+I").clicked() {
                 self.delete_keys_here();
             }
+            ui.separator();
+            if ui.button("영상 내보내기").on_hover_text("Ctrl+Shift+E").clicked() {
+                self.open_video_export();
+            }
         });
         // selected key: easing
         if let Some((row, kt)) = self.tl_key {
@@ -2259,6 +2295,283 @@ impl App {
             }
         }
         out
+    }
+
+
+    // ------------------------------------------------------------ video export
+
+    fn open_video_export(&mut self) {
+        self.finish_text_edit();
+        if self.vexport.is_some() {
+            return;
+        }
+        let tl = &self.doc.timeline;
+        let mut d = self.vexport_last.clone().unwrap_or(VideoExportDlg {
+            region: ExportRegion::Content,
+            padding: 20.0,
+            by_width: true,
+            n: 1920,
+            fps: tl.fps,
+            all: true,
+            t0: 0.0,
+            t1: tl.duration,
+            codec: crate::vexport::Codec::H264,
+            quality: 20,
+            use_mbps: false,
+            mbps: 12.0,
+            gpu: false,
+            bg: ExportBg::White,
+            bg_color: Color32::BLACK,
+            audio: true,
+        });
+        // a camera if there is one, else the export frame
+        let region_ok = match d.region {
+            ExportRegion::Camera(id) => self.doc.cameras.iter().any(|c| c.id == id),
+            ExportRegion::Frame => self.doc.export_frame.is_some(),
+            _ => true,
+        };
+        if !region_ok || self.vexport_last.is_none() {
+            d.region = match (self.doc.cameras.first(), self.doc.export_frame) {
+                (Some(c), _) => ExportRegion::Camera(c.id),
+                (None, Some(_)) => ExportRegion::Frame,
+                _ => ExportRegion::Content,
+            };
+        }
+        if self.vexport_last.is_none() {
+            d.fps = tl.fps;
+            d.t1 = tl.duration;
+        }
+        self.vexport = Some(d);
+    }
+
+    /// The region a video export films, and its rect now (for the aspect ratio).
+    fn video_region(&self, d: &VideoExportDlg) -> Option<(crate::vexport::Region, Rect)> {
+        use crate::vexport::Region;
+        match d.region {
+            ExportRegion::Camera(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| (Region::Camera(id), c.rect)),
+            ExportRegion::Frame => self.doc.export_frame.map(|r| (Region::Fixed(r), r)),
+            ExportRegion::Content => self.doc.content_bounds().map(|b| {
+                let r = b.expand(d.padding);
+                (Region::Fixed(r), r)
+            }),
+            ExportRegion::View => {
+                let xf = self.xf();
+                let r = Rect::from_min_max(xf.s2w(self.canvas_rect.min), xf.s2w(self.canvas_rect.max));
+                Some((Region::Fixed(r), r))
+            }
+        }
+    }
+
+    fn video_export_ui(&mut self, ctx: &egui::Context) {
+        // a running export: progress and cancel
+        if let Some(p) = self.vjob.clone() {
+            if let Some(res) = p.result.lock().ok().and_then(|mut g| g.take()) {
+                self.status = match res {
+                    Ok(m) => m,
+                    Err(e) => format!("영상 내보내기: {e}"),
+                };
+                self.vjob = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+        let Some(mut d) = self.vexport.take() else { return };
+        use crate::vexport::Codec;
+        let mut open = true;
+        let mut go = false;
+        let running = self.vjob.clone();
+        let region = self.video_region(&d);
+        let voices = self.timeline_voices().len();
+        egui::Window::new("영상 내보내기")
+            .title_bar(false)
+            .frame(egui::Frame::NONE)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("영상 내보내기").font(FontId::new(15.0, theme::ui_bold())).color(INK));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("닫기").clicked() {
+                                open = false;
+                            }
+                        });
+                    });
+                    if let Some(p) = &running {
+                        let done = p.done.load(std::sync::atomic::Ordering::Relaxed);
+                        let total = p.total.load(std::sync::atomic::Ordering::Relaxed).max(1);
+                        ui.add_space(SPACE_SM);
+                        ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!("{done} / {total} 프레임")));
+                        if ui.button("취소").clicked() {
+                            p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return;
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.label("영역");
+                    ui.horizontal_wrapped(|ui| {
+                        for c in &self.doc.cameras {
+                            ui.radio_value(&mut d.region, ExportRegion::Camera(c.id), egui::RichText::new(&c.name).color(CAM_COLOR));
+                        }
+                        ui.add_enabled_ui(self.doc.export_frame.is_some(), |ui| {
+                            ui.radio_value(&mut d.region, ExportRegion::Frame, "내보낼 영역");
+                        });
+                        ui.radio_value(&mut d.region, ExportRegion::Content, "내용 전체");
+                        ui.radio_value(&mut d.region, ExportRegion::View, "지금 화면");
+                    });
+                    if d.region == ExportRegion::Content {
+                        ui.add(crate::dial::Dial::new(&mut d.padding, 0.0..=400.0).text("여백").suffix(" px").default(20.0));
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.horizontal(|ui| {
+                        ui.label("크기");
+                        ui.selectable_value(&mut d.by_width, true, "가로 기준");
+                        ui.selectable_value(&mut d.by_width, false, "세로 기준");
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        let presets: &[(u32, &str)] = if d.by_width {
+                            &[(3840, "3840"), (2560, "2560"), (1920, "1920"), (1280, "1280"), (1080, "1080"), (854, "854")]
+                        } else {
+                            &[(2160, "2160"), (1440, "1440"), (1080, "1080"), (720, "720"), (480, "480")]
+                        };
+                        for (v, l) in presets {
+                            if ui.selectable_label(d.n == *v, *l).clicked() {
+                                d.n = *v;
+                            }
+                        }
+                        ui.add(egui::DragValue::new(&mut d.n).range(16..=8192).suffix(" px"));
+                    });
+                    let (w, h) = match &region {
+                        Some((_, r)) => crate::vexport::size_for(r.width() / r.height().max(1.0), d.by_width, d.n, d.codec.even()),
+                        None => (0, 0),
+                    };
+                    ui.label(egui::RichText::new(if w > 0 { format!("→ {w} × {h} px (영역 비율)") } else { "영역이 없어".into() }).color(INK_2));
+                    ui.horizontal(|ui| {
+                        ui.label("fps");
+                        ui.add(egui::DragValue::new(&mut d.fps).range(1.0..=240.0).speed(0.1).max_decimals(3));
+                        ui.checkbox(&mut d.all, "타임라인 전체");
+                    });
+                    if !d.all {
+                        ui.horizontal(|ui| {
+                            ui.label("구간");
+                            ui.add(egui::DragValue::new(&mut d.t0).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
+                            ui.label("~");
+                            ui.add(egui::DragValue::new(&mut d.t1).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
+                        });
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.horizontal(|ui| {
+                        ui.label("형식");
+                        egui::ComboBox::from_id_salt("vcodec")
+                            .selected_text(d.codec.label())
+                            .width(200.0)
+                            .popup_style(theme::glass_popup_style(false))
+                            .show_ui(ui, |ui| {
+                                theme::glass_popup(ui, |ui| {
+                                    for c in Codec::ALL {
+                                        ui.selectable_value(&mut d.codec, c, c.label());
+                                    }
+                                })
+                            });
+                    });
+                    if d.codec.has_quality() {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut d.use_mbps, false, "품질");
+                            ui.selectable_value(&mut d.use_mbps, true, "비트레이트");
+                            if d.use_mbps {
+                                ui.add(egui::DragValue::new(&mut d.mbps).range(0.2..=400.0).speed(0.1).suffix(" Mbps").max_decimals(1));
+                            } else {
+                                ui.add(egui::Slider::new(&mut d.quality, 0..=51).text("낮을수록 고화질"));
+                            }
+                        });
+                    }
+                    if d.codec.has_gpu() {
+                        ui.checkbox(&mut d.gpu, "GPU 인코딩 (NVIDIA NVENC)").on_hover_text("빠르지만 NVIDIA 그래픽카드가 있어야 해. 안 되면 끄고 다시");
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("배경");
+                        if d.codec.alpha() {
+                            ui.radio_value(&mut d.bg, ExportBg::Transparent, "투명");
+                        } else if d.bg == ExportBg::Transparent {
+                            d.bg = ExportBg::White;
+                        }
+                        ui.radio_value(&mut d.bg, ExportBg::White, "흰색");
+                        ui.radio_value(&mut d.bg, ExportBg::Custom, "색");
+                        if d.bg == ExportBg::Custom {
+                            let mut c = d.bg_color;
+                            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                                d.bg_color = c;
+                            }
+                        }
+                    });
+                    if d.codec.audio() {
+                        ui.add_enabled(voices > 0, egui::Checkbox::new(&mut d.audio, format!("소리 포함 ({voices}개)")));
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(w > 0, egui::Button::new(egui::RichText::new("내보내기…").strong())).clicked() {
+                            go = true;
+                        }
+                        ui.small(format!("{:.2} s · {} 프레임", (if d.all { self.doc.timeline.duration } else { d.t1 - d.t0 }).max(0.0), ((if d.all { self.doc.timeline.duration } else { d.t1 - d.t0 }).max(0.0) * d.fps).ceil()));
+                    });
+                });
+            });
+        if go {
+            self.start_video_export(&d);
+        }
+        if open {
+            self.vexport = Some(d);
+        } else {
+            self.vexport_last = Some(d);
+        }
+    }
+
+    fn start_video_export(&mut self, d: &VideoExportDlg) {
+        let Some((region, rect)) = self.video_region(d) else { return };
+        let (w, h) = crate::vexport::size_for(rect.width() / rect.height().max(1.0), d.by_width, d.n, d.codec.even());
+        let (t0, t1) = if d.all { (0.0, self.doc.timeline.duration) } else { (d.t0.min(d.t1), d.t0.max(d.t1)) };
+        if t1 - t0 <= 0.0 {
+            self.status = "구간이 비어 있어".into();
+            return;
+        }
+        let base = self.path.as_ref().and_then(|p| p.file_stem()).and_then(|s| s.to_str()).unwrap_or("video").to_string();
+        let Some(mut out) = rfd::FileDialog::new()
+            .add_filter(d.codec.label(), &[d.codec.ext()])
+            .set_file_name(format!("{base}.{}", d.codec.ext()))
+            .save_file()
+        else {
+            return;
+        };
+        if out.extension().is_none() {
+            out.set_extension(d.codec.ext());
+        }
+        let bg = match d.bg {
+            ExportBg::Transparent => None,
+            ExportBg::White => Some(Color32::WHITE),
+            ExportBg::Custom => Some(d.bg_color),
+        };
+        let audio = if d.audio && d.codec.audio() { self.timeline_voices() } else { Vec::new() };
+        let job = crate::vexport::Job {
+            doc: self.doc.clone(),
+            region,
+            size: (w, h),
+            fps: d.fps,
+            t0,
+            t1,
+            codec: d.codec,
+            quality: d.quality,
+            mbps: d.use_mbps.then_some(d.mbps),
+            gpu: d.gpu && d.codec.has_gpu(),
+            bg,
+            audio,
+            out,
+        };
+        self.vjob = Some(crate::vexport::start(job));
+        self.status = "영상 내보내는 중…".into();
     }
 
 
@@ -4683,6 +4996,9 @@ impl App {
         if k(cmd, Key::I) {
             self.import_dialog();
         }
+        if k(cs, Key::E) {
+            self.open_video_export();
+        }
         if k(cmd, Key::E) {
             self.open_export();
         }
@@ -6072,6 +6388,9 @@ impl App {
             }
             if ui.button("내보내기…  Ctrl+E").clicked() {
                 self.open_export();
+            }
+            if ui.button("영상 내보내기…  Ctrl+Shift+E").clicked() {
+                self.open_video_export();
             }
             if ui.button("영역을 클립보드로 복사  Ctrl+Shift+C").clicked() {
                 self.quick_copy();
@@ -7768,6 +8087,7 @@ impl eframe::App for App {
             self.timeline_ui(&ctx);
         }
         self.export_ui(&ctx);
+        self.video_export_ui(&ctx);
         self.unsaved_modal(&ctx);
         self.peek_ui(&ctx);
 
