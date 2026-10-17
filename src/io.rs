@@ -57,6 +57,8 @@ struct FileDoc {
     timeline: crate::anim::Timeline,
     #[serde(default)]
     cameras: Vec<crate::anim::CanvasCam>,
+    #[serde(default)]
+    audio: Vec<crate::anim::AudioClip>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -217,7 +219,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone() });
         }
-        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone() };
+        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: doc.audio.clone() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         zip.finish().map_err(|e| e.to_string())?;
@@ -236,7 +238,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     };
     let fd: FileDoc = serde_json::from_slice(&read("doc.json")?).map_err(|e| e.to_string())?;
     let mut images: HashMap<String, ImageSource> = HashMap::new();
-    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras };
+    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras, audio: fd.audio };
     for fl in fd.layers {
         let kind = match fl.kind {
             FileKind::Image { file, center, scale, rotation, crop, adjust, video } => {
@@ -306,7 +308,7 @@ mod video_tests {
         // a preview-sized frame without file bytes, as video frames are
         let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]) };
         let mut im = ImageLayer::new(src, pos2(10.0, 20.0));
-        im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, slot: 1 });
+        im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, mute: false, slot: 1 });
         assert_eq!(im.crop.size(), vec2(1920.0, 1080.0));
         let mut doc = Document::default();
         doc.insert("v".into(), LayerKind::Image(im), None);

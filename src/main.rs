@@ -2,6 +2,7 @@
 
 mod anim;
 mod app;
+mod audio;
 mod calc;
 mod dial;
 mod canvas;

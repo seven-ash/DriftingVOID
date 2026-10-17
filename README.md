@@ -54,7 +54,8 @@ properties panel. Needs ffmpeg (`winget install Gyan.FFmpeg`, or put it in
 
 Alt+A plays, `,`/`.` step frames, I keys the selection (Alt+I removes), drag keys and span
 ends in the panel, right-click a track to set where a layer starts or ends. Canvas
-cameras live in the region tool (F) and can be keyed too.
+cameras live in the region tool (F) and can be keyed too. Sound files (mp3, wav, …) go
+on the timeline as clips you can move and trim; video soundtracks play along.
 
 ## G/R/S and Space
 
@@ -110,6 +111,7 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
 | `src/anim.rs` | Timeline, keyframes, easing, canvas cameras |
+| `src/audio.rs` | Sound: ffmpeg decode, mixer on the output device |
 | `src/video.rs` | ffmpeg/ffprobe: probe, frame decode, streaming playback |
 | `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |
 | `src/dial.rs` | Focus-ring dial control with reset pin |

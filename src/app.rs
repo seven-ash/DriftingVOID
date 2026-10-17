@@ -219,6 +219,7 @@ struct Playback {
 enum TlRow {
     Layer(LayerId),
     Cam(u64),
+    Audio(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -227,7 +228,14 @@ enum TlDrag {
     Key { row: TlRow, from: f64 },
     SpanIn(TlRow),
     SpanOut(TlRow),
+    /// Audio clip: move (grabbed at `grab` seconds into it) or trim either end.
+    AudioMove { id: u64, grab: f64 },
+    AudioIn(u64),
+    AudioOut(u64),
 }
+
+/// Audio clip colour on the timeline.
+const AUDIO_COLOR: Color32 = Color32::from_rgb(90, 200, 170);
 
 /// Canvas camera colour.
 const CAM_COLOR: Color32 = Color32::from_rgb(176, 140, 255);
@@ -764,6 +772,14 @@ pub struct App {
     tl_key: Option<(TlRow, f64)>,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
+    /// Sound output (opened on first use), decoded audio by file path (None while
+    /// decoding), and the selected audio clip.
+    audio_out: Option<crate::audio::Output>,
+    audio_failed: bool,
+    audio_cache: std::collections::HashMap<String, Option<Arc<crate::audio::AudioData>>>,
+    audio_tx: std::sync::mpsc::Sender<(String, Result<crate::audio::AudioData, String>)>,
+    audio_rx: std::sync::mpsc::Receiver<(String, Result<crate::audio::AudioData, String>)>,
+    aud_sel: Option<u64>,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -781,6 +797,7 @@ impl App {
         cc.egui_ctx.set_fonts(theme::font_defs());
         theme::apply_visuals(&cc.egui_ctx);
         let scrub_ch = std::sync::mpsc::channel();
+        let audio_ch = std::sync::mpsc::channel();
         let mut app = Self {
             doc: Document::default(),
             undo: Vec::new(),
@@ -856,6 +873,12 @@ impl App {
             tl_key: None,
             tl_drag: None,
             cam_sel: None,
+            audio_out: None,
+            audio_failed: false,
+            audio_cache: Default::default(),
+            audio_tx: audio_ch.0,
+            audio_rx: audio_ch.1,
+            aud_sel: None,
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -1308,6 +1331,11 @@ impl App {
                 self.request(Pending::Open(Some(p)));
                 return;
             }
+            if crate::audio::AUDIO_EXTS.contains(&ext.as_str()) {
+                self.add_audio(&p);
+                n += 1;
+                continue;
+            }
             if crate::video::VIDEO_EXTS.contains(&ext.as_str()) {
                 match self.add_video(&p, pos) {
                     Ok(w) => {
@@ -1345,7 +1373,7 @@ impl App {
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("영상").to_string();
         let id = self.add_image(src, name, at);
         if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, slot: next_rev() });
+            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, mute: false, slot: next_rev() });
         }
         Ok(info.width as f32)
     }
@@ -1399,11 +1427,25 @@ impl App {
 
     fn video_play(&mut self, id: LayerId, on: bool) {
         self.playing.remove(&id);
+        let solo = self.tl_play.is_none();
         if !on {
+            if solo && self.playing.is_empty() {
+                if let Some(o) = &self.audio_out {
+                    o.stop();
+                }
+            }
             return;
         }
         let Some(v) = self.video_of(id) else { return };
         let t = if v.time >= v.info.duration - v.info.frame_len() * 1.5 { 0.0 } else { v.time };
+        if solo && v.info.audio && !v.mute {
+            if let Some(Some(data)) = self.audio_cache.get(&v.path).cloned() {
+                let voice = crate::audio::Voice { data, t0: 0.0, src0: t, speed: v.speed, span: (0.0, f64::MAX), gain: 1.0 };
+                if let Some(o) = self.audio_output() {
+                    o.play(vec![voice], 0.0);
+                }
+            }
+        }
         let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
         match crate::video::Player::start(std::path::Path::new(&v.path), t, v.info.fps, size) {
             Ok(player) => {
@@ -1490,6 +1532,11 @@ impl App {
             }
             if done || clock > v.info.duration + 1.0 {
                 self.playing.remove(&id);
+                if self.tl_play.is_none() && self.playing.is_empty() {
+                    if let Some(o) = &self.audio_out {
+                        o.stop();
+                    }
+                }
                 if v.looping {
                     if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                         if let Some(vv) = im.video.as_mut() {
@@ -1558,6 +1605,9 @@ impl App {
 
     fn tl_toggle_play(&mut self) {
         if self.tl_play.take().is_some() {
+            if let Some(o) = &self.audio_out {
+                o.stop();
+            }
             self.playing.clear();
             let t = self.doc.timeline.snap(self.doc.timeline.time);
             self.set_time(t);
@@ -1567,6 +1617,13 @@ impl App {
             self.set_time(0.0);
         }
         self.tl_play = Some((self.doc.timeline.time, self.now));
+        let voices = self.timeline_voices();
+        if !voices.is_empty() {
+            let t = self.doc.timeline.time;
+            if let Some(o) = self.audio_output() {
+                o.play(voices, t);
+            }
+        }
         for (id, vt) in self.timeline_videos() {
             if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                 if let Some(v) = im.video.as_mut() {
@@ -1579,7 +1636,8 @@ impl App {
 
     fn tick_timeline(&mut self, ctx: &egui::Context) {
         let Some((t0, w0)) = self.tl_play else { return };
-        let t = t0 + (self.now - w0);
+        // the sound card is the clock while sound plays
+        let t = self.audio_out.as_ref().and_then(|o| o.pos()).unwrap_or(t0 + (self.now - w0));
         if t >= self.doc.timeline.duration {
             // loop
             self.tl_play = None;
@@ -1660,6 +1718,7 @@ impl App {
 
     fn row_anim(&self, row: TlRow) -> Option<&crate::anim::Anim> {
         match row {
+            TlRow::Audio(_) => None,
             TlRow::Layer(id) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
             TlRow::Cam(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
         }
@@ -1667,6 +1726,7 @@ impl App {
 
     fn row_anim_mut(&mut self, row: TlRow) -> Option<&mut crate::anim::Anim> {
         match row {
+            TlRow::Audio(_) => None,
             TlRow::Layer(id) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
             TlRow::Cam(id) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
         }
@@ -1808,9 +1868,27 @@ impl App {
                 None => self.tl_key = None,
             }
         }
+        if let Some(i) = self.aud_sel.and_then(|id| self.doc.audio.iter().position(|a| a.id == id)) {
+            let mut del = false;
+            ui.horizontal(|ui| {
+                let a = &mut self.doc.audio[i];
+                ui.label(egui::RichText::new(format!("소리 · {}", a.name)).color(AUDIO_COLOR));
+                ui.label("볼륨");
+                changed |= ui.add(egui::DragValue::new(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2)).changed();
+                changed |= ui.checkbox(&mut a.mute, "음소거").changed();
+                ui.label(egui::RichText::new(format!("{} ~ {}", crate::video::timecode(a.start), crate::video::timecode(a.end()))).monospace().color(INK_3));
+                del = ui.button("삭제").clicked();
+            });
+            if del {
+                self.doc.audio.remove(i);
+                self.aud_sel = None;
+                changed = true;
+            }
+        }
         // rows: cameras, then layers with keys or a span, then the selection
         let sel = self.selected_ids();
         let mut rows: Vec<(TlRow, String, bool)> = self.doc.cameras.iter().map(|c| (TlRow::Cam(c.id), c.name.clone(), true)).collect();
+        rows.extend(self.doc.audio.iter().map(|a| (TlRow::Audio(a.id), a.name.clone(), false)));
         for l in self.doc.layers.iter().rev() {
             if l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
                 rows.push((TlRow::Layer(l.id), l.display_name(), false));
@@ -1848,14 +1926,47 @@ impl App {
             let selected = match row {
                 TlRow::Layer(id) => sel.contains(id),
                 TlRow::Cam(id) => self.cam_sel == Some(*id),
+                TlRow::Audio(id) => self.aud_sel == Some(*id),
             };
             if selected {
                 p.rect_filled(rr, 6.0, FILL_1);
             }
-            let col = if *cam { CAM_COLOR } else { INK_2 };
+            let col = if *cam {
+                CAM_COLOR
+            } else if matches!(row, TlRow::Audio(_)) {
+                AUDIO_COLOR
+            } else {
+                INK_2
+            };
             p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.left() + label_w - 8.0, rr.bottom())))
                 .text(pos2(rr.left() + 6.0, rr.center().y), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_SMALL + 0.5), col);
             let cy = rr.center().y;
+            if let TlRow::Audio(aid) = row {
+                if let Some(a) = self.doc.audio.iter().find(|a| a.id == *aid) {
+                    let bar = Rect::from_min_max(pos2(x_of(a.start), rr.top() + 3.0), pos2(x_of(a.end()).max(x_of(a.start) + 2.0), rr.bottom() - 3.0));
+                    p.rect_filled(bar, 3.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.08 } else { 0.22 }));
+                    // waveform
+                    if let Some(Some(d)) = self.audio_cache.get(&a.path) {
+                        let x0 = bar.left().max(tr.left());
+                        let x1 = bar.right().min(tr.right());
+                        let mut x = x0;
+                        while x < x1 {
+                            let src = a.offset + t_of(x) - a.start;
+                            let i = (src / crate::audio::PEAK_SEC) as usize;
+                            let pk = d.peaks.get(i).copied().unwrap_or(0.0) * a.gain.min(1.5);
+                            let hh = (bar.height() * 0.5 - 1.0) * pk.min(1.0);
+                            p.line_segment([pos2(x, cy - hh), pos2(x, cy + hh)], Stroke::new(1.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.3 } else { 0.9 })));
+                            x += 2.0;
+                        }
+                    } else if !a.path.is_empty() {
+                        p.text(bar.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "불러오는 중…", FontId::proportional(10.0), INK_3);
+                    }
+                    if self.aud_sel == Some(*aid) {
+                        p.rect_stroke(bar, 3.0, Stroke::new(1.2, AUDIO_COLOR), StrokeKind::Inside);
+                    }
+                }
+                continue;
+            }
             let anim = self.row_anim(*row);
             match anim.and_then(|a| a.span) {
                 Some([a, b]) => {
@@ -1893,7 +2004,19 @@ impl App {
             if let Some(pp) = pointer {
                 let mut drag = TlDrag::Scrub;
                 if pp.y > rect.top() + ruler_h {
-                    if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
+                    if let Some((TlRow::Audio(aid), _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
+                        self.aud_sel = Some(aid);
+                        if let Some(a) = self.doc.audio.iter().find(|a| a.id == aid) {
+                            let t = t_of(pp.x);
+                            if (x_of(a.start) - pp.x).abs() <= 5.0 {
+                                drag = TlDrag::AudioIn(aid);
+                            } else if (x_of(a.end()) - pp.x).abs() <= 5.0 {
+                                drag = TlDrag::AudioOut(aid);
+                            } else if t >= a.start && t <= a.end() {
+                                drag = TlDrag::AudioMove { id: aid, grab: t - a.start };
+                            }
+                        }
+                    } else if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
                         let anim = self.row_anim(row);
                         let key = anim.and_then(|a| a.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
                         let span = anim.and_then(|a| a.span);
@@ -1912,6 +2035,7 @@ impl App {
                                     self.cam_sel = Some(id);
                                     self.tool = Tool::Frame;
                                 }
+                                TlRow::Audio(id) => self.aud_sel = Some(id),
                             }
                             self.tl_drag = None;
                             return;
@@ -1944,6 +2068,34 @@ impl App {
                         }
                     }
                 }
+                TlDrag::AudioMove { id, grab } => {
+                    let fl = tl.frame_len();
+                    if let Some(a) = self.doc.audio.iter_mut().find(|a| a.id == id) {
+                        let ns = tl.snap(t_of(pp.x) - grab).max(0.0);
+                        if (ns - a.start).abs() > fl * 0.5 {
+                            a.start = ns;
+                            changed = true;
+                        }
+                    }
+                }
+                TlDrag::AudioIn(id) | TlDrag::AudioOut(id) => {
+                    let fl = tl.frame_len();
+                    let src_len = self.doc.audio.iter().find(|a| a.id == id).and_then(|a| self.audio_cache.get(&a.path)).and_then(|d| d.as_ref()).map(|d| d.duration());
+                    if let Some(a) = self.doc.audio.iter_mut().find(|a| a.id == id) {
+                        if matches!(d, TlDrag::AudioIn(_)) {
+                            // trim the head: the sound stays where it is in time
+                            let ns = t.clamp(a.start - a.offset, a.end() - fl);
+                            let dlt = ns - a.start;
+                            a.start = ns;
+                            a.offset += dlt;
+                            a.len -= dlt;
+                        } else {
+                            let max_end = src_len.map_or(f64::MAX, |l| a.start + (l - a.offset));
+                            a.len = (t.min(max_end) - a.start).max(fl);
+                        }
+                        changed = true;
+                    }
+                }
                 TlDrag::SpanIn(row) | TlDrag::SpanOut(row) => {
                     let fl = tl.frame_len();
                     let is_in = matches!(d, TlDrag::SpanIn(_));
@@ -1961,7 +2113,7 @@ impl App {
             }
         }
         if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
-            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_))) {
+            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_) | TlDrag::AudioMove { .. } | TlDrag::AudioIn(_) | TlDrag::AudioOut(_))) {
                 self.mark();
                 self.set_time(self.doc.timeline.time);
             }
@@ -2001,12 +2153,122 @@ impl App {
     }
 
 
+    // ------------------------------------------------------------ audio
+
+    /// The sound card, opened on first use (a failure is reported once).
+    fn audio_output(&mut self) -> Option<&crate::audio::Output> {
+        if self.audio_out.is_none() && !self.audio_failed {
+            match crate::audio::Output::open() {
+                Ok(o) => self.audio_out = Some(o),
+                Err(e) => {
+                    self.audio_failed = true;
+                    self.status = format!("소리를 낼 수 없어: {e}");
+                }
+            }
+        }
+        self.audio_out.as_ref()
+    }
+
+    fn audio_rate(&mut self) -> u32 {
+        self.audio_output().map_or(48_000, |o| o.rate)
+    }
+
+    /// Starts decoding a file's sound if it is not cached yet.
+    fn ensure_audio(&mut self, path: &str) {
+        if path.is_empty() || self.audio_cache.contains_key(path) {
+            return;
+        }
+        self.audio_cache.insert(path.to_string(), None);
+        let rate = self.audio_rate();
+        let tx = self.audio_tx.clone();
+        let p = path.to_string();
+        std::thread::spawn(move || {
+            let r = crate::audio::decode(std::path::Path::new(&p), rate);
+            let _ = tx.send((p, r));
+        });
+    }
+
+    /// A sound file goes on the timeline at the playhead (the timeline turns on).
+    fn add_audio(&mut self, p: &std::path::Path) {
+        let id = self.doc.new_id();
+        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("소리").to_string();
+        let path = p.to_string_lossy().to_string();
+        self.doc.audio.push(crate::anim::AudioClip { id, name, path: path.clone(), start: self.doc.timeline.time, offset: 0.0, len: 0.0, gain: 1.0, mute: false });
+        self.doc.timeline.on = true;
+        self.aud_sel = Some(id);
+        self.ensure_audio(&path);
+        self.mark();
+    }
+
+    fn tick_audio(&mut self) {
+        while let Ok((path, res)) = self.audio_rx.try_recv() {
+            match res {
+                Ok(d) => {
+                    let dur = d.duration();
+                    self.audio_cache.insert(path.clone(), Some(Arc::new(d)));
+                    // first decode sets the clip length; a long clip stretches the timeline
+                    let mut grow = 0.0f64;
+                    for a in self.doc.audio.iter_mut().filter(|a| a.path == path && a.len <= 0.0) {
+                        a.len = (dur - a.offset).max(0.0);
+                        grow = grow.max(a.end());
+                    }
+                    if grow > self.doc.timeline.duration {
+                        self.doc.timeline.duration = grow.ceil();
+                    }
+                }
+                Err(e) => {
+                    self.audio_cache.remove(&path);
+                    if self.doc.audio.iter().any(|a| a.path == path) {
+                        self.status = format!("소리를 읽지 못했어: {e}");
+                    }
+                    // keep video files without sound from retrying
+                    self.audio_cache.insert(path, None);
+                }
+            }
+        }
+        // decode what the document needs (clips, videos with sound)
+        let mut need: Vec<String> = self.doc.audio.iter().map(|a| a.path.clone()).collect();
+        for l in &self.doc.layers {
+            if let LayerKind::Image(im) = &l.kind {
+                if let Some(v) = im.video.as_ref().filter(|v| v.info.audio) {
+                    need.push(v.path.clone());
+                }
+            }
+        }
+        for p in need {
+            self.ensure_audio(&p);
+        }
+    }
+
+    /// Everything that sounds on the timeline right now.
+    fn timeline_voices(&self) -> Vec<crate::audio::Voice> {
+        let mut out = Vec::new();
+        for a in self.doc.audio.iter().filter(|a| !a.mute && a.len > 0.0) {
+            if let Some(Some(d)) = self.audio_cache.get(&a.path) {
+                out.push(crate::audio::Voice { data: d.clone(), t0: a.start, src0: a.offset, speed: 1.0, span: (a.start, a.end()), gain: a.gain });
+            }
+        }
+        for l in &self.doc.layers {
+            let LayerKind::Image(im) = &l.kind else { continue };
+            let Some(v) = im.video.as_ref().filter(|v| v.info.audio && !v.mute) else { continue };
+            let Some(Some(d)) = self.audio_cache.get(&v.path) else { continue };
+            let (t0, src0) = l.anim.as_ref().map_or((0.0, 0.0), |a| (a.start(), a.video_start));
+            let span = l.anim.as_ref().and_then(|a| a.span).map_or((0.0, f64::MAX), |s| (s[0], s[1]));
+            if l.visible {
+                out.push(crate::audio::Voice { data: d.clone(), t0, src0, speed: v.speed, span, gain: 1.0 });
+            }
+        }
+        out
+    }
+
+
     fn import_dialog(&mut self) {
-        let all: Vec<&str> = crate::io::IMAGE_EXTS.iter().chain(crate::video::VIDEO_EXTS).copied().collect();
+        let all: Vec<&str> = crate::io::IMAGE_EXTS.iter().chain(crate::video::VIDEO_EXTS).chain(crate::audio::AUDIO_EXTS).copied().collect();
         if let Some(paths) = rfd::FileDialog::new()
             .add_filter("사진·영상", &all)
             .add_filter("사진", crate::io::IMAGE_EXTS)
             .add_filter("영상", crate::video::VIDEO_EXTS)
+            .add_filter("소리", crate::audio::AUDIO_EXTS)
             .pick_files()
         {
             let at = self.view_center_world();
@@ -5176,6 +5438,9 @@ impl App {
                                 }
                             }
                             changed |= ui.checkbox(&mut v.looping, "반복").changed();
+                            if v.info.audio {
+                                changed |= ui.checkbox(&mut v.mute, "소리 끔").changed();
+                            }
                         });
                         ui.small(format!(
                             "{}×{} · {:.2} fps · {}{}",
@@ -5183,7 +5448,7 @@ impl App {
                             v.info.height,
                             v.info.fps,
                             v.info.codec,
-                            if v.info.audio { " · 소리 있음 (재생은 다음 단계)" } else { "" }
+                            if v.info.audio { " · 소리 있음" } else { "" }
                         ));
                         if ui.button("이 프레임을 사진으로").on_hover_text("지금 프레임을 원본 해상도 사진 레이어로 복사").clicked() {
                             vid_act = Some(VidAct::Still);
@@ -7459,6 +7724,7 @@ impl eframe::App for App {
 
         self.handle_shortcuts(&ctx);
         crate::persp::sync_walls(&mut self.doc);
+        self.tick_audio();
         self.tick_timeline(&ctx);
         self.tick_videos(&ctx);
 

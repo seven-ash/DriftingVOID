@@ -189,6 +189,34 @@ impl Timeline {
     }
 }
 
+fn unit() -> f32 {
+    1.0
+}
+
+/// A sound file on the timeline: source from `offset` for `len` seconds, starting
+/// at timeline time `start`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct AudioClip {
+    pub id: u64,
+    pub name: String,
+    pub path: String,
+    pub start: f64,
+    #[serde(default)]
+    pub offset: f64,
+    /// 0 until the file is decoded the first time.
+    pub len: f64,
+    #[serde(default = "unit")]
+    pub gain: f32,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+impl AudioClip {
+    pub fn end(&self) -> f64 {
+        self.start + self.len
+    }
+}
+
 /// A camera on the canvas: a region that can move over time and is shown in its
 /// span; image and video export can use it as their region.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

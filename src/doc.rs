@@ -55,6 +55,9 @@ pub struct VideoRef {
     pub speed: f64,
     #[serde(default)]
     pub looping: bool,
+    /// Leave its soundtrack out.
+    #[serde(default)]
+    pub mute: bool,
     /// Texture slot that stays the same while frames change (runtime only).
     #[serde(skip, default = "next_rev")]
     pub slot: u64,
@@ -452,6 +455,8 @@ pub struct Document {
     pub timeline: crate::anim::Timeline,
     /// Canvas cameras (regions over time).
     pub cameras: Vec<crate::anim::CanvasCam>,
+    /// Sound files on the timeline.
+    pub audio: Vec<crate::anim::AudioClip>,
 }
 
 impl Document {
