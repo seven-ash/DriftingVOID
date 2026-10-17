@@ -17,11 +17,74 @@ pub struct Dial<'a> {
     default: Option<f32>,
     integer: bool,
     vertical: bool,
+    key: Option<(KeyMark, &'a mut bool)>,
+}
+
+/// State of a keyable value at the playhead.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum KeyMark {
+    /// Not animated.
+    None,
+    /// Animated, no key here.
+    Keyed,
+    /// A key sits at the playhead.
+    Here,
+}
+
+const KEY_W: f32 = 16.0;
+
+/// Small diamond that records the current value at the playhead.
+fn draw_key(p: &egui::Painter, c: Pos2, mark: KeyMark, hot: bool) {
+    let d = 4.5;
+    let pts = vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)];
+    match mark {
+        KeyMark::Here => p.add(Shape::convex_polygon(pts, ACCENT, Stroke::NONE)),
+        KeyMark::Keyed => p.add(Shape::closed_line(pts, Stroke::new(1.3, ACCENT))),
+        KeyMark::None => p.add(Shape::closed_line(pts, Stroke::new(1.2, if hot { INK() } else { INK_3() }))),
+    };
+}
+
+fn label_width(text: &str, key: bool) -> f32 {
+    match (text.is_empty(), key) {
+        (true, true) => KEY_W,
+        (true, false) => 0.0,
+        (false, k) => 58.0 + if k { 12.0 } else { 0.0 },
+    }
+}
+
+/// The label slot of a dial row (text, then the key button when keyable), for
+/// rows built from other widgets that should line up with the dials.
+pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool) {
+    let w = label_width(text, mark.is_some());
+    let (lr, lresp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
+    let text_r = if mark.is_some() { egui::Rect::from_min_max(lr.min, egui::pos2(lr.right() - KEY_W, lr.bottom())) } else { lr };
+    ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
+    if let Some(mark) = mark {
+        let kr = egui::Rect::from_min_max(egui::pos2(lr.right() - KEY_W, lr.top()), lr.max);
+        let kresp = ui.interact(kr, lresp.id.with("key"), Sense::click());
+        if kresp.hovered() {
+            ui.painter().circle_filled(kr.center(), 8.0, FILL_1());
+        }
+        draw_key(ui.painter(), kr.center(), mark, kresp.hovered());
+        if kresp.on_hover_text("키 기록").clicked() {
+            *hit = true;
+        }
+    }
+}
+
+/// A stand-alone key button (rows that are not dials). True when clicked.
+pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(KEY_W, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().circle_filled(r.center(), 8.0, FILL_1());
+    }
+    draw_key(ui.painter(), r.center(), mark, resp.hovered());
+    resp.on_hover_text("키 기록").clicked()
 }
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -50,6 +113,12 @@ impl<'a> Dial<'a> {
     /// A narrow upright dial: the ring rolls vertically, value and label below.
     pub fn vertical(mut self) -> Self {
         self.vertical = true;
+        self
+    }
+
+    /// A key button before the ring; `hit` turns true when it is clicked.
+    pub fn key(mut self, mark: Option<KeyMark>, hit: &'a mut bool) -> Self {
+        self.key = mark.map(|m| (m, hit));
         self
     }
 
@@ -106,7 +175,7 @@ impl Widget for Dial<'_> {
         if self.vertical {
             return vertical_ui(self, ui);
         }
-        let Dial { value, range, step, text, suffix, default, integer, .. } = self;
+        let Dial { value, range, step, text, suffix, default, integer, key, .. } = self;
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
         // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
@@ -138,10 +207,14 @@ impl Widget for Dial<'_> {
         let mut out = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let label_w = if text.is_empty() { 0.0 } else { 58.0 };
+                let label_w = label_width(&text, key.is_some());
                 if label_w > 0.0 {
-                    let (lr, _) = ui.allocate_exact_size(vec2(label_w, row_h), Sense::hover());
-                    ui.painter().with_clip_rect(lr).text(lr.left_center(), Align2::LEFT_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
+                    let mut dummy = false;
+                    let (mark, hit) = match key {
+                        Some((m, h)) => (Some(m), h),
+                        None => (None, &mut dummy),
+                    };
+                    label_cell(ui, &text, mark, hit);
                 }
                 let value_w = 52.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
                 let pin_w = if default.is_some() { 16.0 } else { 0.0 };

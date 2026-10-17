@@ -92,6 +92,8 @@ pub struct Settings {
     pub theme: u8,
     /// Seconds Tab must be held before the other workspace peeks in.
     pub peek_delay: f32,
+    /// Folded property sections: tool, selection, cameras.
+    pub folded: [bool; 3],
 }
 
 impl Default for Settings {
@@ -120,6 +122,7 @@ impl Default for Settings {
             touch_draw: false,
             theme: 1,
             peek_delay: 0.2,
+            folded: [false; 3],
         }
     }
 }
@@ -806,7 +809,7 @@ pub struct App {
     /// Width the right-hand columns take (the timeline stops short of them).
     right_reserve: f32,
     /// Content heights of the property columns last frame.
-    col_h: [f32; 2],
+    col_h: [f32; 3],
     /// Timeline card height last frame.
     tl_h: f32,
     /// Timeline playback (timeline time and wall time at the start), the selected key,
@@ -927,7 +930,7 @@ impl App {
             scrub_busy: 0,
             scrub_shown: Default::default(),
             right_reserve: 600.0,
-            col_h: [200.0, 200.0],
+            col_h: [200.0; 3],
             tl_h: 120.0,
             tl_play: None,
             tl_key: None,
@@ -1813,6 +1816,32 @@ impl App {
         self.mark();
     }
 
+    /// Records a layer's current state as a key at the playhead (onto a key
+    /// already within half a frame).
+    fn key_layer(&mut self, id: LayerId) {
+        let t = self.doc.timeline.time;
+        let tol = self.doc.timeline.frame_len() * 0.5;
+        if let Some(l) = self.doc.get_mut(id) {
+            let kt = l.anim.as_ref().and_then(|a| a.keys.iter().map(|k| k.t).find(|kt| (kt - t).abs() <= tol)).unwrap_or(t);
+            let key = crate::anim::key_of(l, kt);
+            l.anim.get_or_insert_with(Default::default).set_key(key);
+            self.status = format!("키 · {}", crate::video::timecode(kt));
+            self.mark();
+        }
+    }
+
+    fn key_camera(&mut self, i: usize) {
+        let t = self.doc.timeline.time;
+        let tol = self.doc.timeline.frame_len() * 0.5;
+        if let Some(c) = self.doc.cameras.get_mut(i) {
+            let kt = c.anim.keys.iter().map(|k| k.t).find(|kt| (kt - t).abs() <= tol).unwrap_or(t);
+            let k = c.key(kt);
+            c.anim.set_key(k);
+            self.status = format!("{} 키 · {}", c.name, crate::video::timecode(kt));
+            self.mark();
+        }
+    }
+
     fn delete_selected_keys(&mut self) {
         let sel = std::mem::take(&mut self.tl_sel);
         let n = sel.len();
@@ -1867,8 +1896,9 @@ impl App {
     }
 
     fn cameras_panel(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.strong("카메라");
+        if !Self::fold_section(ui, "카메라", &mut self.s.folded[2]) {
+            return;
+        }
         ui.small("영역 → 카메라 · 손잡이: 크기 · I: 키 · 구간 밖: 꺼짐");
         let mut pick = None;
         let mut add = false;
@@ -1898,16 +1928,19 @@ impl App {
         let Some(i) = self.cam_sel.and_then(|id| self.doc.cameras.iter().position(|c| c.id == id)) else { return };
         let mut ch = false;
         let (mut del, mut to_frame, mut from_frame) = (false, false, false);
+        let tl = &self.doc.timeline;
+        let cmark = tl.on.then(|| key_mark(Some(&self.doc.cameras[i].anim), tl.time, tl.frame_len() * 0.5));
+        let mut ckey = false;
         {
             let c = &mut self.doc.cameras[i];
             ui.horizontal(|ui| {
                 ui.label("이름");
-                ch |= ui.text_edit_singleline(&mut c.name).changed();
+                ch |= ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(ui.available_width())).changed();
             });
             ui.label(format!("키 {}개", c.anim.keys.len()));
-            ch |= rect_fields(ui, &mut c.rect, "cam");
+            ch |= rect_fields(ui, &mut c.rect, "cam", cmark, &mut ckey);
             let mut deg = c.rot.to_degrees();
-            if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text("회전 °").default(0.0)).changed() {
+            if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text("회전 °").default(0.0).key(cmark, &mut ckey)).changed() {
                 c.rot = deg.to_radians();
                 ch = true;
             }
@@ -1923,11 +1956,13 @@ impl App {
         let mut snap_to = None;
         let follow = self.doc.cameras[i].follow;
         let mut new_follow = follow;
+        let picked = self.sel;
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.label("객체 중심에");
-            egui::ComboBox::from_id_salt(("cam_snap", self.doc.cameras[i].id))
+            egui::ComboBox::from_id_salt(("cam_snap", self.doc.cameras[i].id)).truncate()
                 .selected_text("맞추기…")
-                .width(120.0)
+                .width(84.0)
                 .popup_style(theme::glass_popup_style(false))
                 .show_ui(ui, |ui| {
                     theme::glass_popup(ui, |ui| {
@@ -1938,13 +1973,20 @@ impl App {
                         }
                     })
                 });
+            if ui.add_enabled(picked.is_some(), egui::Button::new("선택")).on_hover_text("선택한 객체 중심으로").clicked() {
+                snap_to = picked;
+            }
         });
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if let Some(m) = cmark {
+                ckey |= crate::dial::key_button(ui, m);
+            }
             ui.label("따라가기");
             let shown = follow.and_then(|f| targets.iter().find(|t| t.0 == f.layer)).map_or("없음".to_string(), |t| t.1.clone());
-            egui::ComboBox::from_id_salt(("cam_follow", self.doc.cameras[i].id))
+            egui::ComboBox::from_id_salt(("cam_follow", self.doc.cameras[i].id)).truncate()
                 .selected_text(shown)
-                .width(120.0)
+                .width(ui.available_width() - 24.0)
                 .popup_style(theme::glass_popup_style(false))
                 .show_ui(ui, |ui| {
                     theme::glass_popup(ui, |ui| {
@@ -1959,8 +2001,15 @@ impl App {
                     })
                 });
         });
+        let bind = picked.filter(|p| follow.is_none_or(|f| f.layer != *p));
+        if ui.add_enabled(bind.is_some(), egui::Button::new("선택한 객체 따라가기")).on_hover_text("위치 따라가기로 묶기").clicked() {
+            if let Some(layer) = bind {
+                new_follow = Some(crate::anim::Follow { layer, pos: true, rot: false, offset: [0.0, 0.0], rot_offset: 0.0 });
+            }
+        }
         if let Some(mut f) = new_follow {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 let mut c2 = false;
                 c2 |= ui.checkbox(&mut f.pos, "위치").changed();
                 c2 |= ui.checkbox(&mut f.rot, "회전").changed();
@@ -1999,6 +2048,9 @@ impl App {
             self.doc.export_frame = Some(self.doc.cameras[i].rect);
             ch = true;
         }
+        if ckey && !del {
+            self.key_camera(i);
+        }
         if del {
             self.doc.cameras.remove(i);
             self.cam_sel = None;
@@ -2012,7 +2064,8 @@ impl App {
     fn timeline_ui(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         // full width along the bottom; the property columns stop above it
-        let width = (screen.width() - 70.0 - SPACE_LG - 20.0).max(360.0);
+        // the same margin on both sides (the left one clears the tool bar)
+        let width = (screen.width() - 70.0 * 2.0 - 20.0).max(360.0);
         let resp = egui::Area::new(egui::Id::new("timeline"))
             .order(egui::Order::Middle)
             .anchor(Align2::LEFT_BOTTOM, vec2(70.0, -64.0))
@@ -2198,8 +2251,8 @@ impl App {
             } else {
                 INK_2()
             };
-            p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.left() + label_w - 8.0, rr.bottom())))
-                .text(pos2(rr.left() + 6.0, rr.center().y), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_SMALL + 0.5), col);
+            let g = p.layout_job(elided(name.to_string(), FontId::proportional(theme::TEXT_SMALL + 0.5), col, label_w - 14.0));
+            p.galley(pos2(rr.left() + 6.0, rr.center().y - g.size().y * 0.5), g, col);
             let cy = rr.center().y;
             if let TlRow::Audio(aid) = row {
                 if let Some(a) = self.doc.audio.iter().find(|a| a.id == *aid) {
@@ -2805,7 +2858,7 @@ impl App {
                     ui.add_space(SPACE_SM);
                     ui.horizontal(|ui| {
                         ui.label("형식");
-                        egui::ComboBox::from_id_salt("vcodec")
+                        egui::ComboBox::from_id_salt("vcodec").truncate()
                             .selected_text(d.codec.label())
                             .width(200.0)
                             .popup_style(theme::glass_popup_style(false))
@@ -6027,7 +6080,7 @@ impl App {
                 ui.strong("내보낼 영역");
                 ui.small("끌어서 영역 지정 · 손잡이로 조절 · Ctrl+E: 내보내기");
                 if let Some(mut r) = self.doc.export_frame {
-                    if rect_fields(ui, &mut r, "frame") {
+                    if rect_fields(ui, &mut r, "frame", None, &mut false) {
                         self.doc.export_frame = Some(r);
                         self.mark();
                     }
@@ -6107,15 +6160,36 @@ impl App {
         let mut space_req: Option<Option<(u64, Option<u64>)>> = None;
         let mut vid_act: Option<VidAct> = None;
         let is_playing = self.playing.contains_key(&id);
+        let tl = &self.doc.timeline;
+        let kmark = tl.on.then(|| key_mark(self.doc.layers[idx].anim.as_ref(), tl.time, tl.frame_len() * 0.5));
+        let mut key_hit = false;
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
                 ui.label(l.kind_label());
                 if !matches!(l.kind, LayerKind::Text(_)) {
-                    changed |= ui.text_edit_singleline(&mut l.name).changed();
+                    changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width())).changed();
                 }
             });
-            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0)).changed();
+            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(kmark, &mut key_hit)).changed();
+            if l.place.is_none() {
+                // 2D position (the centre); placed layers use the 3D fields below
+                let c0 = crate::anim::key_of(l, 0.0).center;
+                let (mut x, mut y) = (c0[0], c0[1]);
+                let mut mv = false;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    crate::dial::label_cell(ui, "위치", kmark, &mut key_hit);
+                    ui.label(egui::RichText::new("X").color(INK_3()));
+                    mv |= ui.add_sized([56.0, 20.0], crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
+                    ui.label(egui::RichText::new("Y").color(INK_3()));
+                    mv |= ui.add_sized([56.0, 20.0], crate::calc::drag(&mut y).speed(1.0).max_decimals(1)).changed();
+                });
+                if mv {
+                    l.translate(vec2(x - c0[0], y - c0[1]));
+                    changed = true;
+                }
+            }
             match &mut l.kind {
                 LayerKind::Image(im) => {
                     if let Some(v) = &mut im.video {
@@ -6171,12 +6245,12 @@ impl App {
                     }
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(kmark, &mut key_hit)).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -6217,7 +6291,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(kmark, &mut key_hit)).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
@@ -6236,7 +6310,7 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         ui.label("혼합");
-                        egui::ComboBox::from_id_salt("text_blend")
+                        egui::ComboBox::from_id_salt("text_blend").truncate()
                             .selected_text(t.blend.label())
                             .width(110.0)
                             .popup_style(theme::glass_popup_style(false))
@@ -6252,7 +6326,7 @@ impl App {
                             });
                     });
                     let mut deg = t.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
                         t.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -6282,7 +6356,7 @@ impl App {
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         let mut deg = s.rotation.to_degrees();
-                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
                             s.rotation = deg.to_radians();
                             changed = true;
                         }
@@ -6327,7 +6401,7 @@ impl App {
                 };
                 ui.horizontal(|ui| {
                     ui.label("3D 공간");
-                    egui::ComboBox::from_id_salt(("space_of", id))
+                    egui::ComboBox::from_id_salt(("space_of", id)).truncate()
                         .selected_text(shown)
                         .width(120.0)
                         .popup_style(theme::glass_popup_style(false))
@@ -6356,26 +6430,26 @@ impl App {
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.pos[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(kmark, &mut key_hit)).changed() {
                             pl.pos[i] = v as f64;
                             changed = true;
                         }
                     }
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.rot[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(kmark, &mut key_hit)).changed() {
                             pl.rot[i] = v as f64;
                             changed = true;
                         }
                     }
                     let mut pct = (pl.scale * 100.0) as f32;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(kmark, &mut key_hit)).changed() {
                         pl.scale = pct as f64 / 100.0;
                         changed = true;
                     }
                     let mut th = pl.thick as f32;
                     if ui
-                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0))
+                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(kmark, &mut key_hit))
                         .on_hover_text("평면 뒤로 밀어낸 두께")
                         .changed()
                     {
@@ -6410,6 +6484,9 @@ impl App {
         }
         if changed {
             self.mark();
+        }
+        if key_hit {
+            self.key_layer(id);
         }
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
@@ -6631,13 +6708,9 @@ impl App {
                 }
             } else {
                 let clip = p.with_clip_rect(name_r.intersect(ui.clip_rect()));
-                clip.text(
-                    pos2(name_r.left(), r.center().y),
-                    Align2::LEFT_CENTER,
-                    l.display_name(),
-                    FontId::proportional(theme::TEXT_BODY),
-                    (if selected { INK() } else { INK_2() }).gamma_multiply(dim),
-                );
+                let col = (if selected { INK() } else { INK_2() }).gamma_multiply(dim);
+                let g = clip.layout_job(elided(l.display_name(), FontId::proportional(theme::TEXT_BODY), col, name_r.width()));
+                clip.galley(pos2(name_r.left(), r.center().y - g.size().y * 0.5), g, col);
             }
             if eye.clicked() {
                 l.visible = !l.visible;
@@ -6935,6 +7008,26 @@ impl App {
         ui.add_space(2.0);
     }
 
+    /// A section title that folds its section; true while open.
+    fn fold_section(ui: &mut egui::Ui, title: &str, folded: &mut bool) -> bool {
+        ui.add_space(SPACE_SM);
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
+        let col = if resp.hovered() { INK_2() } else { INK_3() };
+        let c = pos2(r.left() + 4.0, r.center().y);
+        let tri = if *folded {
+            vec![c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.0, 4.0)]
+        } else {
+            vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)]
+        };
+        ui.painter().add(Shape::convex_polygon(tri, col, Stroke::NONE));
+        ui.painter().text(pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, title, FontId::new(theme::TEXT_LABEL, theme::ui_bold()), col);
+        if resp.clicked() {
+            *folded = !*folded;
+        }
+        ui.add_space(2.0);
+        !*folded
+    }
+
     /// Right side, from the edge inwards: layers, the tool's main properties (with
     /// the selection), and a secondary column only where a tool needs one (cameras).
     fn inspector(&mut self, ctx: &egui::Context) {
@@ -6953,20 +7046,17 @@ impl App {
                 theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
                     ui.set_width(layers_w);
                     Self::section(ui, "레이어");
-                    // floating areas size from the previous frame, so ask for the height explicitly
-                    let needed = self.doc.layers.len().max(1) as f32 * 32.0 + 48.0;
-                    let room = max_h - 30.0;
-                    egui::ScrollArea::vertical()
-                        .id_salt("layers")
-                        .max_height(room)
-                        .min_scrolled_height(needed.min(room))
-                        .show(ui, |ui| {
-                            self.layers_panel(ui);
-                        });
+                    // as tall as the list (last frame's height); scrolls only past the window
+                    let room = (max_h - 30.0).max(80.0);
+                    let want = self.col_h[2].min(room);
+                    let out = egui::ScrollArea::vertical().id_salt("layers").max_height(room).min_scrolled_height(want).show(ui, |ui| {
+                        self.layers_panel(ui);
+                    });
+                    self.col_h[2] = out.content_size.y;
                 });
             });
         let mut x = SPACE_LG + card(layers_w) + gap;
-        let main_w = 264.0;
+        let main_w = 244.0;
         egui::Area::new(egui::Id::new("inspector"))
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
@@ -6976,11 +7066,13 @@ impl App {
                     // floating areas size from the previous frame: ask for last frame's content height
                     let want = self.col_h[0].min(max_h);
                     let out = egui::ScrollArea::vertical().id_salt("props").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
-                        Self::section(ui, "도구");
-                        self.tool_options(ui);
-                        ui.add_space(SPACE_MD);
-                        Self::section(ui, "선택한 항목");
-                        self.properties(ui);
+                        if Self::fold_section(ui, "도구", &mut self.s.folded[0]) {
+                            self.tool_options(ui);
+                            ui.add_space(SPACE_MD);
+                        }
+                        if Self::fold_section(ui, "선택한 항목", &mut self.s.folded[1]) {
+                            self.properties(ui);
+                        }
                     });
                     self.col_h[0] = out.content_size.y;
                 });
@@ -8192,7 +8284,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
             Some(fam) => egui::RichText::new(shown).family(fam).size(theme::TEXT_BODY + 1.0).into(),
             None => shown.into(),
         };
-        egui::ComboBox::from_id_salt(id).selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
+        egui::ComboBox::from_id_salt(id).truncate().selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
             let Some(fams) = &fams else {
                 ui.label("설치된 글꼴 읽는 중…");
                 return;
@@ -8263,7 +8355,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
     if styles.len() > 1 {
         ui.horizontal(|ui| {
             ui.label("스타일");
-            egui::ComboBox::from_id_salt((id, "style")).selected_text(style.clone()).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
+            egui::ComboBox::from_id_salt((id, "style")).truncate().selected_text(style.clone()).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
                 for s in styles {
                     if ui.selectable_label(*style == s, &s).clicked() {
                         *style = s;
@@ -8448,6 +8540,23 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
 
 /// Keyframe mark by easing: a diamond (linear), a bow tie (smooth in/out, like an
 /// hourglass on its side) or a square (hold).
+/// Key state of an animation at `t` (a key within `tol` counts as here).
+fn key_mark(a: Option<&crate::anim::Anim>, t: f64, tol: f64) -> crate::dial::KeyMark {
+    use crate::dial::KeyMark;
+    match a {
+        Some(a) if a.keys.iter().any(|k| (k.t - t).abs() <= tol) => KeyMark::Here,
+        Some(a) if !a.keys.is_empty() => KeyMark::Keyed,
+        _ => KeyMark::None,
+    }
+}
+
+/// One line of text cut with an ellipsis at `width`.
+fn elided(text: String, font: FontId, color: Color32, width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    job
+}
+
 fn key_icon(p: &egui::Painter, c: Pos2, ease: crate::anim::Ease, fill: Color32, edge: Stroke) {
     use crate::anim::Ease;
     match ease {
@@ -8470,11 +8579,14 @@ fn key_icon(p: &egui::Painter, c: Pos2, ease: crate::anim::Ease, fill: Color32, 
 
 /// Pixel fields (x, y, width, height), size presets that keep the centre, and a
 /// landscape/portrait swap for a region. True when it changed.
-fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str) -> bool {
+fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::dial::KeyMark>, key_hit: &mut bool) -> bool {
     let mut ch = false;
     let (mut x, mut y, mut w, mut h) = (r.min.x, r.min.y, r.width(), r.height());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+        if let Some(m) = key {
+            *key_hit |= crate::dial::key_button(ui, m);
+        }
         ui.label("X");
         ch |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(0)).changed();
         ui.label("Y");
@@ -8482,6 +8594,9 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str) -> bool {
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+        if let Some(m) = key {
+            *key_hit |= crate::dial::key_button(ui, m);
+        }
         ui.label("W");
         ch |= ui.add(crate::calc::drag(&mut w).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
         ui.label("H");
