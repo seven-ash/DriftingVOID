@@ -370,12 +370,69 @@ pub struct Space {
     pub mask: Option<Rect>,
     #[serde(default)]
     pub walls: Vec<Wall>,
+    /// Moves, scales and turns with this photo (its transform when last applied).
+    #[serde(default)]
+    pub follow: Option<SpaceFollow>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SpaceFollow {
+    pub layer: u64,
+    /// centre x, centre y, scale, rotation of the photo last time.
+    pub last: [f32; 4],
+}
+
+/// Spaces that follow a photo take its move, scale and turn as a whole: lines,
+/// origin, frame, mask and walls move on the canvas, and the world (with the layers
+/// placed in it) scales with the photo, so nothing has to be matched again.
+pub fn follow_photos(doc: &mut crate::doc::Document) {
+    use crate::doc::LayerKind;
+    for i in 0..doc.spaces.len() {
+        let Some(f) = doc.spaces[i].follow else { continue };
+        let Some(LayerKind::Image(im)) = doc.get(f.layer).map(|l| &l.kind) else { continue };
+        let cur = [im.center.x, im.center.y, im.scale, im.rotation];
+        if cur == f.last {
+            continue;
+        }
+        let [lx, ly, ls, lr] = f.last;
+        let k = cur[2] / ls.max(1e-6);
+        let th = cur[3] - lr;
+        let (c0, c1) = (pos2(lx, ly), pos2(cur[0], cur[1]));
+        let map = |p: Pos2| -> Pos2 {
+            let d = (p - c0) * k;
+            let (s, c) = th.sin_cos();
+            c1 + egui::vec2(d.x * c - d.y * s, d.x * s + d.y * c)
+        };
+        let map_rect = |r: Rect| Rect::from_center_size(map(r.center()), r.size() * k);
+        let sp = &mut doc.spaces[i];
+        for l in &mut sp.lines {
+            l.a = map(l.a);
+            l.b = map(l.b);
+        }
+        sp.origin = map(sp.origin);
+        sp.frame = map_rect(sp.frame);
+        sp.mask = sp.mask.map(map_rect);
+        for w in &mut sp.walls {
+            w.corners = w.corners.map(map);
+        }
+        sp.follow = Some(SpaceFollow { layer: f.layer, last: cur });
+        let id = sp.id;
+        let kk = k as f64;
+        for l in &mut doc.layers {
+            if let Some(pl) = l.place.as_mut().filter(|p| p.space == id) {
+                pl.base_t = scale(pl.base_t, kk);
+                pl.base_k *= kk;
+                pl.thick *= kk;
+                pl.wall_uv = [pl.wall_uv[0] * kk, pl.wall_uv[1] * kk];
+            }
+        }
+    }
 }
 
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new() }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None }
     }
 
     /// The canvas area the space shows in.
@@ -501,13 +558,13 @@ const TUKEY: f64 = 0.035; // ≈ 2°
 pub fn solve(space: &Space) -> Result<Camera, String> {
     let fr = space.frame;
     if fr.width() < 4.0 || fr.height() < 4.0 {
-        return Err("공간 영역이 너무 작아".into());
+        return Err("공간 영역이 너무 작음".into());
     }
     let counts = [space.count(0), space.count(1), space.count(2)];
     let usable: Vec<usize> = (0..3).filter(|&a| counts[a] >= 2).collect();
     if usable.len() < 2 {
         return Err(format!(
-            "두 축 이상에 선을 2개씩 그려 줘 (최소 4개) · 지금 X {} · Y {} · Z {}",
+            "두 축에 선 2개씩 필요 · X {} · Y {} · Z {}",
             counts[0], counts[1], counts[2]
         ));
     }
@@ -769,7 +826,7 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
 
     let (f, c, r) = unpack(&x);
     if !f.is_finite() || f <= 0.0 {
-        return Err("카메라를 풀 수 없어 · 선 배치를 확인해 줘".into());
+        return Err("카메라 계산 불가 · 선 배치 확인".into());
     }
     let mut line_err = vec![f64::NAN; space.lines.len()];
     let (mut se, mut sw) = (0.0, 0.0);
@@ -1323,5 +1380,52 @@ mod tests {
         assert!(uv[3][0].abs() < tol, "left edge is a v line: {uv:?}");
         assert!((uv[2][0] - uv[1][0]).abs() < tol && (uv[2][1] - uv[3][1]).abs() < tol, "{uv:?}");
         assert!(f.skew_deg.abs() > 0.1);
+    }
+
+    /// Moving, scaling and turning the photo carries the whole space along: a layer
+    /// placed in it lands where the same similarity sends its old screen position.
+    #[test]
+    fn space_follows_its_photo() {
+        use crate::doc::{Document, ImageLayer, ImageSource, LayerKind, ShapeKind, ShapeLayer, next_rev};
+        use std::sync::Arc;
+        let t = truth();
+        let mut doc = Document::default();
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(1600, 1000)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
+        let pid = doc.insert("p".into(), LayerKind::Image(ImageLayer::new(src, pos2(800.0, 500.0))), None);
+        let mut sp = Space::new(1, "s".into(), t.frame);
+        sp.lines = lines_for(&t, &[0, 1, 2], 0.0);
+        sp.origin = t.project([0.0; 3]).unwrap();
+        sp.follow = Some(SpaceFollow { layer: pid, last: [800.0, 500.0, 1.0, 0.0] });
+        doc.spaces.push(sp);
+        let cam = solve(&doc.spaces[0]).unwrap();
+        let sid = doc.insert("s".into(), LayerKind::Shape(ShapeLayer { kind: ShapeKind::Rect, a: pos2(900.0, 600.0), b: pos2(960.0, 640.0), color: egui::Color32::WHITE, width: 1.0, fill: None, rotation: 0.0 }), None);
+        let mut pl = Placement::facing(1, &cam, pos2(930.0, 620.0));
+        pl.rot = [20.0, 10.0, 0.0];
+        doc.get_mut(sid).unwrap().place = Some(pl);
+        let before = {
+            let pl = doc.get(sid).unwrap().place.clone().unwrap();
+            let h = pl.homography(&cam);
+            [pos2(900.0, 600.0), pos2(960.0, 640.0)].map(|p| apply_h(&h, p).unwrap())
+        };
+        // the photo moves, grows 1.5× and turns 0.3 rad
+        if let Some(LayerKind::Image(im)) = doc.get_mut(pid).map(|l| &mut l.kind) {
+            im.center = pos2(1100.0, 300.0);
+            im.scale = 1.5;
+            im.rotation = 0.3;
+        }
+        follow_photos(&mut doc);
+        let cam2 = solve(&doc.spaces[0]).unwrap();
+        let pl = doc.get(sid).unwrap().place.clone().unwrap();
+        let h2 = pl.homography(&cam2);
+        let map = |p: Pos2| {
+            let d = (p - pos2(800.0, 500.0)) * 1.5;
+            let (s, c) = 0.3f32.sin_cos();
+            pos2(1100.0 + d.x * c - d.y * s, 300.0 + d.x * s + d.y * c)
+        };
+        for (i, p) in [pos2(900.0, 600.0), pos2(960.0, 640.0)].iter().enumerate() {
+            let got = apply_h(&h2, *p).unwrap();
+            let want = map(before[i]);
+            assert!(got.distance(want) < 0.5, "{got:?} vs {want:?}");
+        }
     }
 }

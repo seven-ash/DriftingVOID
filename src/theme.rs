@@ -7,20 +7,40 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Painter, Pos2, Rec
 
 // ---------------------------------------------------------------- tokens
 
-pub const VOID: Color32 = Color32::from_rgb(13, 12, 19); // canvas ground
-pub const PAPER_2: Color32 = Color32::from_rgb(24, 23, 32); // cards
-pub const PAPER_4: Color32 = Color32::from_rgb(46, 44, 58); // pressed, selected rows
-pub const INK: Color32 = Color32::from_rgb(236, 232, 225);
-pub const INK_2: Color32 = Color32::from_rgb(167, 162, 176);
-pub const INK_3: Color32 = Color32::from_rgb(109, 104, 120);
-/// Translucent control fills so buttons, rows and inputs sit *in* the glass.
-pub const FILL_1: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
-pub const FILL_2: Color32 = Color32::from_rgba_premultiplied(24, 24, 24, 24);
-pub const FILL_3: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36);
+static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Light or dark palette (the look follows this; `apply_visuals` after changing it).
+pub fn is_light() -> bool {
+    LIGHT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_light(on: bool) {
+    LIGHT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+macro_rules! token {
+    ($name:ident, $dark:expr, $light:expr) => {
+        #[allow(non_snake_case)]
+        pub fn $name() -> Color32 {
+            if is_light() { $light } else { $dark }
+        }
+    };
+}
+
+// canvas ground, cards, pressed rows, text, translucent fills, blooms
+token!(VOID, Color32::from_rgb(13, 12, 19), Color32::from_rgb(236, 234, 229));
+token!(PAPER_2, Color32::from_rgb(24, 23, 32), Color32::from_rgb(250, 249, 246));
+token!(PAPER_4, Color32::from_rgb(46, 44, 58), Color32::from_rgb(220, 216, 210));
+token!(INK, Color32::from_rgb(236, 232, 225), Color32::from_rgb(28, 26, 33));
+token!(INK_2, Color32::from_rgb(167, 162, 176), Color32::from_rgb(84, 80, 92));
+token!(INK_3, Color32::from_rgb(109, 104, 120), Color32::from_rgb(140, 136, 148));
+token!(FILL_1, Color32::from_rgba_premultiplied(14, 14, 14, 14), Color32::from_rgba_premultiplied(0, 0, 0, 14));
+token!(FILL_2, Color32::from_rgba_premultiplied(24, 24, 24, 24), Color32::from_rgba_premultiplied(0, 0, 0, 24));
+token!(FILL_3, Color32::from_rgba_premultiplied(36, 36, 36, 36), Color32::from_rgba_premultiplied(0, 0, 0, 36));
+token!(BLOOM_WARM, Color32::from_rgb(242, 140, 50), Color32::from_rgb(242, 170, 90));
+token!(BLOOM_COOL, Color32::from_rgb(110, 80, 220), Color32::from_rgb(140, 120, 235));
 pub const ACCENT: Color32 = Color32::from_rgb(242, 165, 65);
 pub const ACCENT_INK: Color32 = Color32::from_rgb(26, 18, 6);
-pub const BLOOM_WARM: Color32 = Color32::from_rgb(242, 140, 50);
-pub const BLOOM_COOL: Color32 = Color32::from_rgb(110, 80, 220);
 
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
@@ -38,7 +58,7 @@ pub fn ui_bold() -> FontFamily {
 
 pub fn card_frame() -> egui::Frame {
     egui::Frame::NONE
-        .fill(PAPER_2)
+        .fill(PAPER_2())
         .corner_radius(CornerRadius::same(RADIUS_CARD))
         .inner_margin(Margin::same(SPACE_MD as i8))
         .shadow(if crate::glass::shadow() {
@@ -61,7 +81,7 @@ pub fn glass<R>(ui: &mut egui::Ui, margin: Margin, radius: u8, add: impl FnOnce(
 }
 
 pub fn glass_shape(ctx: &egui::Context, rect: Rect, radius: u8) -> egui::Shape {
-    let [tr, tg, tb, _] = PAPER_2.to_array();
+    let [tr, tg, tb, _] = PAPER_2().to_array();
     let look = crate::glass::Look {
         radius: radius as f32,
         refract: 7.0,
@@ -109,32 +129,33 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
 pub fn apply_visuals(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
     let v = &mut style.visuals;
-    *v = egui::Visuals::dark();
-    v.override_text_color = Some(INK);
-    v.panel_fill = VOID;
+    *v = if is_light() { egui::Visuals::light() } else { egui::Visuals::dark() };
+    v.override_text_color = Some(INK());
+    v.panel_fill = VOID();
     // popups (menus, dropdowns, tooltips) can't host the GL glass, so they use the
     // same tint nearly opaque, same radius, and follow the shadow setting
-    v.window_fill = Color32::from_rgba_unmultiplied(24, 23, 32, 245);
-    v.window_stroke = Stroke::new(1.0, FILL_1);
+    let [pr, pg, pb, _] = PAPER_2().to_array();
+    v.window_fill = Color32::from_rgba_unmultiplied(pr, pg, pb, 245);
+    v.window_stroke = Stroke::new(1.0, FILL_1());
     v.window_corner_radius = CornerRadius::same(RADIUS_CARD);
     let shadow = crate::glass::shadow();
     v.window_shadow = if shadow { Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(130) } } else { Shadow::NONE };
     v.popup_shadow = if shadow { Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(120) } } else { Shadow::NONE };
     v.menu_corner_radius = CornerRadius::same(12);
-    v.extreme_bg_color = FILL_1;
-    v.faint_bg_color = FILL_1;
-    v.code_bg_color = FILL_1;
+    v.extreme_bg_color = FILL_1();
+    v.faint_bg_color = FILL_1();
+    v.code_bg_color = FILL_1();
     v.selection.bg_fill = ACCENT.gamma_multiply(0.45);
     v.selection.stroke = Stroke::new(1.5, ACCENT);
     v.hyperlink_color = ACCENT;
     v.slider_trailing_fill = true;
     let ctrl = CornerRadius::same(RADIUS_CTRL);
     for (w, bg, fg) in [
-        (&mut v.widgets.noninteractive, Color32::TRANSPARENT, INK_2),
-        (&mut v.widgets.inactive, FILL_1, INK),
-        (&mut v.widgets.hovered, FILL_2, INK),
-        (&mut v.widgets.active, FILL_3, INK),
-        (&mut v.widgets.open, FILL_2, INK),
+        (&mut v.widgets.noninteractive, Color32::TRANSPARENT, INK_2()),
+        (&mut v.widgets.inactive, FILL_1(), INK()),
+        (&mut v.widgets.hovered, FILL_2(), INK()),
+        (&mut v.widgets.active, FILL_3(), INK()),
+        (&mut v.widgets.open, FILL_2(), INK()),
     ] {
         w.bg_fill = bg;
         w.weak_bg_fill = bg;
@@ -143,7 +164,7 @@ pub fn apply_visuals(ctx: &egui::Context) {
         w.fg_stroke = Stroke::new(1.2, fg);
         w.expansion = 0.0;
     }
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, FILL_2); // separators
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, FILL_2()); // separators
     v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
     v.widgets.hovered.bg_stroke = Stroke::NONE;
 
@@ -227,10 +248,10 @@ fn radial(painter: &Painter, c: Pos2, r: f32, color: Color32) {
 
 /// The canvas background without its dot grid (also the 3D workspace's).
 pub fn draw_void(painter: &Painter, rect: Rect) {
-    painter.rect_filled(rect, 0.0, VOID);
+    painter.rect_filled(rect, 0.0, VOID());
     let d = rect.size().max_elem();
-    radial(painter, rect.left_bottom() + vec2(rect.width() * 0.12, -rect.height() * 0.1), d * 0.55, BLOOM_WARM.gamma_multiply(0.07));
-    radial(painter, rect.right_top() + vec2(-rect.width() * 0.15, rect.height() * 0.08), d * 0.5, BLOOM_COOL.gamma_multiply(0.08));
+    radial(painter, rect.left_bottom() + vec2(rect.width() * 0.12, -rect.height() * 0.1), d * 0.55, BLOOM_WARM().gamma_multiply(0.07));
+    radial(painter, rect.right_top() + vec2(-rect.width() * 0.15, rect.height() * 0.08), d * 0.5, BLOOM_COOL().gamma_multiply(0.08));
 }
 
 pub fn draw_ground(painter: &Painter, rect: Rect, xf: &crate::canvas::Xf) {
@@ -245,7 +266,7 @@ pub fn draw_ground(painter: &Painter, rect: Rect, xf: &crate::canvas::Xf) {
     }
     let w0 = xf.s2w(rect.min);
     let w1 = xf.s2w(rect.max);
-    let dot = INK_3.gamma_multiply(0.35);
+    let dot = INK_3().gamma_multiply(0.35);
     let mut x = (w0.x / step).floor() * step;
     while x <= w1.x {
         let mut y = (w0.y / step).floor() * step;

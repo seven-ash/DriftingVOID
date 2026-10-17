@@ -16,11 +16,12 @@ pub struct Dial<'a> {
     suffix: String,
     default: Option<f32>,
     integer: bool,
+    vertical: bool,
 }
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -43,6 +44,12 @@ impl<'a> Dial<'a> {
     /// Writes whole numbers only; the ring still turns smoothly underneath.
     pub fn integer(mut self) -> Self {
         self.integer = true;
+        self
+    }
+
+    /// A narrow upright dial: the ring rolls vertically, value and label below.
+    pub fn vertical(mut self) -> Self {
+        self.vertical = true;
         self
     }
 
@@ -96,7 +103,10 @@ fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
 
 impl Widget for Dial<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let Dial { value, range, step, text, suffix, default, integer } = self;
+        if self.vertical {
+            return vertical_ui(self, ui);
+        }
+        let Dial { value, range, step, text, suffix, default, integer, .. } = self;
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
         // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
@@ -131,7 +141,7 @@ impl Widget for Dial<'_> {
                 let label_w = if text.is_empty() { 0.0 } else { 58.0 };
                 if label_w > 0.0 {
                     let (lr, _) = ui.allocate_exact_size(vec2(label_w, row_h), Sense::hover());
-                    ui.painter().with_clip_rect(lr).text(lr.left_center(), Align2::LEFT_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2);
+                    ui.painter().with_clip_rect(lr).text(lr.left_center(), Align2::LEFT_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
                 }
                 let value_w = 52.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
                 let pin_w = if default.is_some() { 16.0 } else { 0.0 };
@@ -199,7 +209,7 @@ impl Widget for Dial<'_> {
                     let x = r.center().x + radius * a.sin();
                     let fade = a.cos().powf(1.6);
                     let h = r.height() * if end { 0.62 } else { [0.26, 0.36, 0.46][kind as usize] };
-                    let col = (if end { INK_2 } else if kind == 2 { INK_3.gamma_multiply(1.6) } else { INK_3 }).gamma_multiply(fade);
+                    let col = (if end { INK_2() } else if kind == 2 { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
                     p.line_segment([pos2(x, y - h * 0.5), pos2(x, y + h * 0.5)], Stroke::new(if kind > 0 || end { 1.3 } else { 1.0 }, col));
                 };
                 for (t, kind) in ticks {
@@ -232,9 +242,9 @@ impl Widget for Dial<'_> {
                     let (pr, presp) = ui.allocate_exact_size(vec2(pin_w, row_h), Sense::click());
                     let off = (*value - d).abs() > (hi - lo).abs() * 1e-4;
                     if off {
-                        let col = if presp.hovered() { INK } else { INK_3 };
+                        let col = if presp.hovered() { INK() } else { INK_3() };
                         if presp.hovered() {
-                            ui.painter().circle_filled(pr.center(), 8.5, FILL_1);
+                            ui.painter().circle_filled(pr.center(), 8.5, FILL_1());
                         }
                         reset_icon(ui.painter(), pr.center(), col);
                         if presp.on_hover_text(format!("기본값으로 ({d})")).clicked() {
@@ -258,4 +268,116 @@ pub fn dial_u8(ui: &mut Ui, v: &mut u8, range: RangeInclusive<u8>, text: &str) -
     let r = ui.add(Dial::new(&mut f, *range.start() as f32..=*range.end() as f32).integer().text(text));
     *v = f.round().clamp(*range.start() as f32, *range.end() as f32) as u8;
     r
+}
+
+/// Upright variant: pin, ring (dragging up raises the value), number, label.
+fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
+    let Dial { value, range, step, text, suffix, default, integer, .. } = d;
+    let (lo, hi) = (*range.start(), *range.end());
+    let span = (hi - lo).max(1e-6);
+    let dt = step.unwrap_or_else(|| {
+        let mut st = nice_step(span / TICKS_PER_RANGE);
+        if let Some(dv) = default {
+            for _ in 0..4 {
+                if on_grid(dv, st * 5.0) {
+                    break;
+                }
+                st = nice_down(st);
+            }
+        }
+        if integer { st.max(1.0) } else { st }
+    });
+    let anchor = match default {
+        Some(dv) if !on_grid(dv, dt * 5.0) => dv,
+        _ => 0.0,
+    };
+    let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
+    let before = *value;
+    let w = 40.0;
+    let ring_h = 92.0;
+    let mut out = ui
+        .vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().button_padding = vec2(2.0, 1.0);
+            ui.style_mut().override_font_id = Some(FontId::proportional(crate::theme::TEXT_SMALL));
+            ui.set_width(w);
+            // reset pin (keeps its row so dials line up)
+            let (pr, presp) = ui.allocate_exact_size(vec2(w, 14.0), Sense::click());
+            if let Some(dv) = default {
+                if (*value - dv).abs() > span * 1e-4 {
+                    if presp.hovered() {
+                        ui.painter().circle_filled(pr.center(), 7.0, FILL_1());
+                    }
+                    reset_icon(ui.painter(), pr.center(), if presp.hovered() { INK() } else { INK_3() });
+                    if presp.on_hover_text(format!("기본값 ({dv})")).clicked() {
+                        *value = dv;
+                    }
+                }
+            }
+            // ring
+            let (r, resp) = ui.allocate_exact_size(vec2(w, ring_h), Sense::click_and_drag());
+            let mut u = value.clamp(lo, hi);
+            let mut moved = false;
+            if resp.dragged() && resp.drag_delta().y != 0.0 {
+                moved = true;
+                let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
+                u = (u - resp.drag_delta().y / TICK_PX * dt * fine).clamp(lo, hi);
+            }
+            if resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+                if scroll != 0.0 {
+                    moved = true;
+                    u = (anchor + (((u - anchor) / dt).round() + scroll.signum()) * dt).clamp(lo, hi);
+                }
+            }
+            let nv = if integer { u.round().clamp(lo, hi) } else { u };
+            if moved && (nv - *value).abs() > f32::EPSILON {
+                *value = nv;
+            }
+            let p = ui.painter().with_clip_rect(r);
+            let radius = r.height() * 0.5;
+            let ang_per_u = TICK_PX / radius / dt;
+            let (vis_lo, vis_hi) = (u - 1.55 / ang_per_u, u + 1.55 / ang_per_u);
+            let (k0, k1) = (((vis_lo.max(lo) - anchor) / dt).floor() as i64, ((vis_hi.min(hi) - anchor) / dt).ceil() as i64);
+            let cx = r.center().x;
+            let draw = |t: f32, major: bool, end: bool| {
+                let a = (t - u) * ang_per_u;
+                if a.abs() > 1.5 {
+                    return;
+                }
+                let y = r.center().y - radius * a.sin();
+                let fade = a.cos().powf(1.6);
+                let half = r.width() * if end { 0.36 } else if major { 0.27 } else { 0.16 };
+                let col = (if end { INK_2() } else if major { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
+                p.line_segment([pos2(cx - half, y), pos2(cx + half, y)], Stroke::new(if major || end { 1.3 } else { 1.0 }, col));
+            };
+            for k in k0..=k1 {
+                let t = anchor + k as f32 * dt;
+                if t >= lo - dt * 1e-3 && t <= hi + dt * 1e-3 {
+                    draw(t, k.rem_euclid(5) == 0, false);
+                }
+            }
+            draw(lo, true, true);
+            draw(hi, true, true);
+            let cy = r.center().y;
+            p.line_segment([pos2(r.left() + 5.0, cy), pos2(r.right() - 5.0, cy)], Stroke::new(1.8, ACCENT));
+            p.add(Shape::convex_polygon(vec![pos2(r.left() + 1.0, cy - 3.0), pos2(r.left() + 1.0, cy + 3.0), pos2(r.left() + 5.0, cy)], ACCENT, Stroke::NONE));
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            // number and label
+            let mut dv = egui::DragValue::new(value).range(lo..=hi).speed(dt as f64 * 0.5).fixed_decimals(decimals).custom_parser(crate::calc::parse);
+            if !suffix.is_empty() {
+                dv = dv.suffix(suffix.clone());
+            }
+            let vr = ui.add_sized(vec2(w, 18.0), dv);
+            let (lr, _) = ui.allocate_exact_size(vec2(w, 13.0), Sense::hover());
+            ui.painter().with_clip_rect(lr.expand2(vec2(6.0, 0.0))).text(lr.center(), Align2::CENTER_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL - 0.5), INK_2());
+            resp.union(vr)
+        })
+        .inner;
+    if (*value - before).abs() > f32::EPSILON {
+        out.mark_changed();
+    }
+    out
 }

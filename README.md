@@ -96,6 +96,7 @@ right-click cancels. Alt+G/R/S clears the value.
   `DV_SPACE_MASK="x0,y0,x1,y1"` sets a mask, `DV_LOUPE=1` holds a line end mid-drag (magnifier),
   `DV_WALL="x,y;x,y;x,y;x,y"` adds a wall with the second text on it, `DV_THICK=30` gives both texts thickness.
 - `DV_SHOW_VEXPORT=1` opens the video export window at start.
+- `DV_THEME=0|1|2` (light, dark, system); `DV_SHOW_VIEW=1` shows the View menu contents in a card.
 - `DV_IMPORT="a.mp4;b.png"` imports files at start; `DV_PLAY=1` also plays the video.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.

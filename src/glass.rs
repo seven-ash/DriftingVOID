@@ -505,7 +505,7 @@ unsafe fn paint_blend(gl: &glow::Context, info: &egui::PaintCallbackInfo, corner
         gl.uniform_4_f32(u("u_region").as_ref(), 0.0, 0.0, sw as f32, sh as f32);
         gl.uniform_1_i32(u("u_mode").as_ref(), mode);
         gl.uniform_1_f32(u("u_op").as_ref(), opacity);
-        let v = crate::theme::VOID;
+        let v = crate::theme::VOID();
         gl.uniform_3_f32(u("u_void").as_ref(), v.r() as f32 / 255.0, v.g() as f32 / 255.0, v.b() as f32 / 255.0);
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));

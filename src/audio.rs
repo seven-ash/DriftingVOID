@@ -68,7 +68,7 @@ pub fn decode(path: &Path, rate: u32) -> Result<AudioData, String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if out.stdout.len() < 8 {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().last().unwrap_or("소리 트랙이 없어").to_string());
+        return Err(err.lines().last().unwrap_or("소리 트랙 없음").to_string());
     }
     let samples: Vec<f32> = out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     Ok(AudioData::from_samples(rate, samples))
@@ -116,7 +116,7 @@ pub struct Output {
 impl Output {
     pub fn open() -> Result<Self, String> {
         let host = cpal::default_host();
-        let dev = host.default_output_device().ok_or("소리 출력 장치가 없어")?;
+        let dev = host.default_output_device().ok_or("소리 출력 장치 없음")?;
         let sup = dev.default_output_config().map_err(|e| e.to_string())?;
         let rate = sup.sample_rate();
         let ch = sup.channels() as usize;

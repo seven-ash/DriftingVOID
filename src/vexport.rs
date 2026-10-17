@@ -294,7 +294,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     };
     for i in 0..total {
         if pr.cancel.load(Ordering::Relaxed) {
-            return fail(&mut child, "취소했어".into());
+            return fail(&mut child, "취소됨".into());
         }
         let t = job.t0 + i as f64 / job.fps;
         let mut d = job.doc.clone();
@@ -321,7 +321,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
                 Some(c) => (c.rect, c.rot),
-                None => return fail(&mut child, "카메라가 없어".into()),
+                None => return fail(&mut child, "카메라 없음".into()),
             },
             Region::Fixed(r) => (r, 0.0),
         };
@@ -346,7 +346,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
                         use std::io::Read;
                         let _ = e.read_to_string(&mut err);
                     }
-                    return fail(&mut child, format!("인코더가 멈췄어: {}", err.lines().last().unwrap_or("").trim()));
+                    return fail(&mut child, format!("인코더 중단: {}", err.lines().last().unwrap_or("").trim()));
                 }
             }
             None => {

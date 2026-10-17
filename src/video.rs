@@ -59,7 +59,7 @@ pub fn tools() -> Option<&'static Tools> {
     .as_ref()
 }
 
-pub const MISSING: &str = "ffmpeg를 찾지 못했어 · winget install Gyan.FFmpeg 로 설치하거나 %APPDATA%\\DriftingVOID\\ffmpeg 에 넣어 줘";
+pub const MISSING: &str = "ffmpeg 없음 · winget install Gyan.FFmpeg 또는 %APPDATA%\\DriftingVOID\\ffmpeg";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -120,7 +120,7 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo, String> {
     let vs = streams
         .iter()
         .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() != Some(1))
-        .ok_or("영상 트랙이 없어")?;
+        .ok_or("영상 트랙 없음")?;
     let (mut w, mut h) = (vs["width"].as_u64().unwrap_or(0) as u32, vs["height"].as_u64().unwrap_or(0) as u32);
     // rotation: side data (newer) or the "rotate" tag (older files)
     let rot = vs["side_data_list"]
@@ -180,11 +180,11 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
         if t > 0.05 && out.stdout.is_empty() {
             return frame_at(path, (t - 0.25).max(0.0), size);
         }
-        return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("프레임을 읽지 못했어").to_string());
+        return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("프레임 읽기 실패").to_string());
     }
     let mut px = out.stdout;
     px.truncate(need);
-    image::RgbaImage::from_raw(size.0, size.1, px).ok_or_else(|| "프레임 크기가 맞지 않아".into())
+    image::RgbaImage::from_raw(size.0, size.1, px).ok_or_else(|| "프레임 크기 불일치".into())
 }
 
 /// Streaming playback decoder: frames from `t0` on, at `size`, through a small

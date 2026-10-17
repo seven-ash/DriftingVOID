@@ -240,7 +240,7 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         let fr = xf.rect_w2s(cam.frame);
         let clip = painter.with_clip_rect(fr.intersect(rect));
         crate::canvas::draw_doc(&clip, ctx, doc, &xf, cache, None);
-        painter.rect_stroke(fr, 0.0, Stroke::new(1.0, INK_3), egui::StrokeKind::Outside);
+        painter.rect_stroke(fr, 0.0, Stroke::new(1.0, INK_3()), egui::StrokeKind::Outside);
         draw_selection(painter, doc, proj, sel);
         return;
     }
@@ -285,7 +285,7 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
     draw_selection(painter, doc, proj, sel);
     // origin
     if let Some(o) = proj.project([0.0; 3]) {
-        painter.circle_stroke(o, 3.5, Stroke::new(1.2, INK_2));
+        painter.circle_stroke(o, 3.5, Stroke::new(1.2, INK_2()));
     }
 }
 
@@ -368,19 +368,19 @@ fn camera_gizmo(painter: &Painter, proj: &Proj, cam: &Camera) {
     let fr = cam.frame;
     let at = |p: Pos2| add(cam.center, mul_mv(&rt, [(p.x as f64 - cam.c[0]) / cam.f * d, (p.y as f64 - cam.c[1]) / cam.f * d, d]));
     let c = [at(fr.left_top()), at(fr.right_top()), at(fr.right_bottom()), at(fr.left_bottom())];
-    let st = Stroke::new(1.2, INK_2);
+    let st = Stroke::new(1.2, INK_2());
     for i in 0..4 {
         if let Some(s) = proj.segment(c[i], c[(i + 1) % 4]) {
             painter.line_segment(s, st);
         }
         if let Some(s) = proj.segment(cam.center, c[i]) {
-            painter.line_segment(s, Stroke::new(1.0, INK_3));
+            painter.line_segment(s, Stroke::new(1.0, INK_3()));
         }
     }
     let top = at(pos2(fr.center().x, fr.top() - fr.height() * 0.12));
     if let (Some(a), Some(b), Some(t)) = (proj.project(c[0]), proj.project(c[1]), proj.project(top)) {
         let (a, b) = (a.lerp(b, 0.3), a.lerp(b, 0.7));
-        painter.add(Shape::convex_polygon(vec![a, b, t], INK_3.gamma_multiply(0.6), Stroke::NONE));
+        painter.add(Shape::convex_polygon(vec![a, b, t], INK_3().gamma_multiply(0.6), Stroke::NONE));
     }
 }
 
@@ -625,7 +625,7 @@ impl Modal {
 
 /// Label at the top-left of the viewport.
 pub fn hud(painter: &Painter, rect: Rect, text: &str) {
-    painter.text(rect.left_top() + vec2(96.0, 92.0), Align2::LEFT_TOP, text, FontId::proportional(13.0), INK_2);
+    painter.text(rect.left_top() + vec2(96.0, 92.0), Align2::LEFT_TOP, text, FontId::proportional(13.0), INK_2());
 }
 
 #[cfg(test)]
