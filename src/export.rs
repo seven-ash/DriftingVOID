@@ -38,8 +38,20 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
         out.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
     }
     let base = Transform::from_translate(-region.min.x, -region.min.y).post_scale(scale, scale);
-    for layer in doc.layers.iter().filter(|l| l.visible && l.opacity > 0.0) {
-        if !layer.bounds().is_some_and(|b| b.intersects(region)) {
+    let cams = crate::persp::cameras(&doc.spaces);
+    for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
+        if !layer.shown_bounds(&cams).is_some_and(|b| b.intersects(region)) {
+            continue;
+        }
+        if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
+            // content -> canvas -> output pixels
+            let s = scale as f64;
+            let out_m = [[s, 0.0, -region.min.x as f64 * s], [0.0, s, -region.min.y as f64 * s], [0.0, 0.0, 1.0]];
+            let h = crate::persp::mul_mm(&out_m, &pl.homography(cam));
+            let res = magnification(&h, layer.bounds().unwrap_or(region)).clamp(0.05, 4.0);
+            if let Some((src, rect, res)) = flatten_layer(layer, res) {
+                warp_onto(&mut out, &src, rect, res, &h, layer.opacity);
+            }
             continue;
         }
         if let LayerKind::Text(t) = &layer.kind {
@@ -204,6 +216,98 @@ fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, sca
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Largest local magnification of a homography over a rectangle's corners.
+pub fn magnification(h: &crate::persp::M3, r: Rect) -> f32 {
+    use crate::persp::apply_h;
+    let mut m = 0.0f32;
+    for p in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.center()] {
+        let (Some(a), Some(bx), Some(by)) = (apply_h(h, p), apply_h(h, p + vec2(1.0, 0.0)), apply_h(h, p + vec2(0.0, 1.0))) else {
+            continue;
+        };
+        m = m.max(a.distance(bx)).max(a.distance(by));
+    }
+    if m > 0.0 { m } else { 1.0 }
+}
+
+/// One layer's 2D content (its bounds plus a pixel) rendered at `res` pixels per
+/// canvas pixel; the resolution is lowered to keep each side within 8192.
+pub fn flatten_layer(layer: &Layer, res: f32) -> Option<(Pixmap, Rect, f32)> {
+    let b = layer.bounds()?.expand(1.0);
+    let res = res.min(8192.0 / b.width().max(b.height()).max(1.0));
+    let w = (b.width() * res).ceil().max(1.0) as u32;
+    let h = (b.height() * res).ceil().max(1.0) as u32;
+    let mut pm = Pixmap::new(w, h)?;
+    let base = Transform::from_translate(-b.min.x, -b.min.y).post_scale(res, res);
+    let mut flat = layer.clone();
+    flat.place = None;
+    draw_layer(&mut pm, &flat, base, b, res);
+    Some((pm, b, res))
+}
+
+/// Draws a flattened layer through `h` (content -> `dst` pixels), sampling the source
+/// bilinearly at each destination pixel (exact perspective, no mesh).
+pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate::persp::M3, opacity: f32) {
+    use crate::persp::{apply_h, invert};
+    let Some(hi) = invert(h) else { return };
+    let Some(q) = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()]
+        .iter()
+        .map(|p| apply_h(h, *p))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    let bb = Rect::from_points(&q);
+    let (dw, dh) = (dst.width() as i32, dst.height() as i32);
+    let x0 = (bb.min.x.floor() as i32 - 1).max(0);
+    let y0 = (bb.min.y.floor() as i32 - 1).max(0);
+    let x1 = (bb.max.x.ceil() as i32 + 1).min(dw);
+    let y1 = (bb.max.y.ceil() as i32 + 1).min(dh);
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    let sd = src.data();
+    let px = |x: i32, y: i32| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= sw || y >= sh {
+            return [0.0; 4];
+        }
+        let i = ((y * sw + x) * 4) as usize;
+        [sd[i] as f32, sd[i + 1] as f32, sd[i + 2] as f32, sd[i + 3] as f32]
+    };
+    let (rx, ry, res) = (rect.min.x as f64, rect.min.y as f64, res as f64);
+    let data = dst.data_mut();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let w = hi[2][0] * fx + hi[2][1] * fy + hi[2][2];
+            if w <= 1e-12 {
+                continue;
+            }
+            let cx = (hi[0][0] * fx + hi[0][1] * fy + hi[0][2]) / w;
+            let cy = (hi[1][0] * fx + hi[1][1] * fy + hi[1][2]) / w;
+            let sx = (cx - rx) * res - 0.5;
+            let sy = (cy - ry) * res - 0.5;
+            if sx < -1.0 || sy < -1.0 || sx > sw as f64 || sy > sh as f64 {
+                continue;
+            }
+            let (ix, iy) = (sx.floor() as i32, sy.floor() as i32);
+            let (tx, ty) = ((sx - ix as f64) as f32, (sy - iy as f64) as f32);
+            let (a, b, c, d) = (px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1));
+            let mut s = [0f32; 4];
+            for k in 0..4 {
+                let top = a[k] + (b[k] - a[k]) * tx;
+                let bot = c[k] + (d[k] - c[k]) * tx;
+                s[k] = (top + (bot - top) * ty) * opacity;
+            }
+            if s[3] <= 0.0 {
+                continue;
+            }
+            let i = ((y * dw + x) * 4) as usize;
+            let inv = 1.0 - s[3] / 255.0;
+            for k in 0..4 {
+                data[i + k] = (s[k] + data[i + k] as f32 * inv).round().clamp(0.0, 255.0) as u8;
             }
         }
     }

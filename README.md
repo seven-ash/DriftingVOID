@@ -57,7 +57,8 @@ when empty. Photos are placed under drawing layers.
 - `DV_SHOW_PALETTE=RRGGBB` / `DV_SHOW_EXPORT=1` open those panels at start (for screenshots).
 - `DV_SHOW_UNSAVED=1` shows the unsaved-changes dialog at start.
 - `DV_SPACE_LINES="x1,y1,x2,y2,axis;..."` (+ `DV_SPACE_ORIGIN="x,y"`, photo pixels) opens the
-  space tool on a space fitted to the first photo.
+  space tool on a space fitted to the first photo. `DV_SPACE_DEMO=space|select` also drops
+  two text layers into it, and `DV_SPACE_EXPORT=out.png` exports the result.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
 

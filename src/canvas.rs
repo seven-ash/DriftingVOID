@@ -8,7 +8,7 @@ use egui::{
     TextureOptions, Vec2, pos2, vec2,
 };
 
-use crate::doc::{Document, ImageLayer, LayerId, LayerKind, ShapeKind, ShapeLayer, TextLayer};
+use crate::doc::{Document, ImageLayer, Layer, LayerId, LayerKind, ShapeKind, ShapeLayer, TextLayer};
 use crate::raster::TILE;
 use crate::vector::VStroke;
 
@@ -47,6 +47,9 @@ pub struct TexCache {
     images: HashMap<(u64, u64), (TextureHandle, u64)>,
     tiles: HashMap<(LayerId, (i32, i32)), (u64, TextureHandle, u64)>,
     texts: HashMap<LayerId, (u64, TextureHandle, u64, std::sync::Arc<Vec<u8>>, [u32; 2])>,
+    /// Flattened layers placed in 3D spaces: (content key, texture, last frame,
+    /// content rect, texture size).
+    placed: HashMap<LayerId, (u64, TextureHandle, u64, Rect, Vec2)>,
 }
 
 impl TexCache {
@@ -60,6 +63,26 @@ impl TexCache {
         self.images.retain(|_, v| f - v.1 < 120);
         self.tiles.retain(|_, v| f - v.2 < 120);
         self.texts.retain(|_, v| f - v.2 < 120);
+        self.placed.retain(|_, v| f - v.2 < 120);
+    }
+
+    /// Texture of a layer's 2D content at `res` texels per canvas pixel.
+    fn placed(&mut self, ctx: &Context, layer: &Layer, res: f32) -> Option<(egui::TextureId, Rect, Vec2)> {
+        let key = content_key(layer) ^ (res.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let frame = self.frame;
+        if let Some(e) = self.placed.get_mut(&layer.id) {
+            if e.0 == key {
+                e.2 = frame;
+                return Some((e.1.id(), e.3, e.4));
+            }
+        }
+        let (pm, rect, res) = crate::export::flatten_layer(layer, res)?;
+        let size = vec2(pm.width() as f32, pm.height() as f32) / res;
+        let ci = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+        let tex = ctx.load_texture(format!("placed{}", layer.id), ci, TEX_OPTS);
+        let id = tex.id();
+        self.placed.insert(layer.id, (key, tex, frame, rect, size));
+        Some((id, rect, size))
     }
 
     pub fn image(&mut self, ctx: &Context, im: &ImageLayer) -> egui::TextureId {
@@ -144,6 +167,91 @@ impl TexCache {
         self.texts.insert(id, (key, tex, frame, px.clone(), dims));
         Some((tid, lay.size, px, dims, key))
     }
+}
+
+/// Hash of everything that changes how a layer's 2D content looks.
+pub fn content_key(l: &Layer) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let f = |h: &mut std::collections::hash_map::DefaultHasher, v: f32| v.to_bits().hash(h);
+    match &l.kind {
+        LayerKind::Image(im) => {
+            (0u8, im.src.id, im.adjust.key()).hash(&mut h);
+            for v in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y, im.scale, im.rotation, im.center.x, im.center.y] {
+                f(&mut h, v);
+            }
+        }
+        LayerKind::Raster(r) => {
+            1u8.hash(&mut h);
+            f(&mut h, r.offset.x);
+            f(&mut h, r.offset.y);
+            let mut acc = 0u64;
+            for (k, t) in &r.tiles {
+                let mut th = std::collections::hash_map::DefaultHasher::new();
+                (k, t.rev).hash(&mut th);
+                acc = acc.wrapping_add(th.finish());
+            }
+            (acc, r.tiles.len()).hash(&mut h);
+        }
+        LayerKind::Vector(v) => {
+            (2u8, v.strokes.len()).hash(&mut h);
+            f(&mut h, v.offset.x);
+            f(&mut h, v.offset.y);
+            for s in &v.strokes {
+                s.color.hash(&mut h);
+                for x in [s.bounds.min.x, s.bounds.min.y, s.bounds.max.x, s.bounds.max.y] {
+                    f(&mut h, x);
+                }
+            }
+        }
+        LayerKind::Text(t) => {
+            (3u8, &t.text, &t.family, &t.style, t.color, t.bg).hash(&mut h);
+            for v in [t.size, t.wrap, t.pos.x, t.pos.y, t.rotation] {
+                f(&mut h, v);
+            }
+        }
+        LayerKind::Shape(s) => {
+            (4u8, format!("{:?}", s.kind), s.color, s.fill).hash(&mut h);
+            for v in [s.a.x, s.a.y, s.b.x, s.b.y, s.width, s.rotation] {
+                f(&mut h, v);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Draws a layer placed in a space: its flattened 2D content on a subdivided mesh
+/// through the space camera's homography.
+fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, h: &crate::persp::M3, xf: &Xf, cache: &mut TexCache, view_w: Rect) {
+    use crate::persp::apply_h;
+    let Some(b) = layer.bounds() else { return };
+    let corners: Option<Vec<Pos2>> = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].iter().map(|p| apply_h(h, *p)).collect();
+    let Some(corners) = corners else { return };
+    if !Rect::from_points(&corners).intersects(view_w) {
+        return;
+    }
+    let mag = crate::export::magnification(h, b) * xf.zoom * ctx.pixels_per_point();
+    let res = 2f32.powf(mag.max(1e-3).log2().ceil()).clamp(1.0 / 16.0, 2.0);
+    let Some((tex, rect, size)) = cache.placed(ctx, layer, res) else { return };
+    const N: usize = 12;
+    let mut m = Mesh::with_texture(tex);
+    let color = tint(layer.opacity);
+    for j in 0..=N {
+        for i in 0..=N {
+            let t = vec2(i as f32 / N as f32, j as f32 / N as f32);
+            let p = rect.min + rect.size() * t;
+            let Some(s) = apply_h(h, p) else { return };
+            let uv = ((p - rect.min) / size).to_pos2();
+            m.vertices.push(egui::epaint::Vertex { pos: xf.w2s(s), uv, color });
+        }
+    }
+    for j in 0..N as u32 {
+        for i in 0..N as u32 {
+            let a = j * (N as u32 + 1) + i;
+            let c = a + N as u32 + 1;
+            m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+        }
+    }
+    painter.add(Shape::mesh(m));
 }
 
 fn tint(op: f32) -> Color32 {
@@ -235,11 +343,18 @@ pub fn draw_doc(
     let view = painter.clip_rect();
     let view_w = Rect::from_min_max(xf.s2w(view.min), xf.s2w(view.max));
     let ppp = ctx.pixels_per_point();
-    for layer in &doc.layers {
+    let cams = crate::persp::cameras(&doc.spaces);
+    for layer in doc.draw_order(&cams) {
         if let LayerKind::Image(im) = &layer.kind {
             cache.touch_image(im);
         }
         if !layer.visible || layer.opacity <= 0.0 {
+            continue;
+        }
+        if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
+            if skip_text != Some(layer.id) {
+                draw_placed(painter, ctx, layer, &pl.homography(cam), xf, cache, view_w);
+            }
             continue;
         }
         let op = layer.opacity;

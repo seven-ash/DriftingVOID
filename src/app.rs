@@ -781,6 +781,30 @@ impl App {
                 app.doc.spaces.push(sp);
                 app.space_sel = Some(id);
                 app.tool = Tool::Space;
+                if let Ok(mode) = std::env::var("DV_SPACE_DEMO") {
+                    // two text layers dropped in: one kept camera-facing, one snapped to
+                    // the space axes; "select" leaves the first selected in the select tool
+                    let o = app.doc.spaces.last().unwrap().origin;
+                    let t1 = app.new_text_layer(o - vec2(160.0, 120.0), "Drifting VOID".into());
+                    let t2 = app.new_text_layer(o + vec2(-140.0, -40.0), "벽에 붙인 글자".into());
+                    app.put_in_space(t1, id);
+                    app.put_in_space(t2, id);
+                    if let Some(pl) = app.doc.get_mut(t2).and_then(|l| l.place.as_mut()) {
+                        pl.align_to_axes();
+                        pl.pos = [0.0, 0.0, 0.0];
+                    }
+                    if mode == "select" {
+                        app.tool = Tool::Select;
+                        app.sel = Some(t1);
+                    }
+                    if let Ok(out) = std::env::var("DV_SPACE_EXPORT") {
+                        if let Some(b) = app.doc.content_bounds() {
+                            if let Ok(pm) = crate::export::render(&app.doc, b, 1.0, Some(Color32::WHITE)) {
+                                let _ = crate::export::save(&pm, std::path::Path::new(&out), 90);
+                            }
+                        }
+                    }
+                }
             }
         }
         if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
@@ -1024,7 +1048,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None });
         self.sel = Some(id);
         self.mark();
         id
@@ -1240,6 +1264,39 @@ impl App {
         }
     }
 
+    /// Puts a layer into a space on a camera-facing plane, so it looks exactly as
+    /// before; the layer moves next to the space's other members in the stack.
+    fn put_in_space(&mut self, id: LayerId, sid: u64) {
+        let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
+        let name = sp.name.clone();
+        let cam = match crate::persp::solve(sp) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("{name}: {e}");
+                return;
+            }
+        };
+        let Some(i) = self.doc.index_of(id) else { return };
+        let Some(b) = self.doc.layers[i].bounds() else { return };
+        self.doc.layers[i].place = Some(crate::persp::Placement::facing(sid, &cam, b.center()));
+        if let Some(top) = self.doc.layers.iter().rposition(|l| l.id != id && l.place.as_ref().is_some_and(|p| p.space == sid)) {
+            let l = self.doc.layers.remove(i);
+            let to = if top > i { top } else { top + 1 };
+            self.doc.layers.insert(to.min(self.doc.layers.len()), l);
+        }
+        self.status = format!("{name}에 넣음");
+        self.mark();
+    }
+
+    fn take_out_of_space(&mut self, id: LayerId) {
+        if let Some(l) = self.doc.get_mut(id) {
+            if l.place.take().is_some() {
+                self.status = "공간에서 뺌 (원래 2D 모습으로)".into();
+                self.mark();
+            }
+        }
+    }
+
     fn new_paint_layer(&mut self, vector: bool) -> LayerId {
         let (name, kind) = if vector {
             let n = self.doc.count_kind(|k| matches!(k, LayerKind::Vector(_))) + 1;
@@ -1260,6 +1317,7 @@ impl App {
         let usable = |l: &Layer| {
             l.visible
                 && !l.locked
+                && l.place.is_none()
                 && match l.kind {
                     LayerKind::Vector(_) => vector,
                     LayerKind::Raster(_) => !vector,
@@ -1278,11 +1336,21 @@ impl App {
         self.new_paint_layer(vector)
     }
 
-    fn hit_layer(&self, w: Pos2, tol: f32) -> Option<LayerId> {
-        for l in self.doc.layers.iter().rev() {
+    fn hit_layer(&self, w0: Pos2, tol0: f32) -> Option<LayerId> {
+        let cams = crate::persp::cameras(&self.doc.spaces);
+        for l in self.doc.draw_order(&cams).into_iter().rev() {
             if !l.visible || l.locked {
                 continue;
             }
+            // placed layers: test in their 2D content coordinates
+            let (w, tol) = match l.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| pl.homography(c))) {
+                Some(h) => {
+                    let Some(q) = crate::persp::invert(&h).and_then(|hi| crate::persp::apply_h(&hi, w0)) else { continue };
+                    let m = l.bounds().map_or(1.0, |b| crate::export::magnification(&h, b));
+                    (q, tol0 / m.max(1e-3))
+                }
+                None => (w0, tol0),
+            };
             let hit = match &l.kind {
                 LayerKind::Image(im) => im.contains(w),
                 LayerKind::Text(t) => {
@@ -1485,6 +1553,9 @@ impl App {
         let xf = self.xf();
         let mut out = Vec::new();
         let Some(l) = self.sel_layer() else { return out };
+        if l.place.is_some() {
+            return out;
+        }
         if l.locked || !self.extra_sel.is_empty() {
             return out;
         }
@@ -1710,7 +1781,7 @@ impl App {
             }
             Tool::Text => {
                 let hit = self.doc.layers.iter().rev().find(|l| {
-                    l.visible && !l.locked && matches!(&l.kind, LayerKind::Text(t) if {
+                    l.visible && !l.locked && l.place.is_none() && matches!(&l.kind, LayerKind::Text(t) if {
                         let r = crate::text::layout(t).rect(t.pos);
                         r.expand(tol).contains(crate::doc::rot_about(w, r.center(), -t.rotation))
                     })
@@ -1997,7 +2068,18 @@ impl App {
                     if d.x.abs() > d.y.abs() { d.y = 0.0 } else { d.x = 0.0 }
                 }
                 let mut l = orig.clone();
-                l.translate(d);
+                let cam = orig.place.as_ref().and_then(|pl| self.doc.spaces.iter().find(|s| s.id == pl.space)).and_then(|s| crate::persp::solve(s).ok());
+                match (orig.place.as_ref(), cam) {
+                    (Some(o), Some(cam)) => {
+                        // slide along the layer's own plane under the pointer
+                        if let (Some(a), Some(b)) = (o.ray_hit(&cam, *start), o.ray_hit(&cam, *start + d)) {
+                            let mut pl = o.clone();
+                            pl.shift_world(crate::persp::sub(b, a));
+                            l.place = Some(pl);
+                        }
+                    }
+                    _ => l.translate(d),
+                }
                 if let Some(i) = self.doc.index_of(*id) {
                     self.doc.layers[i] = l;
                 }
@@ -3230,6 +3312,9 @@ impl App {
         let mut changed = false;
         let mut pal_req: PalReq = None;
         let mut start_crop = false;
+        let cams = crate::persp::cameras(&self.doc.spaces);
+        let spaces: Vec<(u64, String, bool)> = self.doc.spaces.iter().map(|s| (s.id, s.name.clone(), cams.contains_key(&s.id))).collect();
+        let mut space_req: Option<Option<u64>> = None;
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -3383,12 +3468,80 @@ impl App {
                     }
                 }
             }
+            if !spaces.is_empty() {
+                ui.separator();
+                let cur = l.place.as_ref().map(|p| p.space);
+                let shown = cur.and_then(|c| spaces.iter().find(|s| s.0 == c)).map_or("없음".to_string(), |s| s.1.clone());
+                ui.horizontal(|ui| {
+                    ui.label("3D 공간");
+                    egui::ComboBox::from_id_salt(("space_of", id))
+                        .selected_text(shown)
+                        .width(120.0)
+                        .popup_style(theme::glass_popup_style(false))
+                        .show_ui(ui, |ui| {
+                            theme::glass_popup(ui, |ui| {
+                                if ui.selectable_label(cur.is_none(), "없음").clicked() && cur.is_some() {
+                                    space_req = Some(None);
+                                }
+                                for (sid, name, ok) in &spaces {
+                                    ui.add_enabled_ui(*ok, |ui| {
+                                        if ui.selectable_label(cur == Some(*sid), name.as_str()).clicked() && cur != Some(*sid) {
+                                            space_req = Some(Some(*sid));
+                                        }
+                                    });
+                                }
+                            })
+                        });
+                });
+                if let Some(pl) = &mut l.place {
+                    for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
+                        let mut v = pl.pos[i] as f32;
+                        if ui.add(crate::dial::Dial::new(&mut v, -5000.0..=5000.0).step(10.0).text(format!("위치 {ax}")).default(0.0)).changed() {
+                            pl.pos[i] = v as f64;
+                            changed = true;
+                        }
+                    }
+                    for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
+                        let mut v = pl.rot[i] as f32;
+                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0)).changed() {
+                            pl.rot[i] = v as f64;
+                            changed = true;
+                        }
+                    }
+                    let mut pct = (pl.scale * 100.0) as f32;
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0)).changed() {
+                        pl.scale = pct as f64 / 100.0;
+                        changed = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("공간 축에 맞추기").on_hover_text("가장 가까운 벽이나 바닥 방향으로 붙여").clicked() {
+                            pl.align_to_axes();
+                            changed = true;
+                        }
+                        if let Some(cam) = cams.get(&pl.space) {
+                            if ui.button("2D 모습 유지").on_hover_text("지금 카메라 기준으로 다시 맞춰 (소실선을 고친 뒤)").clicked() {
+                                let f = crate::persp::Placement::facing(pl.space, cam, pl.anchor);
+                                pl.base_r = f.base_r;
+                                pl.base_t = f.base_t;
+                                pl.base_k = f.base_k;
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.small("축은 넣을 때의 카메라 정면 기준 · 1단위 = 원점에서 1px");
+                }
+            }
         }
         if changed {
             self.mark();
         }
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
+        }
+        match space_req {
+            Some(Some(sid)) => self.put_in_space(id, sid),
+            Some(None) => self.take_out_of_space(id),
+            None => {}
         }
         if start_crop {
             self.set_tool(Tool::Crop);
@@ -3439,15 +3592,45 @@ impl App {
                 .collect()
         };
         let n = self.doc.layers.len();
+        let cams = crate::persp::cameras(&self.doc.spaces);
+        let mut header_done: Vec<u64> = Vec::new();
+        let mut headers: Vec<(u64, Rect)> = Vec::new();
+        let mut space_click = None;
+        let mut drop_space = None;
+        // empty spaces first
+        for sp in &self.doc.spaces {
+            if !self.doc.layers.iter().any(|m| m.place.as_ref().is_some_and(|p| p.space == sp.id)) {
+                let resp = space_header(ui, &sp.name, 0, cams.contains_key(&sp.id), width, self.space_sel == Some(sp.id));
+                headers.push((sp.id, resp.rect));
+                if resp.clicked() {
+                    space_click = Some(sp.id);
+                }
+                header_done.push(sp.id);
+            }
+        }
         let mut rows: Vec<(usize, Rect)> = Vec::with_capacity(n);
         let renaming = self.renaming;
         let mut rename_done = false;
         for di in 0..n {
             let li = n - 1 - di; // list shows the top layer first
+            let member_of = self.doc.layers[li].place.as_ref().map(|p| p.space);
+            if let Some(sid) = member_of.filter(|s| !header_done.contains(s)) {
+                header_done.push(sid);
+                if let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) {
+                    let cnt = self.doc.layers.iter().filter(|m| m.place.as_ref().is_some_and(|p| p.space == sid)).count();
+                    let resp = space_header(ui, &sp.name, cnt, cams.contains_key(&sid), width, self.space_sel == Some(sid));
+                    headers.push((sid, resp.rect));
+                    if resp.clicked() {
+                        space_click = Some(sid);
+                    }
+                }
+            }
             let l = &mut self.doc.layers[li];
             let selected = self.sel == Some(l.id) || self.extra_sel.contains(&l.id);
             let (r, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click_and_drag());
             rows.push((li, r));
+            // members of a space are indented under its folder row
+            let r = if member_of.is_some() { Rect::from_min_max(r.min + vec2(14.0, 0.0), r.max) } else { r };
             let eye_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(26.0, 26.0));
             let lock_r = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(26.0, 26.0));
             let thumb_r = Rect::from_center_size(pos2(r.left() + 44.0, r.center().y), vec2(24.0, 24.0));
@@ -3555,9 +3738,19 @@ impl App {
                 }
                 let y = if slot < rows.len() { rows[slot].1.top() - 1.0 } else { rows[rows.len() - 1].1.bottom() + 1.0 };
                 let x0 = rows[0].1.left();
-                ui.painter().line_segment([pos2(x0 + 6.0, y), pos2(x0 + width - 6.0, y)], Stroke::new(2.0, ACCENT));
+                let over = headers.iter().find(|(_, hr)| hr.contains(pp)).copied();
+                match over {
+                    Some((_, hr)) => {
+                        ui.painter().rect_stroke(hr, 8.0, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+                    }
+                    None => {
+                        ui.painter().line_segment([pos2(x0 + 6.0, y), pos2(x0 + width - 6.0, y)], Stroke::new(2.0, ACCENT));
+                    }
+                }
                 if released {
-                    if let Some(from) = self.doc.index_of(did) {
+                    if let Some((sid, _)) = over {
+                        drop_space = Some((did, sid));
+                    } else if let Some(from) = self.doc.index_of(did) {
                         // display slot -> layer index (list is top-first)
                         let n = self.doc.layers.len();
                         let mut to = n - slot; // index the moved layer should occupy before removal adjust
@@ -3585,6 +3778,13 @@ impl App {
             } else {
                 self.select_only(Some(id));
             }
+        }
+        if let Some(sid) = space_click {
+            self.space_sel = Some(sid);
+            self.space_new = false;
+        }
+        if let Some((did, sid)) = drop_space {
+            self.put_in_space(did, sid);
         }
         if changed {
             self.mark();
@@ -4252,7 +4452,7 @@ impl App {
         }
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
         let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
-        let mut ch = ui.checkbox(&mut grid, "바닥 격자").changed();
+        let mut ch = ui.checkbox(&mut grid, "격자").changed();
         ch |= ui.add_enabled(all3, egui::Checkbox::new(&mut fpp, "주점도 추정 (세 축 모두 2개 이상)")).changed();
         let img_b = self.sel.and_then(|id| self.doc.get(id)).filter(|l| matches!(l.kind, LayerKind::Image(_))).and_then(|l| l.bounds());
         let (mut clear, mut fit, mut del) = (false, false, false);
@@ -4289,16 +4489,24 @@ impl App {
 
     fn draw_spaces(&self, painter: &egui::Painter, xf: &Xf) {
         use crate::persp::{AXIS_COLORS, AXIS_NAMES, V3};
-        if self.tool != Tool::Space {
+        let editing = self.tool == Tool::Space;
+        // outside the space tool only the grid of the selected layer's space shows
+        let focus = self.sel_layer().and_then(|l| l.place.as_ref()).map(|p| p.space);
+        if !editing && focus.is_none() {
             return;
         }
         for s in &self.doc.spaces {
-            let active = self.space_sel == Some(s.id) && !self.space_new;
+            if !editing && Some(s.id) != focus {
+                continue;
+            }
+            let active = !editing || (self.space_sel == Some(s.id) && !self.space_new);
             let sr = xf.rect_w2s(s.frame);
-            let col = if active { INK } else { INK_3 };
-            let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
-            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.2, col), 6.0, 4.0));
-            painter.text(sr.left_top() - vec2(0.0, 4.0), Align2::LEFT_BOTTOM, &s.name, FontId::proportional(12.0), col);
+            if editing {
+                let col = if active { INK } else { INK_3 };
+                let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(1.2, col), 6.0, 4.0));
+                painter.text(sr.left_top() - vec2(0.0, 4.0), Align2::LEFT_BOTTOM, &s.name, FontId::proportional(12.0), col);
+            }
             if !active {
                 continue;
             }
@@ -4307,33 +4515,15 @@ impl App {
             if let Some(cam) = &cam {
                 let seg = |a: V3, b: V3| cam.project_segment(a, b).map(|(p, q)| [xf.w2s(p), xf.w2s(q)]);
                 if s.grid {
-                    let g = nice_f64(s.frame.width().max(s.frame.height()) as f64 / 12.0);
-                    let n = 12i32;
-                    let ext = g * n as f64;
-                    for k in -n..=n {
-                        if k == 0 {
-                            continue;
-                        }
-                        let t = k as f64 * g;
-                        let c = Color32::from_white_alpha(if k % 5 == 0 { 120 } else { 60 });
-                        for sgm in [seg([-ext, t, 0.0], [ext, t, 0.0]), seg([t, -ext, 0.0], [t, ext, 0.0])].into_iter().flatten() {
-                            pc.line_segment(sgm, Stroke::new(1.0, c));
+                    for (a, b, wgt) in crate::persp::depth_grid(cam, s.frame) {
+                        if let Some(sgm) = seg(a, b) {
+                            let c = Color32::from_white_alpha([36, 72, 150][wgt as usize]);
+                            pc.line_segment(sgm, Stroke::new(if wgt == 2 { 1.4 } else { 1.0 }, c));
                         }
                     }
-                    for ax in 0..3 {
-                        let mut e = [0.0; 3];
-                        e[ax] = if ax == 2 { ext * 0.4 } else { ext };
-                        if let Some(sgm) = seg([0.0; 3], e) {
-                            pc.line_segment(sgm, Stroke::new(1.6, AXIS_COLORS[ax]));
-                        }
-                        if ax < 2 {
-                            let mut ne = [0.0; 3];
-                            ne[ax] = -ext;
-                            if let Some(sgm) = seg([0.0; 3], ne) {
-                                pc.line_segment(sgm, Stroke::new(1.0, AXIS_COLORS[ax].gamma_multiply(0.4)));
-                            }
-                        }
-                    }
+                }
+                if !editing {
+                    continue;
                 }
                 // horizon: the image of the ground plane's line at infinity, l = K^-T n
                 let n = cam.axis_dir(2);
@@ -4357,6 +4547,9 @@ impl App {
                         painter.text(v + vec2(8.0, -8.0), Align2::LEFT_BOTTOM, AXIS_NAMES[ax], FontId::proportional(12.0), AXIS_COLORS[ax]);
                     }
                 }
+            }
+            if !editing {
+                continue;
             }
             for (i, l) in s.lines.iter().enumerate() {
                 let c = AXIS_COLORS[(l.axis as usize).min(2)];
@@ -4473,15 +4666,24 @@ impl App {
                 handle_box(painter, *p, ACCENT);
             }
         }
+        let cams = crate::persp::cameras(&self.doc.spaces);
         for id in &self.extra_sel {
-            if let Some(b) = self.doc.get(*id).and_then(|l| l.bounds()) {
-                let sr = xf.rect_w2s(b).expand(2.0);
-                let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+            if let Some(q) = self.doc.get(*id).and_then(|l| l.shown_quad(&cams)) {
+                let mut pts: Vec<Pos2> = q.iter().map(|p| xf.w2s(*p)).collect();
+                pts.push(pts[0]);
                 painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, ACCENT), 5.0, 4.0));
             }
         }
         let Some(l) = self.sel_layer() else { return };
         if self.editing == Some(l.id) {
+            return;
+        }
+        if l.place.is_some() {
+            if let Some(q) = l.shown_quad(&cams) {
+                let mut pts: Vec<Pos2> = q.iter().map(|p| xf.w2s(*p)).collect();
+                pts.push(pts[0]);
+                painter.add(Shape::line(pts, Stroke::new(1.5, accent)));
+            }
             return;
         }
         match &l.kind {
@@ -4936,18 +5138,28 @@ fn snap_angle(a: f32, start: f32, mods: Modifiers) -> f32 {
     }
 }
 
+/// Folder row of a 3D space in the layer list.
+fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width: f32, active: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+    let p = ui.painter();
+    if active {
+        p.rect_filled(r, 8.0, FILL_1);
+    } else if resp.hovered() {
+        p.rect_filled(r, 8.0, FILL_1.gamma_multiply(0.6));
+    }
+    let cy = r.center().y;
+    theme::tool_icon(p, Tool::Space, Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(18.0, 18.0)), INK_2);
+    p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_BODY), INK_2);
+    let info = if solved { format!("{count}") } else { "선 부족".to_string() };
+    p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, info, FontId::proportional(theme::TEXT_SMALL), INK_3);
+    resp.on_hover_text("공간 폴더 · 레이어를 끌어다 놓으면 이 공간에 들어가")
+}
+
 /// Distance from `p` to the segment `a`-`b`.
 fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
     let t = if ab.length_sq() > 0.0 { ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
     p.distance(a + ab * t)
-}
-
-/// Nearest 1-2-5 x 10^n.
-fn nice_f64(x: f64) -> f64 {
-    let e = 10f64.powf(x.max(1e-9).log10().floor());
-    let m = x / e;
-    (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
 }
 
 fn handle_box(painter: &egui::Painter, p: Pos2, c: Color32) {

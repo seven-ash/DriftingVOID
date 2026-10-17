@@ -226,6 +226,11 @@ impl Camera {
         Some(pos2((self.f * x[0] / x[2] + self.c[0]) as f32, (self.f * x[1] / x[2] + self.c[1]) as f32))
     }
 
+    /// Camera depth of the world origin (1 world unit = 1 px there).
+    pub fn origin_depth(&self) -> f64 {
+        self.to_cam([0.0; 3])[2]
+    }
+
     pub fn project(&self, w: V3) -> Option<Pos2> {
         self.project_cam(self.to_cam(w))
     }
@@ -595,6 +600,211 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
     })
 }
 
+// ---------------------------------------------------------------- placement (phase 2)
+
+/// Rotation from Blender-style XYZ Euler angles in degrees: R = Rz · Ry · Rx.
+pub fn euler_xyz(deg: V3) -> M3 {
+    let (a, b, c) = (deg[0].to_radians(), deg[1].to_radians(), deg[2].to_radians());
+    let rx = [[1.0, 0.0, 0.0], [0.0, a.cos(), -a.sin()], [0.0, a.sin(), a.cos()]];
+    let ry = [[b.cos(), 0.0, b.sin()], [0.0, 1.0, 0.0], [-b.sin(), 0.0, b.cos()]];
+    let rz = [[c.cos(), -c.sin(), 0.0], [c.sin(), c.cos(), 0.0], [0.0, 0.0, 1.0]];
+    mul_mm(&rz, &mul_mm(&ry, &rx))
+}
+
+pub fn invert(m: &M3) -> Option<M3> {
+    let c0 = cross(m[1], m[2]);
+    let det = dot(m[0], c0);
+    if det.abs() < 1e-300 {
+        return None;
+    }
+    let c1 = cross(m[2], m[0]);
+    let c2 = cross(m[0], m[1]);
+    // inverse = adj / det, with adj columns = cofactor rows
+    Some([
+        [c0[0] / det, c1[0] / det, c2[0] / det],
+        [c0[1] / det, c1[1] / det, c2[1] / det],
+        [c0[2] / det, c1[2] / det, c2[2] / det],
+    ])
+}
+
+/// Applies a homography; None when the point maps to or behind the camera.
+pub fn apply_h(h: &M3, p: Pos2) -> Option<Pos2> {
+    let v = mul_mv(h, [p.x as f64, p.y as f64, 1.0]);
+    (v[2] > 1e-12).then(|| pos2((v[0] / v[2]) as f32, (v[1] / v[2]) as f32))
+}
+
+/// A layer placed in a space. Its 2D content is drawn on a plane; content point `p`
+/// sits at plane coordinates `p − anchor` (pixels, x right, y down).
+///
+/// plane → world: `X = base_t + base_r · base_k · (pos + R(rot) · scale · [q, 0])`.
+/// `base` is set when the layer is dropped in (camera-facing, exact 2D look) and
+/// `pos/rot/scale` are what the user edits, so they start at zero.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Placement {
+    pub space: u64,
+    pub anchor: Pos2,
+    pub base_r: M3,
+    pub base_t: V3,
+    pub base_k: f64,
+    pub pos: V3,
+    /// Degrees, XYZ order.
+    pub rot: V3,
+    pub scale: f64,
+}
+
+impl Placement {
+    /// A plane parallel to the image plane at the world origin's depth, through
+    /// `anchor`. Such a plane projects by a pure similarity, so the layer looks
+    /// exactly as it did in 2D.
+    pub fn facing(space: u64, cam: &Camera, anchor: Pos2) -> Self {
+        let z0 = cam.origin_depth().max(1e-6);
+        let xc = [(anchor.x as f64 - cam.c[0]) / cam.f * z0, (anchor.y as f64 - cam.c[1]) / cam.f * z0, z0];
+        let rt = transpose(&cam.r);
+        Self {
+            space,
+            anchor,
+            base_r: rt,
+            base_t: add(cam.center, mul_mv(&rt, xc)),
+            base_k: z0 / cam.f,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            scale: 1.0,
+        }
+    }
+
+    /// Plane → world as (linear part, translation).
+    pub fn world_affine(&self) -> (M3, V3) {
+        let lin = mul_mm(&self.base_r, &euler_xyz(self.rot));
+        let k = self.base_k * self.scale;
+        let lin = [
+            [lin[0][0] * k, lin[0][1] * k, lin[0][2] * k],
+            [lin[1][0] * k, lin[1][1] * k, lin[1][2] * k],
+            [lin[2][0] * k, lin[2][1] * k, lin[2][2] * k],
+        ];
+        (lin, add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k)))
+    }
+
+    /// Unit normal of the plane in world space.
+    pub fn normal(&self) -> V3 {
+        let (m, _) = self.world_affine();
+        normalize(cross([m[0][0], m[1][0], m[2][0]], [m[0][1], m[1][1], m[2][1]]))
+    }
+
+    /// Homography from 2D content coordinates to canvas pixels.
+    pub fn homography(&self, cam: &Camera) -> M3 {
+        let (m, t) = self.world_affine();
+        let a = mul_mm(&cam.r, &m);
+        let b = mul_mv(&cam.r, sub(t, cam.center));
+        let k = [[cam.f, 0.0, cam.c[0]], [0.0, cam.f, cam.c[1]], [0.0, 0.0, 1.0]];
+        let p = [[a[0][0], a[0][1], b[0]], [a[1][0], a[1][1], b[1]], [a[2][0], a[2][1], b[2]]];
+        let (ax, ay) = (self.anchor.x as f64, self.anchor.y as f64);
+        let sh = [[1.0, 0.0, -ax], [0.0, 1.0, -ay], [0.0, 0.0, 1.0]];
+        mul_mm(&mul_mm(&k, &p), &sh)
+    }
+
+    /// Camera depth of the plane origin (for back-to-front sorting).
+    pub fn depth(&self, cam: &Camera) -> f64 {
+        let (_, t) = self.world_affine();
+        cam.to_cam(t)[2]
+    }
+
+    /// Where the camera ray through canvas point `p` meets this layer's plane (world).
+    pub fn ray_hit(&self, cam: &Camera, p: Pos2) -> Option<V3> {
+        let (_, t) = self.world_affine();
+        let n = self.normal();
+        let d = cam.ray(p);
+        let den = dot(n, d);
+        if den.abs() < 1e-12 {
+            return None;
+        }
+        let s = dot(n, sub(t, cam.center)) / den;
+        (s > 0.0).then(|| add(cam.center, scale(d, s)))
+    }
+
+    /// Moves the plane by a world-space offset (expressed back in `pos`).
+    pub fn shift_world(&mut self, d: V3) {
+        let l = scale(mul_mv(&transpose(&self.base_r), d), 1.0 / self.base_k);
+        self.pos = add(self.pos, l);
+    }
+
+    /// Snaps `base_r` to the nearest right-handed set of world axes, so the layer lies
+    /// flat on a wall or floor of the space (it turns visibly).
+    pub fn align_to_axes(&mut self) {
+        let col = |i: usize| [self.base_r[0][i], self.base_r[1][i], self.base_r[2][i]];
+        let snap = |v: V3, skip: Option<usize>| {
+            let i = (0..3).filter(|&i| Some(i) != skip).max_by(|&a, &b| v[a].abs().partial_cmp(&v[b].abs()).unwrap()).unwrap();
+            let mut e = [0.0; 3];
+            e[i] = v[i].signum();
+            (e, i)
+        };
+        let (c0, i0) = snap(col(0), None);
+        let (c1, _) = snap(col(1), Some(i0));
+        let c2 = cross(c0, c1);
+        self.base_r = [[c0[0], c1[0], c2[0]], [c0[1], c1[1], c2[1]], [c0[2], c1[2], c2[2]]];
+    }
+}
+
+/// Solved cameras of all spaces that have enough lines.
+pub fn cameras(spaces: &[Space]) -> std::collections::HashMap<u64, Camera> {
+    spaces.iter().filter_map(|s| solve(s).ok().map(|c| (s.id, c))).collect()
+}
+
+/// Depth grid (option C in docs/SPACES.md): slices across the world axis closest to
+/// the view direction, at equal world steps, plus the four rails joining their
+/// corners and a cell grid on the depth-0 slice. Returns world segments with a weight
+/// (0 faint, 1 normal, 2 strong).
+pub fn depth_grid(cam: &Camera, frame: Rect) -> Vec<(V3, V3, u8)> {
+    let fwd = [cam.r[2][0], cam.r[2][1], cam.r[2][2]];
+    let d = (0..3).max_by(|&a, &b| fwd[a].abs().partial_cmp(&fwd[b].abs()).unwrap()).unwrap();
+    let sd = fwd[d].signum();
+    let (mut a, mut b) = ((d + 1) % 3, (d + 2) % 3);
+    // a: the axis that reads as horizontal on screen
+    if cam.r[0][a].abs() < cam.r[0][b].abs() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let long = frame.width().max(frame.height()) as f64;
+    let g = {
+        let x = long / 8.0;
+        let e = 10f64.powf(x.log10().floor());
+        let m = x / e;
+        (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
+    };
+    let ea = (frame.width() as f64 * 0.5 / g).ceil() * g;
+    let eb = (frame.height() as f64 * 0.5 / g).ceil() * g;
+    let pt = |td: f64, ua: f64, ub: f64| {
+        let mut p = [0.0; 3];
+        p[d] = td;
+        p[a] = ua;
+        p[b] = ub;
+        p
+    };
+    // with Z (up) across the slices they stand on the floor instead of straddling it
+    let (blo, bhi) = if b == 2 { (0.0, 2.0 * eb) } else { (-eb, eb) };
+    let mut out = Vec::new();
+    let (k0, k1) = (-3i32, 12i32);
+    for k in k0..=k1 {
+        let t = k as f64 * g * sd;
+        let w = if k == 0 { 2 } else { 1 };
+        let c = [pt(t, -ea, blo), pt(t, ea, blo), pt(t, ea, bhi), pt(t, -ea, bhi)];
+        for i in 0..4 {
+            out.push((c[i], c[(i + 1) % 4], w));
+        }
+    }
+    for (ua, ub) in [(-ea, blo), (ea, blo), (ea, bhi), (-ea, bhi)] {
+        out.push((pt(k0 as f64 * g * sd, ua, ub), pt(k1 as f64 * g * sd, ua, ub), 1));
+    }
+    let na = (ea / g).round() as i32;
+    for i in -na + 1..na {
+        out.push((pt(0.0, i as f64 * g, blo), pt(0.0, i as f64 * g, bhi), 0));
+    }
+    let mut v = blo + g;
+    while v < bhi - g * 0.5 {
+        out.push((pt(0.0, -ea, v), pt(0.0, ea, v), 0));
+        v += g;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +924,65 @@ mod tests {
         sp.lines = lines_for(&t, &[0, 1], 0.0);
         sp.lines.truncate(5); // 4 X + 1 Y
         assert!(solve(&sp).is_err());
+    }
+
+    #[test]
+    fn facing_keeps_the_2d_look() {
+        let t = truth();
+        for anchor in [pos2(800.0, 500.0), pos2(150.0, 900.0), pos2(1500.0, 80.0)] {
+            let pl = Placement::facing(1, &t, anchor);
+            let h = pl.homography(&t);
+            for p in [anchor, pos2(0.0, 0.0), pos2(1600.0, 1000.0), anchor + egui::vec2(-333.0, 77.0)] {
+                let q = apply_h(&h, p).unwrap();
+                assert!(q.distance(p) < 1e-3, "{p:?} -> {q:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_edits_and_inverse() {
+        let t = truth();
+        let mut pl = Placement::facing(1, &t, pos2(700.0, 450.0));
+        pl.rot = [20.0, -35.0, 10.0];
+        pl.scale = 1.3;
+        pl.pos = [40.0, -10.0, 200.0];
+        let h = pl.homography(&t);
+        let hi = invert(&h).unwrap();
+        let p = pos2(760.0, 420.0);
+        let back = apply_h(&hi, apply_h(&h, p).unwrap()).unwrap();
+        assert!(back.distance(p) < 1e-3);
+        // the ray through a projected point hits the plane at that point's world position
+        let (m, tr) = pl.world_affine();
+        let q = [(p.x - 700.0) as f64, (p.y - 450.0) as f64, 0.0];
+        let w = add(tr, mul_mv(&m, q));
+        let hit = pl.ray_hit(&t, apply_h(&h, p).unwrap()).unwrap();
+        assert!(norm(sub(hit, w)) < 1e-6 * norm(w).max(1.0));
+        // shifting by a world offset moves exactly that much
+        let before = pl.world_affine().1;
+        pl.shift_world([5.0, -7.0, 3.0]);
+        let after = pl.world_affine().1;
+        assert!(norm(sub(sub(after, before), [5.0, -7.0, 3.0])) < 1e-9);
+    }
+
+    #[test]
+    fn align_gives_a_rotation() {
+        let t = truth();
+        let mut pl = Placement::facing(1, &t, pos2(700.0, 450.0));
+        pl.align_to_axes();
+        let r = pl.base_r;
+        let det = dot(r[0], cross(r[1], r[2]));
+        assert!((det - 1.0).abs() < 1e-12);
+        for row in r {
+            assert!((norm(row) - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn placement_round_trips_through_json() {
+        let t = truth();
+        let mut pl = Placement::facing(7, &t, pos2(700.0, 450.0));
+        pl.rot = [12.5, -3.0, 44.0];
+        let back: Placement = serde_json::from_str(&serde_json::to_string(&pl).unwrap()).unwrap();
+        assert_eq!(back, pl);
     }
 }

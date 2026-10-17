@@ -305,9 +305,50 @@ pub struct Layer {
     pub locked: bool,
     pub opacity: f32,
     pub kind: LayerKind,
+    /// Set when the layer lives in a 3D space (drawn through that space's camera).
+    pub place: Option<crate::persp::Placement>,
 }
 
 impl Layer {
+    /// Where the layer shows on the canvas: its 2D bounds, or for a placed layer
+    /// the bounding box of its projected quad (None when it is behind the camera).
+    pub fn shown_bounds(&self, cams: &HashMap<u64, crate::persp::Camera>) -> Option<Rect> {
+        let b = self.bounds()?;
+        match &self.place {
+            None => Some(b),
+            Some(pl) => {
+                // an unsolvable space shows its layers flat
+                let Some(cam) = cams.get(&pl.space) else { return Some(b) };
+                let h = pl.homography(cam);
+                let pts: Option<Vec<Pos2>> = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()]
+                    .iter()
+                    .map(|p| crate::persp::apply_h(&h, *p))
+                    .collect();
+                pts.map(|p| Rect::from_points(&p))
+            }
+        }
+    }
+
+    /// Outline on the canvas (world points, closed): bounds corners, projected
+    /// when the layer is placed in a space.
+    pub fn shown_quad(&self, cams: &HashMap<u64, crate::persp::Camera>) -> Option<[Pos2; 4]> {
+        let b = self.bounds()?;
+        let c = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()];
+        match &self.place {
+            None => Some(c),
+            Some(pl) => {
+                let Some(cam) = cams.get(&pl.space) else { return Some(c) };
+                let h = pl.homography(cam);
+                Some([
+                    crate::persp::apply_h(&h, c[0])?,
+                    crate::persp::apply_h(&h, c[1])?,
+                    crate::persp::apply_h(&h, c[2])?,
+                    crate::persp::apply_h(&h, c[3])?,
+                ])
+            }
+        }
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             LayerKind::Image(_) => "사진",
@@ -403,16 +444,42 @@ impl Document {
     /// Inserts above `above` (or at the top) and returns the new id.
     pub fn insert(&mut self, name: String, kind: LayerKind, above: Option<LayerId>) -> LayerId {
         let id = self.new_id();
-        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind };
+        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None };
         let idx = above.and_then(|a| self.index_of(a)).map(|i| i + 1).unwrap_or(self.layers.len());
         self.layers.insert(idx, layer);
         id
     }
 
+    /// Layers in drawing order. Layers placed in a space are drawn together, far to
+    /// near by camera depth, where the space's lowest member sits in the stack.
+    pub fn draw_order<'a>(&'a self, cams: &HashMap<u64, crate::persp::Camera>) -> Vec<&'a Layer> {
+        let mut out = Vec::with_capacity(self.layers.len());
+        let mut done: Vec<u64> = Vec::new();
+        for l in &self.layers {
+            match l.place.as_ref().filter(|pl| cams.contains_key(&pl.space)) {
+                None => out.push(l),
+                Some(pl) if done.contains(&pl.space) => {}
+                Some(pl) => {
+                    let cam = &cams[&pl.space];
+                    let mut members: Vec<(&Layer, f64)> = self
+                        .layers
+                        .iter()
+                        .filter_map(|m| m.place.as_ref().filter(|p| p.space == pl.space).map(|p| (m, p.depth(cam))))
+                        .collect();
+                    members.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    out.extend(members.into_iter().map(|(m, _)| m));
+                    done.push(pl.space);
+                }
+            }
+        }
+        out
+    }
+
     pub fn content_bounds(&self) -> Option<Rect> {
+        let cams = crate::persp::cameras(&self.spaces);
         let mut acc: Option<Rect> = None;
         for l in self.layers.iter().filter(|l| l.visible) {
-            if let Some(b) = l.bounds() {
+            if let Some(b) = l.shown_bounds(&cams) {
                 acc = Some(acc.map_or(b, |a| a.union(b)));
             }
         }

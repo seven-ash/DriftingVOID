@@ -63,6 +63,8 @@ struct FileLayer {
     locked: bool,
     opacity: f32,
     kind: FileKind,
+    #[serde(default)]
+    place: Option<crate::persp::Placement>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -186,7 +188,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys }
                 }
             };
-            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind });
+            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone() });
         }
         let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
@@ -258,7 +260,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
             }
         };
         doc.next_id = doc.next_id.max(fl.id);
-        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind });
+        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place });
     }
     Ok(doc)
 }
