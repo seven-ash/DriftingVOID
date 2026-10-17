@@ -43,6 +43,13 @@ L line, A arrow, R rectangle, O ellipse, C crop, F export frame, K 3D space
 Drawing layers are created when you first draw, reused afterwards, and removed
 when empty. Photos are placed under drawing layers.
 
+## Video
+
+Drop a video (mp4, mov, mkv, webm, …) to bring it in as a layer showing a frame; play,
+scrub, step frames with `,` and `.`, and turn a frame into a photo layer from the
+properties panel. Needs ffmpeg (`winget install Gyan.FFmpeg`, or put it in
+`%APPDATA%\DriftingVOIDfmpeg`). See `docs/VIDEO.md` for the timeline and export plans.
+
 ## G/R/S and Space
 
 With the select tool, G/R/S moves/rotates/scales the selection from the keyboard (on
@@ -78,6 +85,7 @@ right-click cancels. Alt+G/R/S clears the value.
   two text layers into it, and `DV_SPACE_EXPORT=out.png` exports the result.
   `DV_SPACE_MASK="x0,y0,x1,y1"` sets a mask, `DV_LOUPE=1` holds a line end mid-drag (magnifier),
   `DV_WALL="x,y;x,y;x,y;x,y"` adds a wall with the second text on it, `DV_THICK=30` gives both texts thickness.
+- `DV_IMPORT="a.mp4;b.png"` imports files at start; `DV_PLAY=1` also plays the video.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
 
@@ -95,6 +103,7 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
+| `src/video.rs` | ffmpeg/ffprobe: probe, frame decode, streaming playback |
 | `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |
 | `src/dial.rs` | Focus-ring dial control with reset pin |
 | `src/calc.rs` | Maths parser for number fields |
@@ -103,6 +112,7 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/io.rs` | Image import and `.void` save/load |
 | `docs/ROADMAP.md` | Planned work and known issues |
 | `docs/CHANGELOG.md` | What shipped, per version |
+| `docs/VIDEO.md` | Video, audio, timeline, cameras: design and phases |
 | `docs/SPACES.md` | 3D spaces: design, maths, references, phases |
 | `assets/icon.svg`, `icon.ico`, `icon-256.png` | App icon (source, exe icon, window icon) |
 | `assets/icon-candidates/` | Other icon candidates (`preview.html` shows them all) |

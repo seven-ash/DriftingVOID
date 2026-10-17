@@ -27,7 +27,7 @@ pub fn decode_image(bytes: Vec<u8>, ext_hint: Option<&str>) -> Result<ImageSourc
         .and_then(|f| f.extensions_str().first().map(|s| s.to_string()))
         .or_else(|| ext_hint.map(|s| s.to_string()))
         .unwrap_or_else(|| "bin".into());
-    Ok(ImageSource { id: next_rev(), rgba: Arc::new(img.to_rgba8()), encoded: Arc::new(bytes), ext })
+    Ok(ImageSource { id: next_rev(), rgba: Arc::new(img.to_rgba8()), encoded: Arc::new(bytes), ext, logical: None })
 }
 
 pub fn load_image_file(path: &Path) -> Result<ImageSource, String> {
@@ -38,7 +38,7 @@ pub fn load_image_file(path: &Path) -> Result<ImageSource, String> {
 pub fn image_from_rgba(img: image::RgbaImage) -> ImageSource {
     let mut png = Vec::new();
     let _ = image::DynamicImage::ImageRgba8(img.clone()).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png);
-    ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(png), ext: "png".into() }
+    ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(png), ext: "png".into(), logical: None }
 }
 
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
@@ -69,7 +69,17 @@ struct FileLayer {
 
 #[derive(Serialize, Deserialize)]
 enum FileKind {
-    Image { file: String, center: [f32; 2], scale: f32, rotation: f32, crop: [f32; 4], adjust: Adjust },
+    Image {
+        file: String,
+        center: [f32; 2],
+        scale: f32,
+        rotation: f32,
+        crop: [f32; 4],
+        adjust: Adjust,
+        /// Video layers: the file reference; `file` then holds the current frame (PNG).
+        #[serde(default)]
+        video: Option<VideoRef>,
+    },
     Text {
         pos: [f32; 2],
         text: String,
@@ -134,9 +144,19 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     let file = match written.get(&im.src.id) {
                         Some(f) => f.clone(),
                         None => {
-                            let f = format!("images/{}.{}", im.src.id, im.src.ext);
+                            // video frames have no file bytes: store the frame as PNG
+                            let png;
+                            let (bytes, ext): (&[u8], &str) = if im.src.encoded.is_empty() {
+                                let mut v = Vec::new();
+                                let _ = image::DynamicImage::ImageRgba8((*im.src.rgba).clone()).write_to(&mut Cursor::new(&mut v), image::ImageFormat::Png);
+                                png = v;
+                                (&png, "png")
+                            } else {
+                                (&im.src.encoded, &im.src.ext)
+                            };
+                            let f = format!("images/{}.{}", im.src.id, ext);
                             zip.start_file(&f, stored).map_err(|e| e.to_string())?;
-                            zip.write_all(&im.src.encoded).map_err(|e| e.to_string())?;
+                            zip.write_all(bytes).map_err(|e| e.to_string())?;
                             written.insert(im.src.id, f.clone());
                             f
                         }
@@ -148,6 +168,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                         rotation: im.rotation,
                         crop: r2a(im.crop),
                         adjust: im.adjust,
+                        video: im.video.clone(),
                     }
                 }
                 LayerKind::Text(t) => FileKind::Text {
@@ -212,7 +233,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces };
     for fl in fd.layers {
         let kind = match fl.kind {
-            FileKind::Image { file, center, scale, rotation, crop, adjust } => {
+            FileKind::Image { file, center, scale, rotation, crop, adjust, video } => {
                 let src = match images.get(&file) {
                     Some(s) => s.clone(),
                     None => {
@@ -221,7 +242,11 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                         s
                     }
                 };
-                LayerKind::Image(ImageLayer { src, center: pos2(center[0], center[1]), scale, rotation, crop: a2r(crop), adjust })
+                let mut src = src;
+                if let Some(v) = &video {
+                    src.logical = Some([v.info.width, v.info.height]);
+                }
+                LayerKind::Image(ImageLayer { src, center: pos2(center[0], center[1]), scale, rotation, crop: a2r(crop), adjust, video })
             }
             FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation, blend } => LayerKind::Text(TextLayer {
                 pos: pos2(pos[0], pos[1]),
@@ -263,4 +288,30 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
         doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place });
     }
     Ok(doc)
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    #[test]
+    fn video_layer_round_trips() {
+        let info = crate::video::VideoInfo { width: 1920, height: 1080, fps: 30.0, duration: 8.0, audio: true, codec: "h264".into() };
+        // a preview-sized frame without file bytes, as video frames are
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]) };
+        let mut im = ImageLayer::new(src, pos2(10.0, 20.0));
+        im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, slot: 1 });
+        assert_eq!(im.crop.size(), vec2(1920.0, 1080.0));
+        let mut doc = Document::default();
+        doc.insert("v".into(), LayerKind::Image(im), None);
+        let path = std::env::temp_dir().join("dv_video_roundtrip.void");
+        save_project(&doc, &path).unwrap();
+        let back = load_project(&path).unwrap();
+        let LayerKind::Image(b) = &back.layers[0].kind else { panic!() };
+        let v = b.video.as_ref().unwrap();
+        assert_eq!((v.path.as_str(), v.time, v.speed, v.looping), ("C:/v/clip.mp4", 2.5, 2.0, true));
+        assert_eq!(v.info, info);
+        assert_eq!(b.src.size(), vec2(1920.0, 1080.0));
+        assert_eq!(b.src.rgba.dimensions(), (96, 54));
+    }
 }

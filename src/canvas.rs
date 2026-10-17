@@ -50,6 +50,8 @@ pub struct TexCache {
     /// Flattened layers placed in 3D spaces: (content key, texture, last frame,
     /// content rect, texture size).
     placed: HashMap<LayerId, (u64, TextureHandle, u64, Rect, Vec2)>,
+    /// Video layers: (frame source id + adjust key, texture, last frame), by slot.
+    videos: HashMap<u64, ((u64, u64), TextureHandle, u64)>,
 }
 
 impl TexCache {
@@ -64,6 +66,7 @@ impl TexCache {
         self.tiles.retain(|_, v| f - v.2 < 120);
         self.texts.retain(|_, v| f - v.2 < 120);
         self.placed.retain(|_, v| f - v.2 < 120);
+        self.videos.retain(|_, v| f - v.2 < 120);
     }
 
     /// Texture of a layer's 2D content at `res` texels per canvas pixel.
@@ -88,6 +91,25 @@ impl TexCache {
     pub fn image(&mut self, ctx: &Context, im: &ImageLayer) -> egui::TextureId {
         let key = (im.src.id, im.adjust.key());
         let frame = self.frame;
+        if let Some(v) = &im.video {
+            // frames change all the time: keep one texture per video and refill it
+            if let Some(e) = self.videos.get_mut(&v.slot) {
+                e.2 = frame;
+                if e.0 != key {
+                    let mut img = (*im.src.rgba).clone();
+                    im.adjust.apply(&mut img);
+                    e.1.set(ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), TEX_OPTS);
+                    e.0 = key;
+                }
+                return e.1.id();
+            }
+            let mut img = (*im.src.rgba).clone();
+            im.adjust.apply(&mut img);
+            let tex = ctx.load_texture(format!("video{}", v.slot), ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), TEX_OPTS);
+            let id = tex.id();
+            self.videos.insert(v.slot, (key, tex, frame));
+            return id;
+        }
         if let Some(e) = self.images.get_mut(&key) {
             e.1 = frame;
             return e.0.id();
@@ -115,6 +137,11 @@ impl TexCache {
 
     /// Keeps an image texture alive without drawing it.
     pub fn touch_image(&mut self, im: &ImageLayer) {
+        if let Some(v) = &im.video {
+            if let Some(e) = self.videos.get_mut(&v.slot) {
+                e.2 = self.frame;
+            }
+        }
         if let Some(e) = self.images.get_mut(&(im.src.id, im.adjust.key())) {
             e.1 = self.frame;
         }

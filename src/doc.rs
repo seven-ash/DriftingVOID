@@ -27,12 +27,37 @@ pub struct ImageSource {
     /// Original file bytes, kept so projects store photos losslessly.
     pub encoded: Arc<Vec<u8>>,
     pub ext: String,
+    /// Real pixel size when `rgba` is a smaller preview (video frames); geometry and
+    /// crop are in these units.
+    pub logical: Option<[u32; 2]>,
 }
 
 impl ImageSource {
     pub fn size(&self) -> Vec2 {
-        vec2(self.rgba.width() as f32, self.rgba.height() as f32)
+        match self.logical {
+            Some([w, h]) => vec2(w as f32, h as f32),
+            None => vec2(self.rgba.width() as f32, self.rgba.height() as f32),
+        }
     }
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// A video shown by an image layer: the layer's picture is the frame at `time`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoRef {
+    pub path: String,
+    pub info: crate::video::VideoInfo,
+    pub time: f64,
+    #[serde(default = "one")]
+    pub speed: f64,
+    #[serde(default)]
+    pub looping: bool,
+    /// Texture slot that stays the same while frames change (runtime only).
+    #[serde(skip, default = "next_rev")]
+    pub slot: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -91,12 +116,13 @@ pub struct ImageLayer {
     /// Crop rectangle in source pixels (integer-valued).
     pub crop: Rect,
     pub adjust: Adjust,
+    pub video: Option<VideoRef>,
 }
 
 impl ImageLayer {
     pub fn new(src: ImageSource, center: Pos2) -> Self {
         let crop = Rect::from_min_size(Pos2::ZERO, src.size());
-        Self { src, center, scale: 1.0, rotation: 0.0, crop, adjust: Adjust::default() }
+        Self { src, center, scale: 1.0, rotation: 0.0, crop, adjust: Adjust::default(), video: None }
     }
 
     pub fn axes(&self) -> (Vec2, Vec2) {

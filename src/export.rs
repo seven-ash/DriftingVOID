@@ -336,16 +336,19 @@ pub fn warp_onto(dst: &mut Pixmap, src: &Pixmap, rect: Rect, res: f32, h: &crate
 /// Returns the pixmap and the source-pixels-per-pixmap-pixel factor.
 pub fn image_pixmap(im: &ImageLayer, target_scale: f32) -> Option<(Pixmap, f32)> {
     let (iw, ih) = (im.src.rgba.width() as i32, im.src.rgba.height() as i32);
-    let x0 = (im.crop.min.x.round() as i32).clamp(0, iw - 1);
-    let y0 = (im.crop.min.y.round() as i32).clamp(0, ih - 1);
-    let x1 = (im.crop.max.x.round() as i32).clamp(x0 + 1, iw);
-    let y1 = (im.crop.max.y.round() as i32).clamp(y0 + 1, ih);
+    // preview frames (video) are smaller than the logical size the crop is in
+    let k = iw as f32 / im.src.size().x.max(1.0);
+    let x0 = ((im.crop.min.x * k).round() as i32).clamp(0, iw - 1);
+    let y0 = ((im.crop.min.y * k).round() as i32).clamp(0, ih - 1);
+    let x1 = ((im.crop.max.x * k).round() as i32).clamp(x0 + 1, iw);
+    let y1 = ((im.crop.max.y * k).round() as i32).clamp(y0 + 1, ih);
     let mut sub = image::imageops::crop_imm(&*im.src.rgba, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image();
-    let mut factor = 1.0;
+    let mut factor = 1.0 / k;
+    let target_scale = target_scale / k;
     if target_scale < 0.5 {
         let nw = ((sub.width() as f32 * target_scale * 1.5).round() as u32).max(1);
         let nh = ((sub.height() as f32 * target_scale * 1.5).round() as u32).max(1);
-        factor = sub.width() as f32 / nw as f32;
+        factor *= sub.width() as f32 / nw as f32;
         sub = image::imageops::resize(&sub, nw, nh, image::imageops::FilterType::Triangle);
     }
     im.adjust.apply(&mut sub);

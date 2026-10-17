@@ -201,6 +201,25 @@ impl Grs2d {
     }
 }
 
+/// A video layer that is playing: its decoder and the clock it follows.
+struct Playback {
+    player: crate::video::Player,
+    /// Video time and wall time when it started, and the speed.
+    t0: f64,
+    wall0: f64,
+    speed: f64,
+    /// A decoded frame that is not due yet.
+    pending: Option<(f64, image::RgbaImage)>,
+}
+
+enum VidAct {
+    Play(bool),
+    Step(i32),
+    Seek(f64),
+    Restart,
+    Still,
+}
+
 /// Selections inside drawing layers (pen strokes, brush pixel boxes).
 #[derive(Clone, Default)]
 struct SubSel {
@@ -710,6 +729,14 @@ pub struct App {
     wall_sel: Option<u64>,
     wall_new: bool,
     grs2d: Option<Grs2d>,
+    /// Video playback per layer; single-frame decodes (scrubbing) come back on
+    /// `scrub_rx`, only the newest request per layer counts.
+    playing: std::collections::HashMap<LayerId, Playback>,
+    scrub_tx: std::sync::mpsc::Sender<(LayerId, u64, f64, image::RgbaImage)>,
+    scrub_rx: std::sync::mpsc::Receiver<(LayerId, u64, f64, image::RgbaImage)>,
+    scrub_gen: std::collections::HashMap<LayerId, u64>,
+    scrub_want: std::collections::HashMap<LayerId, f64>,
+    scrub_busy: usize,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -726,6 +753,7 @@ impl App {
         crate::glass::load_settings();
         cc.egui_ctx.set_fonts(theme::font_defs());
         theme::apply_visuals(&cc.egui_ctx);
+        let scrub_ch = std::sync::mpsc::channel();
         let mut app = Self {
             doc: Document::default(),
             undo: Vec::new(),
@@ -791,6 +819,12 @@ impl App {
             wall_sel: None,
             wall_new: false,
             grs2d: None,
+            playing: Default::default(),
+            scrub_tx: scrub_ch.0,
+            scrub_rx: scrub_ch.1,
+            scrub_gen: Default::default(),
+            scrub_want: Default::default(),
+            scrub_busy: 0,
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -938,6 +972,16 @@ impl App {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("DV_IMPORT") {
+            // files to bring in at start (screenshots); DV_PLAY=1 also plays a video
+            let paths: Vec<PathBuf> = v.split(';').map(PathBuf::from).collect();
+            app.import_paths(paths, Pos2::ZERO);
+            if std::env::var_os("DV_PLAY").is_some() {
+                if let Some(id) = app.sel {
+                    app.video_play(id, true);
                 }
             }
         }
@@ -1198,6 +1242,16 @@ impl App {
                 self.request(Pending::Open(Some(p)));
                 return;
             }
+            if crate::video::VIDEO_EXTS.contains(&ext.as_str()) {
+                match self.add_video(&p, pos) {
+                    Ok(w) => {
+                        pos += vec2(w * 0.5 + 40.0, 0.0);
+                        n += 1;
+                    }
+                    Err(e) => errs.push(format!("{}: {e}", p.display())),
+                }
+                continue;
+            }
             match crate::io::load_image_file(&p) {
                 Ok(src) => {
                     let w = src.size().x;
@@ -1210,14 +1264,205 @@ impl App {
             }
         }
         self.status = if errs.is_empty() {
-            format!("사진 {n}장 불러옴")
+            format!("{n}개 불러옴")
         } else {
             format!("불러오기 실패: {}", errs.join(", "))
         };
     }
 
+    /// A video comes in as an image layer showing its first frame.
+    fn add_video(&mut self, p: &std::path::Path, at: Pos2) -> Result<f32, String> {
+        let info = crate::video::probe(p)?;
+        let size = info.preview_size(crate::video::PREVIEW_SIDE);
+        let img = crate::video::frame_at(p, 0.0, size)?;
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]) };
+        let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("영상").to_string();
+        let id = self.add_image(src, name, at);
+        if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, slot: next_rev() });
+        }
+        Ok(info.width as f32)
+    }
+
+    fn video_of(&self, id: LayerId) -> Option<VideoRef> {
+        match self.doc.get(id).map(|l| &l.kind) {
+            Some(LayerKind::Image(im)) => im.video.clone(),
+            _ => None,
+        }
+    }
+
+    fn set_video_frame(&mut self, id: LayerId, t: f64, img: image::RgbaImage) {
+        if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+            if let Some(v) = im.video.as_mut() {
+                v.time = t;
+                im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([v.info.width, v.info.height]) };
+            }
+        }
+    }
+
+    /// Shows the frame at `t` (decoded on a worker; the newest request wins).
+    fn video_scrub(&mut self, id: LayerId, t: f64) {
+        let Some(v) = self.video_of(id) else { return };
+        let t = t.clamp(0.0, (v.info.duration - v.info.frame_len() * 0.5).max(0.0));
+        if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+            if let Some(vv) = im.video.as_mut() {
+                vv.time = t;
+            }
+        }
+        self.scrub_want.insert(id, t);
+        self.dispatch_scrubs();
+    }
+
+    fn dispatch_scrubs(&mut self) {
+        while self.scrub_busy < 2 {
+            let Some((&id, &t)) = self.scrub_want.iter().next() else { return };
+            self.scrub_want.remove(&id);
+            let Some(v) = self.video_of(id) else { continue };
+            let g = self.scrub_gen.get(&id).copied().unwrap_or(0) + 1;
+            self.scrub_gen.insert(id, g);
+            let tx = self.scrub_tx.clone();
+            let path = PathBuf::from(&v.path);
+            let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
+            self.scrub_busy += 1;
+            std::thread::spawn(move || {
+                let img = crate::video::frame_at(&path, t, size).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+                let _ = tx.send((id, g, t, img));
+            });
+        }
+    }
+
+    fn video_play(&mut self, id: LayerId, on: bool) {
+        self.playing.remove(&id);
+        if !on {
+            return;
+        }
+        let Some(v) = self.video_of(id) else { return };
+        let t = if v.time >= v.info.duration - v.info.frame_len() * 1.5 { 0.0 } else { v.time };
+        let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
+        match crate::video::Player::start(std::path::Path::new(&v.path), t, v.info.fps, size) {
+            Ok(player) => {
+                self.playing.insert(id, Playback { player, t0: t, wall0: self.now, speed: v.speed, pending: None });
+            }
+            Err(e) => self.status = format!("재생 실패: {e}"),
+        }
+    }
+
+    fn video_step(&mut self, id: LayerId, d: i32) {
+        self.video_play(id, false);
+        if let Some(v) = self.video_of(id) {
+            self.video_scrub(id, v.time + d as f64 * v.info.frame_len());
+            self.mark();
+        }
+    }
+
+    /// The current frame at full resolution as a new photo layer above the video.
+    fn video_still(&mut self, id: LayerId) {
+        let Some(l) = self.doc.get(id).cloned() else { return };
+        let LayerKind::Image(im) = &l.kind else { return };
+        let Some(v) = &im.video else { return };
+        match crate::video::frame_at(std::path::Path::new(&v.path), v.time, (v.info.width, v.info.height)) {
+            Ok(img) => {
+                let mut nl = l.clone();
+                nl.id = self.doc.new_id();
+                nl.name = format!("{} {}", l.name, crate::video::timecode(v.time));
+                if let LayerKind::Image(nim) = &mut nl.kind {
+                    nim.src = crate::io::image_from_rgba(img);
+                    nim.video = None;
+                }
+                let idx = self.doc.index_of(id).map_or(self.doc.layers.len(), |i| i + 1);
+                let nid = nl.id;
+                self.doc.layers.insert(idx, nl);
+                self.select_only(Some(nid));
+                self.status = "프레임을 사진으로 만들었어".into();
+                self.mark();
+            }
+            Err(e) => self.status = format!("프레임을 읽지 못했어: {e}"),
+        }
+    }
+
+    fn tick_videos(&mut self, ctx: &egui::Context) {
+        while let Ok((id, g, t, img)) = self.scrub_rx.try_recv() {
+            self.scrub_busy = self.scrub_busy.saturating_sub(1);
+            if self.scrub_gen.get(&id) == Some(&g) && img.width() > 1 {
+                self.set_video_frame(id, t, img);
+            }
+        }
+        self.dispatch_scrubs();
+        if self.scrub_busy > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        let ids: Vec<LayerId> = self.playing.keys().copied().collect();
+        for id in ids {
+            let Some(v) = self.video_of(id) else {
+                self.playing.remove(&id);
+                continue;
+            };
+            let now = self.now;
+            let pb = self.playing.get_mut(&id).unwrap();
+            let clock = pb.t0 + (now - pb.wall0) * pb.speed;
+            let mut show = None;
+            let mut drained = false;
+            loop {
+                if pb.pending.is_none() {
+                    match pb.player.rx.try_recv() {
+                        Ok(f) => pb.pending = Some(f),
+                        Err(_) => {
+                            drained = true;
+                            break;
+                        }
+                    }
+                }
+                if pb.pending.as_ref().is_some_and(|(t, _)| *t <= clock + 1e-6) {
+                    show = pb.pending.take();
+                } else {
+                    break;
+                }
+            }
+            let done = drained && pb.player.ended.load(std::sync::atomic::Ordering::Relaxed);
+            if let Some((t, img)) = show {
+                self.set_video_frame(id, t, img);
+            }
+            if done || clock > v.info.duration + 1.0 {
+                self.playing.remove(&id);
+                if v.looping {
+                    if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                        if let Some(vv) = im.video.as_mut() {
+                            vv.time = 0.0;
+                        }
+                    }
+                    self.video_play(id, true);
+                }
+            }
+        }
+        if !self.playing.is_empty() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The document with every video layer showing its frame at full resolution
+    /// (export, clipboard).
+    fn export_doc(&self) -> crate::doc::Document {
+        let mut d = self.doc.clone();
+        for l in &mut d.layers {
+            if let LayerKind::Image(im) = &mut l.kind {
+                if let Some(v) = &im.video {
+                    if let Ok(img) = crate::video::frame_at(std::path::Path::new(&v.path), v.time, (v.info.width, v.info.height)) {
+                        im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
+                    }
+                }
+            }
+        }
+        d
+    }
+
     fn import_dialog(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new().add_filter("이미지", crate::io::IMAGE_EXTS).pick_files() {
+        let all: Vec<&str> = crate::io::IMAGE_EXTS.iter().chain(crate::video::VIDEO_EXTS).copied().collect();
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("사진·영상", &all)
+            .add_filter("사진", crate::io::IMAGE_EXTS)
+            .add_filter("영상", crate::video::VIDEO_EXTS)
+            .pick_files()
+        {
             let at = self.view_center_world();
             self.import_paths(paths, at);
         }
@@ -3601,6 +3846,14 @@ impl App {
             // the 3D workspace handles its own keys (G/R/S, views, Esc)
             return;
         }
+        if let Some(id) = self.sel.filter(|id| self.video_of(*id).is_some()) {
+            if k(Modifiers::NONE, Key::Comma) {
+                self.video_step(id, -1);
+            }
+            if k(Modifiers::NONE, Key::Period) {
+                self.video_step(id, 1);
+            }
+        }
         // G/R/S on a layer in a space, right on the canvas (before R picks the
         // rectangle tool)
         if self.tool == Tool::Select && self.drag.is_none() && self.grs2d.is_none() {
@@ -3795,7 +4048,7 @@ impl App {
     }
 
     fn copy_region(&mut self, r: Rect, scale: f32, bg: Option<Color32>) {
-        match crate::export::render(&self.doc, r, scale, bg) {
+        match crate::export::render(&self.export_doc(), r, scale, bg) {
             Ok(pm) => {
                 let img = crate::export::to_rgba(&pm);
                 let res = arboard::Clipboard::new().and_then(|mut cb| {
@@ -3916,7 +4169,7 @@ impl App {
                 {
                     let is_jpg = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
                     let bg = if is_jpg { bg.or(Some(Color32::WHITE)) } else { bg };
-                    self.status = match crate::export::render(&self.doc, r, d.scale, bg)
+                    self.status = match crate::export::render(&self.export_doc(), r, d.scale, bg)
                         .and_then(|pm| crate::export::save(&pm, &path, d.jpeg_quality).map(|_| (pm.width(), pm.height())))
                     {
                         Ok((w, h)) => format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
@@ -4244,6 +4497,8 @@ impl App {
             .map(|s| (s.id, s.name.clone(), cams.contains_key(&s.id), s.walls.iter().map(|w| (w.id, w.name.clone())).collect()))
             .collect();
         let mut space_req: Option<Option<(u64, Option<u64>)>> = None;
+        let mut vid_act: Option<VidAct> = None;
+        let is_playing = self.playing.contains_key(&id);
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -4255,7 +4510,55 @@ impl App {
             changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0)).changed();
             match &mut l.kind {
                 LayerKind::Image(im) => {
-                    ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.rgba.width(), im.src.rgba.height(), im.crop.width(), im.crop.height()));
+                    if let Some(v) = &mut im.video {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if ui.button(if is_playing { "멈춤" } else { "재생" }).clicked() {
+                                vid_act = Some(VidAct::Play(!is_playing));
+                            }
+                            if ui.button("이전").on_hover_text("이전 프레임 ( , )").clicked() {
+                                vid_act = Some(VidAct::Step(-1));
+                            }
+                            if ui.button("다음").on_hover_text("다음 프레임 ( . )").clicked() {
+                                vid_act = Some(VidAct::Step(1));
+                            }
+                            ui.label(egui::RichText::new(format!("{} / {}", crate::video::timecode(v.time), crate::video::timecode(v.info.duration))).monospace());
+                        });
+                        let mut t = v.time;
+                        ui.spacing_mut().slider_width = ui.available_width() - 8.0;
+                        let sr = ui.add(egui::Slider::new(&mut t, 0.0..=v.info.duration.max(0.01)).show_value(false));
+                        if sr.changed() {
+                            vid_act = Some(VidAct::Seek(t));
+                        }
+                        if sr.drag_stopped() {
+                            changed = true;
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            ui.label("속도");
+                            for sp in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                                if ui.selectable_label((v.speed - sp).abs() < 1e-6, format!("{sp}×")).clicked() {
+                                    v.speed = sp;
+                                    vid_act = Some(VidAct::Restart);
+                                    changed = true;
+                                }
+                            }
+                            changed |= ui.checkbox(&mut v.looping, "반복").changed();
+                        });
+                        ui.small(format!(
+                            "{}×{} · {:.2} fps · {}{}",
+                            v.info.width,
+                            v.info.height,
+                            v.info.fps,
+                            v.info.codec,
+                            if v.info.audio { " · 소리 있음 (재생은 다음 단계)" } else { "" }
+                        ));
+                        if ui.button("이 프레임을 사진으로").on_hover_text("지금 프레임을 원본 해상도 사진 레이어로 복사").clicked() {
+                            vid_act = Some(VidAct::Still);
+                        }
+                        ui.separator();
+                    }
+                    ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
                     if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0)).changed() {
                         im.scale = pct / 100.0;
@@ -4499,6 +4802,29 @@ impl App {
         }
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
+        }
+        match vid_act {
+            Some(VidAct::Play(on)) => self.video_play(id, on),
+            Some(VidAct::Step(d)) => self.video_step(id, d),
+            Some(VidAct::Seek(t)) => {
+                if is_playing {
+                    if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                        if let Some(v) = im.video.as_mut() {
+                            v.time = t;
+                        }
+                    }
+                    self.video_play(id, true);
+                } else {
+                    self.video_scrub(id, t);
+                }
+            }
+            Some(VidAct::Restart) => {
+                if is_playing {
+                    self.video_play(id, true);
+                }
+            }
+            Some(VidAct::Still) => self.video_still(id),
+            None => {}
         }
         match space_req {
             Some(Some((sid, None))) => self.put_in_space(id, sid),
@@ -6484,6 +6810,7 @@ impl eframe::App for App {
 
         self.handle_shortcuts(&ctx);
         crate::persp::sync_walls(&mut self.doc);
+        self.tick_videos(&ctx);
 
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         if !self.ui_hidden {

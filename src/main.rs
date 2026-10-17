@@ -17,6 +17,7 @@ mod raster;
 mod selftest;
 mod text;
 mod vector;
+mod video;
 mod view3d;
 
 fn main() -> eframe::Result {
