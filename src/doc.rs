@@ -333,6 +333,8 @@ pub struct Layer {
     pub kind: LayerKind,
     /// Set when the layer lives in a 3D space (drawn through that space's camera).
     pub place: Option<crate::persp::Placement>,
+    /// Keyframes and time span on the timeline.
+    pub anim: Option<crate::anim::Anim>,
 }
 
 impl Layer {
@@ -447,6 +449,9 @@ pub struct Document {
     pub next_id: LayerId,
     /// Perspective-matched 3D spaces (docs/SPACES.md).
     pub spaces: Vec<crate::persp::Space>,
+    pub timeline: crate::anim::Timeline,
+    /// Canvas cameras (regions over time).
+    pub cameras: Vec<crate::anim::CanvasCam>,
 }
 
 impl Document {
@@ -470,10 +475,16 @@ impl Document {
     /// Inserts above `above` (or at the top) and returns the new id.
     pub fn insert(&mut self, name: String, kind: LayerKind, above: Option<LayerId>) -> LayerId {
         let id = self.new_id();
-        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None };
+        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None };
         let idx = above.and_then(|a| self.index_of(a)).map(|i| i + 1).unwrap_or(self.layers.len());
         self.layers.insert(idx, layer);
         id
+    }
+
+    /// Shown at the playhead (layers with a span only exist inside it while the
+    /// timeline is on).
+    pub fn alive(&self, l: &Layer) -> bool {
+        !self.timeline.on || l.anim.as_ref().is_none_or(|a| a.alive(self.timeline.time))
     }
 
     /// Layers in drawing order. Layers placed in a space are drawn together, far to
@@ -481,7 +492,7 @@ impl Document {
     pub fn draw_order<'a>(&'a self, cams: &HashMap<u64, crate::persp::Camera>) -> Vec<&'a Layer> {
         let mut out = Vec::with_capacity(self.layers.len());
         let mut done: Vec<u64> = Vec::new();
-        for l in &self.layers {
+        for l in self.layers.iter().filter(|l| self.alive(l)) {
             match l.place.as_ref().filter(|pl| cams.contains_key(&pl.space)) {
                 None => out.push(l),
                 Some(pl) if done.contains(&pl.space) => {}
@@ -490,6 +501,7 @@ impl Document {
                     let mut members: Vec<(&Layer, f64)> = self
                         .layers
                         .iter()
+                        .filter(|m| self.alive(m))
                         .filter_map(|m| m.place.as_ref().filter(|p| p.space == pl.space).map(|p| (m, p.depth(cam))))
                         .collect();
                     members.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

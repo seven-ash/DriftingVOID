@@ -147,6 +147,8 @@ enum Drag {
     SpaceOrigin { id: u64 },
     SpaceMask { id: u64, start: Pos2 },
     WallRect { sid: u64, wid: u64, start: Pos2 },
+    /// Canvas camera rectangle (handles as `rect_handles`, 8 = move).
+    Cam { id: u64, handle: u8, start: Pos2, orig: Rect },
     WallCorner { sid: u64, wid: u64, idx: usize },
 }
 
@@ -211,6 +213,24 @@ struct Playback {
     /// A decoded frame that is not due yet.
     pending: Option<(f64, image::RgbaImage)>,
 }
+
+/// A row of the timeline: a layer or a canvas camera.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TlRow {
+    Layer(LayerId),
+    Cam(u64),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TlDrag {
+    Scrub,
+    Key { row: TlRow, from: f64 },
+    SpanIn(TlRow),
+    SpanOut(TlRow),
+}
+
+/// Canvas camera colour.
+const CAM_COLOR: Color32 = Color32::from_rgb(176, 140, 255);
 
 enum VidAct {
     Play(bool),
@@ -609,6 +629,7 @@ enum Pending {
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum ExportRegion {
+    Camera(u64),
     Frame,
     Content,
     View,
@@ -737,6 +758,12 @@ pub struct App {
     scrub_gen: std::collections::HashMap<LayerId, u64>,
     scrub_want: std::collections::HashMap<LayerId, f64>,
     scrub_busy: usize,
+    /// Timeline playback (timeline time and wall time at the start), the selected key,
+    /// a drag on the timeline, and the selected canvas camera.
+    tl_play: Option<(f64, f64)>,
+    tl_key: Option<(TlRow, f64)>,
+    tl_drag: Option<TlDrag>,
+    cam_sel: Option<u64>,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -825,6 +852,10 @@ impl App {
             scrub_gen: Default::default(),
             scrub_want: Default::default(),
             scrub_busy: 0,
+            tl_play: None,
+            tl_key: None,
+            tl_drag: None,
+            cam_sel: None,
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -985,6 +1016,32 @@ impl App {
                 }
             }
         }
+        if std::env::var_os("DV_TL_DEMO").is_some() {
+            // timeline on, the selected layer keyed to move and grow over 2 s, a camera
+            // that pans, playhead at 1 s (screenshots)
+            app.doc.timeline.on = true;
+            if let Some(id) = app.sel {
+                if let Some(l) = app.doc.get_mut(id) {
+                    let k0 = crate::anim::key_of(l, 0.0);
+                    let mut k1 = k0;
+                    k1.t = 2.0;
+                    k1.center[0] += 400.0;
+                    k1.ext[0] *= 0.5;
+                    k1.rot = 0.4;
+                    l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], span: Some([0.0, 6.0]), video_start: 0.0 });
+                }
+            }
+            let cid = app.doc.new_id();
+            let mut cam = crate::anim::CanvasCam { id: cid, name: "카메라 1".into(), rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(640.0, 360.0)), anim: Default::default() };
+            let c0 = cam.key(0.0);
+            let mut c1 = c0;
+            c1.t = 3.0;
+            c1.center[0] += 300.0;
+            cam.anim.keys = vec![c0, c1];
+            app.doc.cameras.push(cam);
+            app.cam_sel = Some(cid);
+            app.set_time(1.0);
+        }
         if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
             app.pending = Some(Pending::New);
         }
@@ -1014,6 +1071,15 @@ impl App {
     }
 
     fn commit_if_idle(&mut self, typing: bool) {
+        if self.changed && self.drag.is_none() && !typing && self.doc.timeline.on && self.doc.timeline.autokey && self.tl_play.is_none() {
+            let t = self.doc.timeline.time;
+            for id in self.selected_ids() {
+                if let Some(l) = self.doc.get_mut(id) {
+                    let key = crate::anim::key_of(l, t);
+                    l.anim.get_or_insert_with(Default::default).set_key(key);
+                }
+            }
+        }
         if self.changed && self.drag.is_none() && !typing {
             // drawing layers are created on demand, so empty ones just go away
             let before = self.doc.layers.len();
@@ -1226,7 +1292,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None });
         self.sel = Some(id);
         self.mark();
         id
@@ -1454,6 +1520,486 @@ impl App {
         }
         d
     }
+
+    // ------------------------------------------------------------ timeline
+
+    /// Moves the playhead: keyed layers and cameras take their sampled state, and
+    /// (when not playing) video layers show their frame for that time.
+    fn set_time(&mut self, t: f64) {
+        let tl = &mut self.doc.timeline;
+        tl.time = t.clamp(0.0, tl.duration.max(0.0));
+        crate::anim::evaluate(&mut self.doc);
+        if self.tl_play.is_none() {
+            self.sync_videos_to_timeline();
+        }
+    }
+
+    fn timeline_videos(&self) -> Vec<(LayerId, f64)> {
+        let t = self.doc.timeline.time;
+        self.doc
+            .layers
+            .iter()
+            .filter(|l| self.doc.alive(l))
+            .filter_map(|l| match &l.kind {
+                LayerKind::Image(im) => im.video.as_ref().map(|v| (l.id, crate::anim::video_time(l.anim.as_ref(), v.speed, t))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sync_videos_to_timeline(&mut self) {
+        for (id, vt) in self.timeline_videos() {
+            let cur = self.video_of(id).map(|v| v.time);
+            if cur.is_none_or(|c| (c - vt).abs() > 1e-4) {
+                self.video_scrub(id, vt);
+            }
+        }
+    }
+
+    fn tl_toggle_play(&mut self) {
+        if self.tl_play.take().is_some() {
+            self.playing.clear();
+            let t = self.doc.timeline.snap(self.doc.timeline.time);
+            self.set_time(t);
+            return;
+        }
+        if self.doc.timeline.time >= self.doc.timeline.duration - self.doc.timeline.frame_len() {
+            self.set_time(0.0);
+        }
+        self.tl_play = Some((self.doc.timeline.time, self.now));
+        for (id, vt) in self.timeline_videos() {
+            if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                if let Some(v) = im.video.as_mut() {
+                    v.time = vt.clamp(0.0, v.info.duration);
+                }
+            }
+            self.video_play(id, true);
+        }
+    }
+
+    fn tick_timeline(&mut self, ctx: &egui::Context) {
+        let Some((t0, w0)) = self.tl_play else { return };
+        let t = t0 + (self.now - w0);
+        if t >= self.doc.timeline.duration {
+            // loop
+            self.tl_play = None;
+            self.playing.clear();
+            self.set_time(0.0);
+            self.tl_toggle_play();
+        } else {
+            let before: Vec<bool> = self.doc.layers.iter().map(|l| self.doc.alive(l)).collect();
+            self.doc.timeline.time = t;
+            crate::anim::evaluate(&mut self.doc);
+            // video layers that just came into their span start playing
+            let now_alive: Vec<(LayerId, bool, bool)> = self.doc.layers.iter().zip(before).map(|(l, b)| (l.id, b, self.doc.alive(l))).collect();
+            for (id, was, is) in now_alive {
+                if !was && is && self.video_of(id).is_some() {
+                    let vt = self.doc.get(id).map(|l| crate::anim::video_time(l.anim.as_ref(), self.video_of(id).map_or(1.0, |v| v.speed), t)).unwrap_or(0.0);
+                    if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                        if let Some(v) = im.video.as_mut() {
+                            v.time = vt.max(0.0);
+                        }
+                    }
+                    self.video_play(id, true);
+                } else if was && !is {
+                    self.playing.remove(&id);
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// I: keys the selection (or, with the region tool, the selected camera) at the
+    /// playhead.
+    fn insert_keys(&mut self) {
+        let t = self.doc.timeline.time;
+        if self.tool == Tool::Frame {
+            if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter_mut().find(|c| c.id == id)) {
+                let k = c.key(t);
+                c.anim.set_key(k);
+                self.status = format!("{} 키 · {}", c.name, crate::video::timecode(t));
+                self.mark();
+                return;
+            }
+        }
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            self.status = "키를 넣을 레이어를 먼저 선택해 줘".into();
+            return;
+        }
+        for id in &ids {
+            if let Some(l) = self.doc.get_mut(*id) {
+                let key = crate::anim::key_of(l, t);
+                l.anim.get_or_insert_with(Default::default).set_key(key);
+            }
+        }
+        self.status = format!("키 {}개 · {}", ids.len(), crate::video::timecode(t));
+        self.mark();
+    }
+
+    /// Alt+I: removes the selection's keys at the playhead.
+    fn delete_keys_here(&mut self) {
+        let t = self.doc.timeline.time;
+        let tol = self.doc.timeline.frame_len() * 0.5;
+        let mut n = 0;
+        if self.tool == Tool::Frame {
+            if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter_mut().find(|c| c.id == id)) {
+                n += c.anim.remove_near(t, tol) as usize;
+            }
+        }
+        for id in self.selected_ids() {
+            if let Some(a) = self.doc.get_mut(id).and_then(|l| l.anim.as_mut()) {
+                n += a.remove_near(t, tol) as usize;
+            }
+        }
+        if n > 0 {
+            self.mark();
+        }
+        self.status = format!("키 {n}개 지움");
+    }
+
+    fn row_anim(&self, row: TlRow) -> Option<&crate::anim::Anim> {
+        match row {
+            TlRow::Layer(id) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
+            TlRow::Cam(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
+        }
+    }
+
+    fn row_anim_mut(&mut self, row: TlRow) -> Option<&mut crate::anim::Anim> {
+        match row {
+            TlRow::Layer(id) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
+            TlRow::Cam(id) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
+        }
+    }
+
+    fn cameras_panel(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.strong("카메라");
+        ui.small("영역을 카메라로 저장해 · 손잡이로 조절 · 타임라인에서 I로 움직임 키 · 구간 밖에선 꺼짐");
+        let mut pick = None;
+        let mut add = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for c in &self.doc.cameras {
+                if ui.selectable_label(self.cam_sel == Some(c.id), egui::RichText::new(&c.name).color(CAM_COLOR)).clicked() {
+                    pick = Some(c.id);
+                }
+            }
+            add = ui.button("+ 카메라").on_hover_text("지금 내보낼 영역(없으면 지금 화면)으로 카메라를 만들어").clicked();
+        });
+        if let Some(id) = pick {
+            self.cam_sel = if self.cam_sel == Some(id) { None } else { Some(id) };
+        }
+        if add {
+            let rect = self.doc.export_frame.unwrap_or_else(|| {
+                let xf = self.xf();
+                Rect::from_min_max(xf.s2w(self.canvas_rect.min), xf.s2w(self.canvas_rect.max)).shrink(40.0 / self.zoom)
+            });
+            let id = self.doc.new_id();
+            let n = self.doc.cameras.len() + 1;
+            self.doc.cameras.push(crate::anim::CanvasCam { id, name: format!("카메라 {n}"), rect: Rect::from_min_max(rect.min.round(), rect.max.round()), anim: Default::default() });
+            self.cam_sel = Some(id);
+            self.mark();
+        }
+        let Some(i) = self.cam_sel.and_then(|id| self.doc.cameras.iter().position(|c| c.id == id)) else { return };
+        let mut ch = false;
+        let (mut del, mut to_frame, mut from_frame) = (false, false, false);
+        {
+            let c = &mut self.doc.cameras[i];
+            ui.horizontal(|ui| {
+                ui.label("이름");
+                ch |= ui.text_edit_singleline(&mut c.name).changed();
+            });
+            ui.label(format!("{:.0} × {:.0} px · 키 {}개", c.rect.width(), c.rect.height(), c.anim.keys.len()));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                from_frame = ui.add_enabled(self.doc.export_frame.is_some(), egui::Button::new("영역 → 카메라")).clicked();
+                to_frame = ui.button("카메라 → 영역").clicked();
+                del = ui.button("카메라 삭제").clicked();
+            });
+        }
+        if from_frame {
+            if let Some(f) = self.doc.export_frame {
+                self.doc.cameras[i].rect = f;
+                ch = true;
+            }
+        }
+        if to_frame {
+            self.doc.export_frame = Some(self.doc.cameras[i].rect);
+            ch = true;
+        }
+        if del {
+            self.doc.cameras.remove(i);
+            self.cam_sel = None;
+            ch = true;
+        }
+        if ch {
+            self.mark();
+        }
+    }
+
+    fn timeline_ui(&mut self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 70.0 - 360.0).clamp(420.0, 1400.0);
+        egui::Area::new(egui::Id::new("timeline"))
+            .order(egui::Order::Middle)
+            .anchor(Align2::LEFT_BOTTOM, vec2(70.0, -64.0))
+            .show(ctx, |ui| {
+                theme::glass(ui, egui::Margin::same(10), theme::RADIUS_CARD, |ui| {
+                    ui.set_width(width);
+                    self.timeline_body(ui, width);
+                });
+            });
+    }
+
+    fn timeline_body(&mut self, ui: &mut egui::Ui, width: f32) {
+        let playing = self.tl_play.is_some();
+        let mut act_play = false;
+        let mut new_time: Option<f64> = None;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if ui.button(if playing { "멈춤" } else { "재생" }).on_hover_text("Alt+A").clicked() {
+                act_play = true;
+            }
+            if ui.button("처음").on_hover_text("Shift+,").clicked() {
+                new_time = Some(0.0);
+            }
+            let tl = &self.doc.timeline;
+            ui.label(egui::RichText::new(format!("{} / {}", crate::video::timecode(tl.time), crate::video::timecode(tl.duration))).monospace());
+            ui.label(egui::RichText::new(format!("{}f", (tl.time * tl.fps).round() as i64)).monospace().color(INK_3));
+            ui.separator();
+            let tl = &mut self.doc.timeline;
+            ui.label("fps");
+            changed |= ui.add(egui::DragValue::new(&mut tl.fps).range(1.0..=240.0).speed(0.1).max_decimals(3)).changed();
+            ui.label("길이");
+            changed |= ui.add(egui::DragValue::new(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
+            changed |= ui.checkbox(&mut tl.autokey, "자동 키").on_hover_text("선택한 레이어를 바꾸면 그 시각에 키를 넣어").changed();
+            ui.separator();
+            if ui.button("키 넣기").on_hover_text("I").clicked() {
+                self.insert_keys();
+            }
+            if ui.button("키 지우기").on_hover_text("Alt+I").clicked() {
+                self.delete_keys_here();
+            }
+        });
+        // selected key: easing
+        if let Some((row, kt)) = self.tl_key {
+            let ease = self.row_anim(row).and_then(|a| a.keys.iter().find(|k| (k.t - kt).abs() < 1e-6)).map(|k| k.ease);
+            match ease {
+                Some(e) => {
+                    let mut pick = None;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("선택한 키 {}", crate::video::timecode(kt))).color(INK_2));
+                        ui.label("다음 키까지");
+                        for o in crate::anim::Ease::ALL {
+                            if ui.selectable_label(e == o, o.label()).clicked() {
+                                pick = Some(o);
+                            }
+                        }
+                    });
+                    if let Some(o) = pick {
+                        if let Some(k) = self.row_anim_mut(row).and_then(|a| a.keys.iter_mut().find(|k| (k.t - kt).abs() < 1e-6)) {
+                            k.ease = o;
+                            changed = true;
+                        }
+                    }
+                }
+                None => self.tl_key = None,
+            }
+        }
+        // rows: cameras, then layers with keys or a span, then the selection
+        let sel = self.selected_ids();
+        let mut rows: Vec<(TlRow, String, bool)> = self.doc.cameras.iter().map(|c| (TlRow::Cam(c.id), c.name.clone(), true)).collect();
+        for l in self.doc.layers.iter().rev() {
+            if l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
+                rows.push((TlRow::Layer(l.id), l.display_name(), false));
+            }
+        }
+        let shown = rows.len().min(8);
+        let row_h = 22.0;
+        let ruler_h = 20.0;
+        let label_w = 140.0;
+        let h = ruler_h + row_h * shown.max(1) as f32 + 4.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click_and_drag());
+        let p = ui.painter().with_clip_rect(rect);
+        let tl = self.doc.timeline.clone();
+        let tr = Rect::from_min_max(pos2(rect.left() + label_w, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
+        let dur = tl.duration.max(1e-3);
+        let x_of = |t: f64| tr.left() + (t / dur) as f32 * tr.width();
+        let t_of = |x: f32| ((x - tr.left()) / tr.width()) as f64 * dur;
+        // ruler
+        let px_per_s = tr.width() as f64 / dur;
+        let step = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0].into_iter().find(|s| s * px_per_s >= 50.0).unwrap_or(600.0);
+        let mut t = 0.0;
+        while t <= dur + 1e-9 {
+            let x = x_of(t);
+            p.line_segment([pos2(x, rect.top() + 12.0), pos2(x, rect.top() + ruler_h)], Stroke::new(1.0, INK_3));
+            let label = if step < 1.0 { format!("{t:.1}") } else { format!("{}", t.round() as i64) };
+            p.text(pos2(x + 3.0, rect.top() + 1.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), INK_3);
+            t += step;
+        }
+        // rows
+        let mut hit_rows: Vec<(TlRow, Rect)> = Vec::new();
+        for (i, (row, name, cam)) in rows.iter().take(shown).enumerate() {
+            let y0 = rect.top() + ruler_h + i as f32 * row_h;
+            let rr = Rect::from_min_max(pos2(rect.left(), y0), pos2(rect.right(), y0 + row_h));
+            hit_rows.push((*row, rr));
+            let selected = match row {
+                TlRow::Layer(id) => sel.contains(id),
+                TlRow::Cam(id) => self.cam_sel == Some(*id),
+            };
+            if selected {
+                p.rect_filled(rr, 6.0, FILL_1);
+            }
+            let col = if *cam { CAM_COLOR } else { INK_2 };
+            p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.left() + label_w - 8.0, rr.bottom())))
+                .text(pos2(rr.left() + 6.0, rr.center().y), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_SMALL + 0.5), col);
+            let cy = rr.center().y;
+            let anim = self.row_anim(*row);
+            match anim.and_then(|a| a.span) {
+                Some([a, b]) => {
+                    let bar = Rect::from_min_max(pos2(x_of(a), cy - 4.0), pos2(x_of(b), cy + 4.0));
+                    p.rect_filled(bar, 3.0, col.gamma_multiply(0.35));
+                    for x in [bar.left(), bar.right()] {
+                        p.rect_filled(Rect::from_center_size(pos2(x, cy), vec2(4.0, 12.0)), 1.5, col);
+                    }
+                }
+                None => {
+                    p.line_segment([pos2(tr.left(), cy), pos2(tr.right(), cy)], Stroke::new(1.0, col.gamma_multiply(0.25)));
+                }
+            }
+            if let Some(a) = anim {
+                for k in &a.keys {
+                    let c = pos2(x_of(k.t), cy);
+                    let on = self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
+                    let d = 5.5;
+                    let pts = vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)];
+                    p.add(Shape::convex_polygon(pts, if on { ACCENT } else { INK }, Stroke::new(1.0, Color32::from_black_alpha(160))));
+                }
+            }
+        }
+        if rows.len() > shown {
+            p.text(pos2(rect.left() + 6.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("+{}개 더", rows.len() - shown), FontId::proportional(10.0), INK_3);
+        }
+        // playhead
+        let px = x_of(tl.time);
+        p.line_segment([pos2(px, rect.top()), pos2(px, rect.bottom())], Stroke::new(1.5, ACCENT));
+        p.add(Shape::convex_polygon(vec![pos2(px - 5.0, rect.top()), pos2(px + 5.0, rect.top()), pos2(px, rect.top() + 7.0)], ACCENT, Stroke::NONE));
+
+        // interaction
+        let pointer = resp.interact_pointer_pos();
+        if resp.drag_started() || resp.clicked() {
+            if let Some(pp) = pointer {
+                let mut drag = TlDrag::Scrub;
+                if pp.y > rect.top() + ruler_h {
+                    if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
+                        let anim = self.row_anim(row);
+                        let key = anim.and_then(|a| a.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
+                        let span = anim.and_then(|a| a.span);
+                        if let Some(kt) = key {
+                            self.tl_key = Some((row, kt));
+                            drag = TlDrag::Key { row, from: kt };
+                        } else if span.is_some_and(|[a, _]| (x_of(a) - pp.x).abs() <= 5.0) {
+                            drag = TlDrag::SpanIn(row);
+                        } else if span.is_some_and(|[_, b]| (x_of(b) - pp.x).abs() <= 5.0) {
+                            drag = TlDrag::SpanOut(row);
+                        } else if pp.x < tr.left() {
+                            // the label selects the layer or camera
+                            match row {
+                                TlRow::Layer(id) => self.select_only(Some(id)),
+                                TlRow::Cam(id) => {
+                                    self.cam_sel = Some(id);
+                                    self.tool = Tool::Frame;
+                                }
+                            }
+                            self.tl_drag = None;
+                            return;
+                        }
+                    }
+                }
+                self.tl_drag = Some(drag);
+            }
+        }
+        if let (Some(d), Some(pp)) = (self.tl_drag, pointer) {
+            let t = tl.snap(t_of(pp.x));
+            match d {
+                TlDrag::Scrub => {
+                    if (t - self.doc.timeline.time).abs() > 1e-9 {
+                        new_time = Some(t);
+                    }
+                }
+                TlDrag::Key { row, from } => {
+                    if (t - from).abs() > 1e-9 {
+                        if let Some(a) = self.row_anim_mut(row) {
+                            if !a.keys.iter().any(|k| (k.t - t).abs() < 1e-6) {
+                                if let Some(k) = a.keys.iter_mut().find(|k| (k.t - from).abs() < 1e-6) {
+                                    k.t = t;
+                                }
+                                a.sort();
+                                self.tl_drag = Some(TlDrag::Key { row, from: t });
+                                self.tl_key = Some((row, t));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                TlDrag::SpanIn(row) | TlDrag::SpanOut(row) => {
+                    let fl = tl.frame_len();
+                    let is_in = matches!(d, TlDrag::SpanIn(_));
+                    if let Some(a) = self.row_anim_mut(row) {
+                        let [mut x, mut y] = a.span.unwrap_or([0.0, dur]);
+                        if is_in {
+                            x = t.min(y - fl);
+                        } else {
+                            y = t.max(x + fl);
+                        }
+                        a.span = Some([x, y]);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
+            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_))) {
+                self.mark();
+                self.set_time(self.doc.timeline.time);
+            }
+            self.tl_drag = None;
+        }
+        // right-click on a row's empty track: show the layer from here / until here
+        if resp.secondary_clicked() {
+            if let Some(pp) = pointer.or(resp.hover_pos()) {
+                if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
+                    if pp.x >= tr.left() {
+                        let t = tl.snap(t_of(pp.x));
+                        if let Some(a) = self.row_anim_mut(row) {
+                            let [x, y] = a.span.unwrap_or([0.0, dur]);
+                            a.span = Some(if t - x < y - t { [t, y] } else { [x, t.max(t + 1e-3)] });
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if act_play {
+            self.tl_toggle_play();
+        }
+        if let Some(t) = new_time {
+            if self.tl_play.is_some() {
+                self.playing.clear();
+                self.tl_play = None;
+                self.set_time(t);
+                self.tl_toggle_play();
+            } else {
+                self.set_time(t);
+            }
+        }
+        if changed {
+            self.mark();
+        }
+    }
+
 
     fn import_dialog(&mut self) {
         let all: Vec<&str> = crate::io::IMAGE_EXTS.iter().chain(crate::video::VIDEO_EXTS).copied().collect();
@@ -2273,6 +2819,22 @@ impl App {
                 }
             }
             Tool::Frame => {
+                // the selected camera comes first
+                if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter().find(|c| c.id == id)) {
+                    let (id, cr) = (c.id, c.rect);
+                    for (i, p) in rect_handles(cr).iter().enumerate() {
+                        if xf.w2s(*p).distance(sp) <= 9.0 {
+                            self.drag = Some(Drag::Cam { id, handle: i as u8, start: w, orig: cr });
+                            self.mark();
+                            return;
+                        }
+                    }
+                    if cr.contains(w) {
+                        self.drag = Some(Drag::Cam { id, handle: 8, start: w, orig: cr });
+                        self.mark();
+                        return;
+                    }
+                }
                 if let Some(fr) = self.doc.export_frame {
                     for (i, p) in rect_handles(fr).iter().enumerate() {
                         if xf.w2s(*p).distance(sp) <= 9.0 {
@@ -3289,6 +3851,26 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::Cam { id, handle, start, orig } => {
+                let p = w.round();
+                let mut rr = *orig;
+                if *handle == 8 {
+                    rr = rr.translate((w - *start).round());
+                } else {
+                    let (hx, hy) = handle_axes(*handle);
+                    if hx < 0 { rr.min.x = p.x }
+                    if hx > 0 { rr.max.x = p.x }
+                    if hy < 0 { rr.min.y = p.y }
+                    if hy > 0 { rr.max.y = p.y }
+                    rr = Rect::from_two_pos(rr.min, rr.max);
+                }
+                let id = *id;
+                if let Some(c) = self.doc.cameras.iter_mut().find(|c| c.id == id) {
+                    c.rect = rr;
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::Frame { handle, start, orig } => {
                 let p = w.round();
                 let mut r = *orig;
@@ -3842,16 +4424,51 @@ impl App {
         if k(cmd, Key::E) {
             self.open_export();
         }
+        // timeline (also in the 3D workspace)
+        if k(cmd, Key::T) {
+            self.doc.timeline.on = !self.doc.timeline.on;
+            if !self.doc.timeline.on && self.tl_play.take().is_some() {
+                self.playing.clear();
+            }
+            self.status = if self.doc.timeline.on { "타임라인 켬 · Alt+A 재생 · I 키 넣기 · , . 프레임".into() } else { "타임라인 끔".into() };
+        }
+        if self.doc.timeline.on {
+            if k(Modifiers::ALT, Key::A) {
+                self.tl_toggle_play();
+            }
+            if k(Modifiers::NONE, Key::I) {
+                self.insert_keys();
+            }
+            if k(Modifiers::ALT, Key::I) {
+                self.delete_keys_here();
+            }
+            let fl = self.doc.timeline.frame_len();
+            let t = self.doc.timeline.time;
+            if k(Modifiers::NONE, Key::Comma) {
+                self.set_time(t - fl);
+            }
+            if k(Modifiers::NONE, Key::Period) {
+                self.set_time(t + fl);
+            }
+            if k(Modifiers::SHIFT, Key::Comma) {
+                self.set_time(0.0);
+            }
+            if k(Modifiers::SHIFT, Key::Period) {
+                self.set_time(self.doc.timeline.duration);
+            }
+        }
         if self.ws3d {
             // the 3D workspace handles its own keys (G/R/S, views, Esc)
             return;
         }
-        if let Some(id) = self.sel.filter(|id| self.video_of(*id).is_some()) {
-            if k(Modifiers::NONE, Key::Comma) {
-                self.video_step(id, -1);
-            }
-            if k(Modifiers::NONE, Key::Period) {
-                self.video_step(id, 1);
+        if !self.doc.timeline.on {
+            if let Some(id) = self.sel.filter(|id| self.video_of(*id).is_some()) {
+                if k(Modifiers::NONE, Key::Comma) {
+                    self.video_step(id, -1);
+                }
+                if k(Modifiers::NONE, Key::Period) {
+                    self.video_step(id, 1);
+                }
             }
         }
         // G/R/S on a layer in a space, right on the canvas (before R picks the
@@ -4029,6 +4646,7 @@ impl App {
 
     fn export_region(&self, d: &ExportDlg) -> Option<Rect> {
         match d.region {
+            ExportRegion::Camera(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| c.rect),
             ExportRegion::Frame => self.doc.export_frame,
             ExportRegion::Content => self.doc.content_bounds().map(|b| b.expand(d.padding)),
             ExportRegion::View => {
@@ -4104,6 +4722,19 @@ impl App {
                 ui.radio_value(&mut d.region, ExportRegion::Content, "내용 전체");
                 ui.radio_value(&mut d.region, ExportRegion::View, "지금 화면");
             });
+            if !self.doc.cameras.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("카메라");
+                    for c in &self.doc.cameras {
+                        ui.radio_value(&mut d.region, ExportRegion::Camera(c.id), c.name.as_str());
+                    }
+                });
+            }
+            if let ExportRegion::Camera(id) = d.region {
+                if !self.doc.cameras.iter().any(|c| c.id == id) {
+                    d.region = ExportRegion::Content;
+                }
+            }
             if d.region == ExportRegion::Frame && self.doc.export_frame.is_none() {
                 d.region = ExportRegion::Content;
             }
@@ -4435,6 +5066,7 @@ impl App {
                         self.mark();
                     }
                 }
+                self.cameras_panel(ui);
             }
             Tool::Space => self.space_panel(ui),
             Tool::Select => {
@@ -6079,6 +6711,23 @@ impl App {
     fn draw_overlays(&self, painter: &egui::Painter, xf: &Xf) {
         self.draw_spaces(painter, xf);
         let accent = ACCENT;
+        // canvas cameras
+        let active = crate::anim::active_camera(&self.doc, self.doc.timeline.time).map(|c| c.id);
+        for c in &self.doc.cameras {
+            let sr = xf.rect_w2s(c.rect);
+            let sel = self.cam_sel == Some(c.id) && self.tool == Tool::Frame;
+            let alive = !self.doc.timeline.on || c.anim.alive(self.doc.timeline.time);
+            let col = if alive { CAM_COLOR } else { CAM_COLOR.gamma_multiply(0.35) };
+            let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(if sel { 2.0 } else { 1.4 }, col), 10.0, 4.0));
+            let tag = if Some(c.id) == active && self.doc.timeline.on { format!("● {}", c.name) } else { c.name.clone() };
+            painter.text(sr.left_top() + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, format!("{tag}  {:.0}×{:.0}", c.rect.width(), c.rect.height()), FontId::proportional(12.0), col);
+            if sel {
+                for p in rect_handles(c.rect) {
+                    handle_box(painter, xf.w2s(p), CAM_COLOR);
+                }
+            }
+        }
         // export frame
         if let Some(fr) = self.doc.export_frame {
             let sr = xf.rect_w2s(fr);
@@ -6810,6 +7459,7 @@ impl eframe::App for App {
 
         self.handle_shortcuts(&ctx);
         crate::persp::sync_walls(&mut self.doc);
+        self.tick_timeline(&ctx);
         self.tick_videos(&ctx);
 
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
@@ -6847,6 +7497,9 @@ impl eframe::App for App {
                     });
                 });
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.doc.timeline.on && !self.ui_hidden {
+            self.timeline_ui(&ctx);
         }
         self.export_ui(&ctx);
         self.unsaved_modal(&ctx);

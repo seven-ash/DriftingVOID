@@ -50,6 +50,12 @@ scrub, step frames with `,` and `.`, and turn a frame into a photo layer from th
 properties panel. Needs ffmpeg (`winget install Gyan.FFmpeg`, or put it in
 `%APPDATA%\DriftingVOIDfmpeg`). See `docs/VIDEO.md` for the timeline and export plans.
 
+## Timeline (Ctrl+T)
+
+Alt+A plays, `,`/`.` step frames, I keys the selection (Alt+I removes), drag keys and span
+ends in the panel, right-click a track to set where a layer starts or ends. Canvas
+cameras live in the region tool (F) and can be keyed too.
+
 ## G/R/S and Space
 
 With the select tool, G/R/S moves/rotates/scales the selection from the keyboard (on
@@ -103,6 +109,7 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
+| `src/anim.rs` | Timeline, keyframes, easing, canvas cameras |
 | `src/video.rs` | ffmpeg/ffprobe: probe, frame decode, streaming playback |
 | `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |
 | `src/dial.rs` | Focus-ring dial control with reset pin |
