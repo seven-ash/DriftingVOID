@@ -6177,7 +6177,7 @@ impl App {
                 let c0 = crate::anim::key_of(l, 0.0).center;
                 let (mut x, mut y) = (c0[0], c0[1]);
                 let mut mv = false;
-                ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     crate::dial::label_cell(ui, "위치", kmark, &mut key_hit);
                     ui.label(egui::RichText::new("X").color(INK_3()));
@@ -7010,7 +7010,9 @@ impl App {
 
     /// A section title that folds its section; true while open.
     fn fold_section(ui: &mut egui::Ui, title: &str, folded: &mut bool) -> bool {
-        ui.add_space(SPACE_SM);
+        if !*folded {
+            ui.add_space(SPACE_SM);
+        }
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
         let col = if resp.hovered() { INK_2() } else { INK_3() };
         let c = pos2(r.left() + 4.0, r.center().y);
@@ -7024,7 +7026,9 @@ impl App {
         if resp.clicked() {
             *folded = !*folded;
         }
-        ui.add_space(2.0);
+        if !*folded {
+            ui.add_space(2.0);
+        }
         !*folded
     }
 
@@ -7061,7 +7065,9 @@ impl App {
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                let all_folded = self.s.folded[0] && self.s.folded[1];
+                let m = if all_folded { egui::Margin::symmetric(pad as i8, (pad * 0.5) as i8) } else { egui::Margin::same(pad as i8) };
+                theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
                     ui.set_width(main_w);
                     // floating areas size from the previous frame: ask for last frame's content height
                     let want = self.col_h[0].min(max_h);
@@ -7084,7 +7090,8 @@ impl App {
                 .order(egui::Order::Middle)
                 .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
                 .show(ctx, |ui| {
-                    theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                    let m = if self.s.folded[2] { egui::Margin::symmetric(pad as i8, (pad * 0.5) as i8) } else { egui::Margin::same(pad as i8) };
+                    theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
                         ui.set_width(side_w);
                         let want = self.col_h[1].min(max_h);
                         let out = egui::ScrollArea::vertical().id_salt("props2").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
@@ -8582,7 +8589,7 @@ fn key_icon(p: &egui::Painter, c: Pos2, ease: crate::anim::Ease, fill: Color32, 
 fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::dial::KeyMark>, key_hit: &mut bool) -> bool {
     let mut ch = false;
     let (mut x, mut y, mut w, mut h) = (r.min.x, r.min.y, r.width(), r.height());
-    ui.horizontal(|ui| {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if let Some(m) = key {
             *key_hit |= crate::dial::key_button(ui, m);
@@ -8592,7 +8599,7 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
         ui.label("Y");
         ch |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(0)).changed();
     });
-    ui.horizontal(|ui| {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if let Some(m) = key {
             *key_hit |= crate::dial::key_button(ui, m);

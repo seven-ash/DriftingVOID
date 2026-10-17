@@ -205,7 +205,8 @@ impl Widget for Dial<'_> {
         let width = ui.available_width();
         let row_h = 24.0;
         let mut out = ui
-            .horizontal(|ui| {
+            .allocate_ui_with_layout(vec2(width, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // a fixed-height row, so every item centres on the same line
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let label_w = label_width(&text, key.is_some());
                 if label_w > 0.0 {
