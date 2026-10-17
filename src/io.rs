@@ -115,13 +115,23 @@ enum FileKind {
         rotation: f32,
     },
     Vector { offset: [f32; 2], strokes: Vec<FileStroke> },
-    Raster { offset: [f32; 2], tiles: Vec<[i32; 2]> },
+    Raster {
+        offset: [f32; 2],
+        tiles: Vec<[i32; 2]>,
+        /// Recorded brush strokes and the pixels from before them (`tiles_base/`).
+        #[serde(default)]
+        recs: Vec<crate::raster::BrushRec>,
+        #[serde(default)]
+        base_tiles: Option<Vec<[i32; 2]>>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 struct FileStroke {
     color: [u8; 4],
     pts: Vec<[f32; 3]>,
+    #[serde(default)]
+    rec: Option<crate::vector::Rec>,
 }
 
 fn c2a(c: Color32) -> [u8; 4] {
@@ -202,7 +212,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                 },
                 LayerKind::Vector(v) => FileKind::Vector {
                     offset: [v.offset.x, v.offset.y],
-                    strokes: v.strokes.iter().map(|s| FileStroke { color: c2a(s.color), pts: s.pts.clone() }).collect(),
+                    strokes: v.strokes.iter().map(|s| FileStroke { color: c2a(s.color), pts: s.pts.clone(), rec: s.rec.clone() }).collect(),
                 },
                 LayerKind::Raster(r) => {
                     let mut keys = Vec::new();
@@ -214,7 +224,22 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                         zip.write_all(&t.px).map_err(|e| e.to_string())?;
                         keys.push([x, y]);
                     }
-                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys }
+                    let base_tiles = match &r.rec_base {
+                        Some(base) => {
+                            let mut bk = Vec::new();
+                            for (&(x, y), t) in base {
+                                if t.is_empty() {
+                                    continue;
+                                }
+                                zip.start_file(format!("tiles_base/{}/{}_{}.raw", l.id, x, y), deflate).map_err(|e| e.to_string())?;
+                                zip.write_all(&t.px).map_err(|e| e.to_string())?;
+                                bk.push([x, y]);
+                            }
+                            Some(bk)
+                        }
+                        None => None,
+                    };
+                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
                 }
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone() });
@@ -279,10 +304,20 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
             }),
             FileKind::Vector { offset, strokes } => LayerKind::Vector(VectorLayer {
                 offset: vec2(offset[0], offset[1]),
-                strokes: strokes.into_iter().map(|s| Arc::new(VStroke::new(s.pts, a2c(s.color)))).collect(),
+                strokes: strokes.into_iter().map(|s| Arc::new(VStroke::new(s.pts, a2c(s.color)).with_rec(s.rec))).collect(),
             }),
-            FileKind::Raster { offset, tiles } => {
-                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), tiles: Default::default() };
+            FileKind::Raster { offset, tiles, recs, base_tiles } => {
+                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), recs: recs.into_iter().map(Arc::new).collect(), ..Default::default() };
+                if let Some(bk) = base_tiles {
+                    let mut base = crate::doc::TileMap::default();
+                    for [x, y] in bk {
+                        let px = read(&format!("tiles_base/{}/{}_{}.raw", fl.id, x, y))?;
+                        if px.len() == (TILE * TILE * 4) as usize {
+                            base.insert((x, y), Arc::new(Tile { rev: next_rev(), px }));
+                        }
+                    }
+                    r.rec_base = Some(base);
+                }
                 for [x, y] in tiles {
                     let px = read(&format!("tiles/{}/{}_{}.raw", fl.id, x, y))?;
                     if px.len() == (TILE * TILE * 4) as usize {
@@ -321,5 +356,31 @@ mod video_tests {
         assert_eq!(v.info, info);
         assert_eq!(b.src.size(), vec2(1920.0, 1080.0));
         assert_eq!(b.src.rgba.dimensions(), (96, 54));
+    }
+
+    #[test]
+    fn recordings_round_trip() {
+        use crate::raster::{BrushParams, BrushRec, RasterLayer, RasterStroke};
+        let params = BrushParams { color: Color32::RED, radius: 4.0, opacity: 1.0, hardness: 1.0, pressure_size: false, pressure_opacity: false, erase: false };
+        let mut r = RasterLayer { rec_base: Some(Default::default()), ..Default::default() };
+        let pts = vec![[10.0, 10.0, 1.0], [40.0, 10.0, 1.0]];
+        let mut st = RasterStroke::new(params);
+        for p in &pts {
+            st.add_point(&mut r, pos2(p[0], p[1]), p[2]);
+        }
+        st.finish(&mut r);
+        r.recs.push(Arc::new(BrushRec { start: 1.5, params, pts, times: vec![0.0, 0.4] }));
+        let mut doc = Document::default();
+        doc.insert("b".into(), LayerKind::Raster(r), None);
+        let v = VStroke::timed(vec![[0.0, 0.0, 1.0], [5.0, 0.0, 1.0]], vec![0.0, 0.3], Color32::WHITE, 2.0);
+        doc.insert("p".into(), LayerKind::Vector(VectorLayer { offset: vec2(0.0, 0.0), strokes: vec![Arc::new(v)] }), None);
+        let path = std::env::temp_dir().join("dv_rec_roundtrip.void");
+        save_project(&doc, &path).unwrap();
+        let back = load_project(&path).unwrap();
+        let LayerKind::Raster(br) = &back.layers[0].kind else { panic!() };
+        assert_eq!((br.recs.len(), br.recs[0].start, br.recs[0].times.clone()), (1, 1.5, vec![0.0, 0.4]));
+        assert!(br.rec_base.is_some());
+        let LayerKind::Vector(bv) = &back.layers[1].kind else { panic!() };
+        assert_eq!(bv.strokes[0].rec.as_ref().unwrap().times, vec![0.0, 0.3]);
     }
 }

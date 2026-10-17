@@ -40,6 +40,8 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     let base = Transform::from_translate(-region.min.x, -region.min.y).post_scale(scale, scale);
     let cams = crate::persp::cameras(&doc.spaces);
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
+        let timed = crate::anim::layer_at_time(doc, layer);
+        let layer = timed.as_ref().unwrap_or(layer);
         if !layer.shown_bounds(&cams).is_some_and(|b| b.intersects(region)) {
             continue;
         }

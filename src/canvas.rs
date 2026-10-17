@@ -402,6 +402,8 @@ pub fn draw_doc(
         if !layer.visible || layer.opacity <= 0.0 {
             continue;
         }
+        let timed = crate::anim::layer_at_time(doc, layer);
+        let layer = timed.as_ref().unwrap_or(layer);
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
             if skip_text != Some(layer.id) {
                 let clip = match doc.spaces.iter().find(|s| s.id == pl.space) {

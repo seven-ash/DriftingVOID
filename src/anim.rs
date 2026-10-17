@@ -315,6 +315,39 @@ pub fn evaluate(doc: &mut Document) {
     }
 }
 
+/// A layer as it shows at the playhead when it has recorded strokes (pen strokes
+/// partly drawn, brush strokes replayed). None: draw it as it is.
+pub fn layer_at_time(doc: &Document, l: &Layer) -> Option<Layer> {
+    if !doc.timeline.on {
+        return None;
+    }
+    let t = doc.timeline.time;
+    match &l.kind {
+        LayerKind::Vector(v) if v.strokes.iter().any(|s| s.rec.is_some()) => {
+            let mut out = l.clone();
+            if let LayerKind::Vector(ov) = &mut out.kind {
+                ov.strokes = v
+                    .strokes
+                    .iter()
+                    .filter_map(|s| match s.at_time(t) {
+                        None => None,
+                        Some(None) => Some(s.clone()),
+                        Some(Some(part)) => Some(std::sync::Arc::new(part)),
+                    })
+                    .collect();
+            }
+            Some(out)
+        }
+        LayerKind::Raster(r) => {
+            let rl = r.replayed(t)?;
+            let mut out = l.clone();
+            out.kind = LayerKind::Raster(rl);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 /// Video time shown by a video layer at timeline time `t`.
 pub fn video_time(anim: Option<&Anim>, speed: f64, t: f64) -> f64 {
     match anim {
@@ -384,5 +417,53 @@ mod tests {
         assert_eq!(s.b - s.a, vec2(100.0, 50.0));
         assert!((l.opacity - 0.5).abs() < 1e-6);
         assert_eq!(key_of(l, 0.5).center, [125.0, 25.0]);
+    }
+
+    #[test]
+    fn recorded_pen_stroke_draws_in() {
+        use crate::doc::VectorLayer;
+        use crate::vector::VStroke;
+        use std::sync::Arc;
+        let pts: Vec<[f32; 3]> = (0..11).map(|i| [i as f32 * 10.0, 0.0, 2.0]).collect();
+        let times: Vec<f32> = (0..11).map(|i| i as f32 * 0.1).collect();
+        let st = VStroke::timed(pts, times, Color32::WHITE, 2.0);
+        let mut doc = Document::default();
+        let id = doc.insert("p".into(), LayerKind::Vector(VectorLayer { offset: Vec2::ZERO, strokes: vec![Arc::new(st)] }), None);
+        doc.timeline.on = true;
+        let count = |doc: &Document| match layer_at_time(doc, doc.get(id).unwrap()).map(|l| l.kind) {
+            Some(LayerKind::Vector(v)) => v.strokes.first().map_or(0, |s| s.pts.len()),
+            _ => 99,
+        };
+        doc.timeline.time = 1.0;
+        assert_eq!(count(&doc), 0, "not started");
+        doc.timeline.time = 2.45;
+        assert_eq!(count(&doc), 5, "half drawn");
+        doc.timeline.time = 9.0;
+        assert_eq!(count(&doc), 11, "complete");
+    }
+
+    #[test]
+    fn recorded_brush_replays() {
+        use crate::raster::{BrushParams, BrushRec, RasterLayer, RasterStroke};
+        use std::sync::Arc;
+        let params = BrushParams { color: Color32::RED, radius: 6.0, opacity: 1.0, hardness: 1.0, pressure_size: false, pressure_opacity: false, erase: false };
+        let mut r = RasterLayer { rec_base: Some(Default::default()), ..Default::default() };
+        // two strokes drawn at t = 0 (left) and t = 5 (right), each 1 s long
+        for (start, x0) in [(0.0, 0.0f32), (5.0, 300.0)] {
+            let pts: Vec<[f32; 3]> = (0..=10).map(|i| [x0 + i as f32 * 10.0, 50.0, 1.0]).collect();
+            let times: Vec<f32> = (0..=10).map(|i| i as f32 * 0.1).collect();
+            let mut st = RasterStroke::new(params);
+            for p in &pts {
+                st.add_point(&mut r, egui::pos2(p[0], p[1]), p[2]);
+            }
+            st.finish(&mut r);
+            r.recs.push(Arc::new(BrushRec { start, params, pts, times }));
+        }
+        assert!(r.replayed(7.0).is_none(), "after the end: the final pixels");
+        let mid = r.replayed(0.5).unwrap();
+        assert!(mid.pixel(20, 50)[3] > 200 && mid.pixel(90, 50)[3] == 0, "first stroke half drawn");
+        assert_eq!(mid.pixel(350, 50)[3], 0, "second not yet");
+        let later = r.replayed(5.55).unwrap();
+        assert!(later.pixel(90, 50)[3] > 200 && later.pixel(340, 50)[3] > 200 && later.pixel(395, 50)[3] == 0);
     }
 }

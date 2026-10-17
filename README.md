@@ -56,7 +56,8 @@ Alt+A plays, `,`/`.` step frames, I keys the selection (Alt+I removes), drag key
 ends in the panel, right-click a track to set where a layer starts or ends. Canvas
 cameras live in the region tool (F) and can be keyed too. Sound files (mp3, wav, …) go
 on the timeline as clips you can move and trim; video soundtracks play along.
-Ctrl+Shift+E exports a video (camera, export frame, content or view; H.264/H.265/AV1,
+"● 녹화" in the timeline records pen and brush strokes as you draw them, and they replay
+over time. Ctrl+Shift+E exports a video (camera, export frame, content or view; H.264/H.265/AV1,
 ProRes, VP9, GIF or PNG frames; size by width or height).
 
 ## G/R/S and Space

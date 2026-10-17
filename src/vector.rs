@@ -3,6 +3,21 @@
 //! tapered capsules.
 
 use egui::{Color32, Pos2, Rect, Vec2, pos2, vec2};
+use serde::{Deserialize, Serialize};
+
+/// A stroke recorded over time: drawing starts at timeline time `start`, and point
+/// i appears `times[i]` seconds later.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rec {
+    pub start: f64,
+    pub times: Vec<f32>,
+}
+
+impl Rec {
+    pub fn end(&self) -> f64 {
+        self.start + self.times.last().copied().unwrap_or(0.0) as f64
+    }
+}
 
 pub struct VStroke {
     /// (x, y, radius) in layer-local space.
@@ -11,6 +26,8 @@ pub struct VStroke {
     /// Display triangles in layer-local space (3 points per triangle).
     pub tris: Vec<Pos2>,
     pub bounds: Rect,
+    /// Timing when the stroke was recorded on the timeline.
+    pub rec: Option<Rec>,
 }
 
 fn p(a: &[f32; 3]) -> Pos2 {
@@ -28,7 +45,54 @@ fn circle_fan(out: &mut Vec<Pos2>, c: Pos2, r: f32) {
     }
 }
 
+fn close(a: &[f32; 3], b: &[f32; 3]) -> bool {
+    (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+}
+
 impl VStroke {
+    /// A recorded stroke (point times relative to `start`).
+    pub fn timed(pts: Vec<[f32; 3]>, times: Vec<f32>, color: Color32, start: f64) -> Self {
+        let (mut pp, mut tt): (Vec<[f32; 3]>, Vec<f32>) = (Vec::new(), Vec::new());
+        for (p, t) in pts.into_iter().zip(times) {
+            if pp.last().is_some_and(|l| close(&p, l)) {
+                continue;
+            }
+            pp.push(p);
+            tt.push(t);
+        }
+        let mut s = Self::new(pp, color);
+        tt.truncate(s.pts.len());
+        s.rec = Some(Rec { start, times: tt });
+        s
+    }
+
+    /// Keeps a recording through a rebuild (move, scale): times follow the points.
+    pub fn with_rec(mut self, rec: Option<Rec>) -> Self {
+        if let Some(mut r) = rec {
+            r.times.resize(self.pts.len(), r.times.last().copied().unwrap_or(0.0));
+            self.rec = Some(r);
+        }
+        self
+    }
+
+    /// What shows at timeline time `t`: None (not started), Some(None) (all of it)
+    /// or Some(Some(part)) while it is being drawn.
+    pub fn at_time(&self, t: f64) -> Option<Option<VStroke>> {
+        let Some(r) = &self.rec else { return Some(None) };
+        let local = (t - r.start) as f32;
+        if local < 0.0 {
+            return None;
+        }
+        let n = r.times.partition_point(|x| *x <= local);
+        if n >= self.pts.len() {
+            return Some(None);
+        }
+        if n == 0 {
+            return None;
+        }
+        Some(Some(VStroke::new(self.pts[..n].to_vec(), self.color)))
+    }
+
     pub fn new(mut pts: Vec<[f32; 3]>, color: Color32) -> Self {
         pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3);
         let mut tris = Vec::new();
@@ -60,7 +124,7 @@ impl VStroke {
                 }
             }
         }
-        Self { pts, color, tris, bounds }
+        Self { pts, color, tris, bounds, rec: None }
     }
 
     pub fn hit(&self, q: Pos2, tol: f32) -> bool {

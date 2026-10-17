@@ -32,7 +32,77 @@ pub struct RasterLayer {
     /// Integer-valued world offset of local pixel (0,0).
     pub offset: Vec2,
     pub tiles: TileMap,
+    /// Brush strokes recorded on the timeline (in drawing order) and the pixels from
+    /// before the first of them; `tiles` stays the final picture.
+    pub recs: Vec<Arc<BrushRec>>,
+    pub rec_base: Option<TileMap>,
 }
+
+/// One recorded brush (or eraser) stroke: input points (local x, y, pressure) with
+/// times relative to `start` on the timeline.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BrushRec {
+    pub start: f64,
+    pub params: BrushParams,
+    pub pts: Vec<[f32; 3]>,
+    pub times: Vec<f32>,
+}
+
+impl BrushRec {
+    pub fn end(&self) -> f64 {
+        self.start + self.times.last().copied().unwrap_or(0.0) as f64
+    }
+}
+
+type ReplayKey = (usize, usize, u64, u32, u32);
+
+/// Recent replays (paused playhead, canvas and export asking for the same time).
+static REPLAYS: std::sync::Mutex<Vec<(ReplayKey, RasterLayer)>> = std::sync::Mutex::new(Vec::new());
+
+impl RasterLayer {
+    /// When the last recorded stroke finishes.
+    pub fn rec_end(&self) -> Option<f64> {
+        self.recs.iter().map(|r| r.end()).reduce(f64::max)
+    }
+
+    /// The layer as it looks at timeline time `t`: the pixels from before recording
+    /// plus every recorded stroke drawn up to `t`. None when `tiles` already is it.
+    pub fn replayed(&self, t: f64) -> Option<RasterLayer> {
+        let base = self.rec_base.as_ref()?;
+        if self.recs.is_empty() || self.rec_end().is_some_and(|e| t >= e) {
+            return None;
+        }
+        let key = (Arc::as_ptr(self.recs.last().unwrap()) as usize, self.recs.len(), t.to_bits(), self.offset.x.to_bits(), self.offset.y.to_bits());
+        if let Ok(c) = REPLAYS.lock() {
+            if let Some((_, l)) = c.iter().find(|(k, _)| *k == key) {
+                return Some(l.clone());
+            }
+        }
+        let mut l = RasterLayer { offset: self.offset, tiles: base.clone(), ..Default::default() };
+        for r in &self.recs {
+            let local = (t - r.start) as f32;
+            if local < 0.0 {
+                continue;
+            }
+            let mut st = RasterStroke::new(r.params);
+            for (p, tt) in r.pts.iter().zip(&r.times) {
+                if *tt > local {
+                    break;
+                }
+                st.add_point(&mut l, egui::pos2(p[0], p[1]), p[2]);
+            }
+            st.finish(&mut l);
+        }
+        if let Ok(mut c) = REPLAYS.lock() {
+            c.push((key, l.clone()));
+            if c.len() > 8 {
+                c.remove(0);
+            }
+        }
+        Some(l)
+    }
+}
+
 
 pub fn tile_of(x: i32, y: i32) -> ((i32, i32), usize) {
     let tx = x.div_euclid(TILE);
@@ -122,7 +192,7 @@ impl RasterLayer {
     /// Splits off the pixels whose centres lie inside the given world polygons
     /// (even-odd rule): returns (patch, rest), both with this layer's offset.
     pub fn lift(&self, polys: &[Vec<Pos2>]) -> (RasterLayer, RasterLayer) {
-        let mut patch = RasterLayer { offset: self.offset, tiles: Default::default() };
+        let mut patch = RasterLayer { offset: self.offset, ..Default::default() };
         let mut rest = self.clone();
         let mut touched = std::collections::HashSet::new();
         for poly in polys {
@@ -231,7 +301,7 @@ pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<Raster
         .post_translate(c.x - nx0, c.y - ny0);
     let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
     out.draw_pixmap(0, 0, pm.as_ref(), &paint, ts, None);
-    let mut n = RasterLayer { offset: Vec2::new(nx0, ny0), tiles: Default::default() };
+    let mut n = RasterLayer { offset: Vec2::new(nx0, ny0), ..Default::default() };
     let data = out.data();
     for y in 0..nh as i32 {
         for x in 0..nw as i32 {
@@ -247,7 +317,7 @@ pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<Raster
     Some(n)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BrushParams {
     pub color: Color32,
     /// Radius in world pixels at full pressure.

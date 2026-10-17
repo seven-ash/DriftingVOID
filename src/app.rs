@@ -292,7 +292,7 @@ pub(crate) fn apply_part(o: &Layer, part: &Part, c: Pos2, s: f32, th: f32, d: Ve
                                 [p.x, p.y, q[2] * s]
                             })
                             .collect();
-                        v.strokes[i] = Arc::new(VStroke::new(pts, st.color));
+                        v.strokes[i] = Arc::new(VStroke::new(pts, st.color).with_rec(st.rec.clone()));
                     }
                 }
             }
@@ -806,6 +806,13 @@ pub struct App {
     audio_tx: std::sync::mpsc::Sender<(String, Result<crate::audio::AudioData, String>)>,
     audio_rx: std::sync::mpsc::Receiver<(String, Result<crate::audio::AudioData, String>)>,
     aud_sel: Option<u64>,
+    /// Stroke recording: the record switch, and for the stroke being drawn its clock
+    /// (wall start, timeline start, live timing or instant) with the points' times
+    /// (and, for brushes, the input points).
+    rec_on: bool,
+    rec_clock: Option<(std::time::Instant, f64, bool)>,
+    rec_times: Vec<f32>,
+    rec_pts: Vec<[f32; 3]>,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
     middle_moved: bool,
@@ -908,6 +915,10 @@ impl App {
             audio_tx: audio_ch.0,
             audio_rx: audio_ch.1,
             aud_sel: None,
+            rec_on: false,
+            rec_clock: None,
+            rec_times: Vec::new(),
+            rec_pts: Vec::new(),
             loupe_tex: None,
             middle_moved: false,
             input_log: Default::default(),
@@ -1699,6 +1710,27 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// After a live recorded stroke: the playhead moves to its end (so the next
+    /// stroke follows on) and the timeline grows to fit.
+    fn after_recorded(&mut self, end: f64) {
+        if end > self.doc.timeline.duration {
+            self.doc.timeline.duration = end.ceil();
+        }
+        if self.tl_play.is_none() {
+            self.doc.timeline.time = end.min(self.doc.timeline.duration);
+            crate::anim::evaluate(&mut self.doc);
+        }
+    }
+
+    /// Recorded stroke intervals of a layer (for the timeline).
+    fn rec_spans(&self, id: LayerId) -> Vec<(f64, f64)> {
+        match self.doc.get(id).map(|l| &l.kind) {
+            Some(LayerKind::Vector(v)) => v.strokes.iter().filter_map(|s| s.rec.as_ref().map(|r| (r.start, r.end()))).collect(),
+            Some(LayerKind::Raster(r)) => r.recs.iter().map(|x| (x.start, x.end())).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// I: keys the selection (or, with the region tool, the selected camera) at the
     /// playhead.
     fn insert_keys(&mut self) {
@@ -1867,6 +1899,14 @@ impl App {
             ui.label("길이");
             changed |= ui.add(egui::DragValue::new(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
             changed |= ui.checkbox(&mut tl.autokey, "자동 키").on_hover_text("선택한 레이어를 바꾸면 그 시각에 키를 넣어").changed();
+            let rec_label = egui::RichText::new("● 녹화").color(if self.rec_on { Color32::from_rgb(255, 90, 90) } else { INK_3 });
+            if ui
+                .selectable_label(self.rec_on, rec_label)
+                .on_hover_text("펜·브러시로 그리는 과정을 재생 헤드 위치부터 기록해. 다 그리면 재생 헤드가 그 끝으로 가서 다음 획이 이어져. 재생하면서 그려도 돼")
+                .clicked()
+            {
+                self.rec_on = !self.rec_on;
+            }
             ui.separator();
             if ui.button("키 넣기").on_hover_text("I").clicked() {
                 self.insert_keys();
@@ -1926,7 +1966,12 @@ impl App {
         let mut rows: Vec<(TlRow, String, bool)> = self.doc.cameras.iter().map(|c| (TlRow::Cam(c.id), c.name.clone(), true)).collect();
         rows.extend(self.doc.audio.iter().map(|a| (TlRow::Audio(a.id), a.name.clone(), false)));
         for l in self.doc.layers.iter().rev() {
-            if l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
+            let recorded = match &l.kind {
+                LayerKind::Vector(v) => v.strokes.iter().any(|s| s.rec.is_some()),
+                LayerKind::Raster(r) => !r.recs.is_empty(),
+                _ => false,
+            };
+            if recorded || l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
                 rows.push((TlRow::Layer(l.id), l.display_name(), false));
             }
         }
@@ -2002,6 +2047,14 @@ impl App {
                     }
                 }
                 continue;
+            }
+            if let TlRow::Layer(lid) = row {
+                // recorded strokes: thin red marks along the bottom of the row
+                for (a, b) in self.rec_spans(*lid) {
+                    let x0 = x_of(a);
+                    let x1 = x_of(b).max(x0 + 2.0);
+                    p.rect_filled(Rect::from_min_max(pos2(x0, rr.bottom() - 5.0), pos2(x1, rr.bottom() - 2.0)), 1.0, Color32::from_rgb(255, 90, 90).gamma_multiply(0.8));
+                }
             }
             let anim = self.row_anim(*row);
             match anim.and_then(|a| a.span) {
@@ -3257,6 +3310,7 @@ impl App {
                 } else {
                     self.paint_target(false)
                 };
+                let (tl_on, tl_time) = (self.doc.timeline.on, self.doc.timeline.time);
                 let layer = self.doc.get_mut(id).unwrap();
                 match &mut layer.kind {
                     LayerKind::Raster(r) => {
@@ -3274,6 +3328,19 @@ impl App {
                             pressure_opacity: !erase && self.s.brush_pressure_opacity,
                             erase,
                         };
+                        // recording: a live stroke when recording, or an instant one on a
+                        // layer that already has recorded strokes (so replay stays whole)
+                        let record = tl_on && (self.rec_on || !r.recs.is_empty());
+                        self.rec_clock = None;
+                        if record {
+                            if r.rec_base.is_none() {
+                                r.rec_base = Some(r.tiles.clone());
+                            }
+                            let lp = w - r.offset;
+                            self.rec_clock = Some((std::time::Instant::now(), tl_time, self.rec_on));
+                            self.rec_pts = vec![[lp.x, lp.y, pressure]];
+                            self.rec_times = vec![0.0];
+                        }
                         let mut st = RasterStroke::new(p);
                         st.add_point(r, w - r.offset, pressure);
                         self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure) });
@@ -3304,6 +3371,8 @@ impl App {
                 };
                 let base_r = self.s.pen_size * 0.5;
                 let l = w - off;
+                self.rec_clock = (self.doc.timeline.on && self.rec_on).then(|| (std::time::Instant::now(), self.doc.timeline.time, true));
+                self.rec_times = vec![0.0];
                 self.drag = Some(Drag::Vector {
                     id,
                     pts: vec![[l.x, l.y, radius_for(base_r, pressure, self.s.pen_pressure)]],
@@ -4472,6 +4541,11 @@ impl App {
                 let id = *id;
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
                     st.add_point(r, np - r.offset, npr);
+                    if let Some((c, _, live)) = self.rec_clock {
+                        let lp = np - r.offset;
+                        self.rec_pts.push([lp.x, lp.y, npr]);
+                        self.rec_times.push(if live { c.elapsed().as_secs_f32() } else { 0.0 });
+                    }
                 }
                 self.changed = true;
                 self.modified = true;
@@ -4488,6 +4562,9 @@ impl App {
                 let last = pts.last().copied().unwrap();
                 if (pos2(last[0], last[1]) - l).length() >= 0.75 / zoom {
                     pts.push([l.x, l.y, radius_for(*base_r, npr, *use_p)]);
+                    if let Some((c, _, _)) = self.rec_clock {
+                        self.rec_times.push(c.elapsed().as_secs_f32());
+                    }
                 }
             }
             Drag::VErase { id, r } => {
@@ -4618,8 +4695,17 @@ impl App {
                 self.remap_pixel_sel(center, s, th, Vec2::ZERO);
             }
             Drag::Raster { id, stroke: Some(st), .. } => {
+                let params = st.p;
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                     st.finish(r);
+                    if let Some((_, start, live)) = self.rec_clock.take() {
+                        let rec = crate::raster::BrushRec { start, params, pts: std::mem::take(&mut self.rec_pts), times: std::mem::take(&mut self.rec_times) };
+                        let end = rec.end();
+                        r.recs.push(Arc::new(rec));
+                        if live {
+                            self.after_recorded(end);
+                        }
+                    }
                 }
             }
             Drag::Vector { id, mut pts, color, smooth, base_r, pressure, .. } => {
@@ -4629,8 +4715,22 @@ impl App {
                     let last = pts.last().copied().unwrap();
                     if (pos2(last[0], last[1]) - l).length() > 0.5 {
                         pts.push([l.x, l.y, radius_for(base_r, smooth.1, pressure)]);
+                        if let Some((c, _, _)) = self.rec_clock {
+                            self.rec_times.push(c.elapsed().as_secs_f32());
+                        }
                     }
-                    v.strokes.push(Arc::new(VStroke::new(pts, color)));
+                    let mut recorded_end = None;
+                    match self.rec_clock.take() {
+                        Some((_, start, _)) => {
+                            let st = VStroke::timed(pts, std::mem::take(&mut self.rec_times), color, start);
+                            recorded_end = st.rec.as_ref().map(|r| r.end());
+                            v.strokes.push(Arc::new(st));
+                        }
+                        None => v.strokes.push(Arc::new(VStroke::new(pts, color))),
+                    }
+                    if let Some(end) = recorded_end {
+                        self.after_recorded(end);
+                    }
                     self.changed = true;
                     self.modified = true;
                 }
@@ -7839,7 +7939,7 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
                             [p.x, p.y, q[2] * s]
                         })
                         .collect();
-                    Arc::new(VStroke::new(pts, st.color))
+                    Arc::new(VStroke::new(pts, st.color).with_rec(st.rec.clone()))
                 })
                 .collect();
         }
