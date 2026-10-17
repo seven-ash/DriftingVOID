@@ -611,6 +611,17 @@ pub fn euler_xyz(deg: V3) -> M3 {
     mul_mm(&rz, &mul_mm(&ry, &rx))
 }
 
+/// Inverse of `euler_xyz`: XYZ Euler angles (degrees) of a rotation matrix.
+pub fn euler_from(r: &M3) -> V3 {
+    let b = (-r[2][0]).clamp(-1.0, 1.0).asin();
+    let (a, c) = if b.cos().abs() > 1e-9 {
+        (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0]))
+    } else {
+        (0.0, (-r[0][1]).atan2(r[1][1]))
+    };
+    [a.to_degrees(), b.to_degrees(), c.to_degrees()]
+}
+
 pub fn invert(m: &M3) -> Option<M3> {
     let c0 = cross(m[1], m[2]);
     let det = dot(m[0], c0);
@@ -984,5 +995,18 @@ mod tests {
         pl.rot = [12.5, -3.0, 44.0];
         let back: Placement = serde_json::from_str(&serde_json::to_string(&pl).unwrap()).unwrap();
         assert_eq!(back, pl);
+    }
+
+    #[test]
+    fn euler_round_trip() {
+        for e in [[10.0, 20.0, 30.0], [-170.0, 45.0, 5.0], [0.0, -89.0, 120.0], [33.0, 0.0, -10.0]] {
+            let back = euler_from(&euler_xyz(e));
+            let (m1, m2) = (euler_xyz(e), euler_xyz(back));
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!((m1[i][j] - m2[i][j]).abs() < 1e-9, "{e:?} -> {back:?}");
+                }
+            }
+        }
     }
 }

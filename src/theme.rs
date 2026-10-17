@@ -225,11 +225,16 @@ fn radial(painter: &Painter, c: Pos2, r: f32, color: Color32) {
     painter.add(egui::Shape::mesh(m));
 }
 
-pub fn draw_ground(painter: &Painter, rect: Rect, xf: &crate::canvas::Xf) {
+/// The canvas background without its dot grid (also the 3D workspace's).
+pub fn draw_void(painter: &Painter, rect: Rect) {
     painter.rect_filled(rect, 0.0, VOID);
     let d = rect.size().max_elem();
     radial(painter, rect.left_bottom() + vec2(rect.width() * 0.12, -rect.height() * 0.1), d * 0.55, BLOOM_WARM.gamma_multiply(0.07));
     radial(painter, rect.right_top() + vec2(-rect.width() * 0.15, rect.height() * 0.08), d * 0.5, BLOOM_COOL.gamma_multiply(0.08));
+}
+
+pub fn draw_ground(painter: &Painter, rect: Rect, xf: &crate::canvas::Xf) {
+    draw_void(painter, rect);
     // drifting dot grid in world space, spacing kept >= 28 screen points
     let mut step = 32.0;
     while step * xf.zoom < 28.0 {

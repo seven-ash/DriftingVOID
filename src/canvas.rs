@@ -67,7 +67,7 @@ impl TexCache {
     }
 
     /// Texture of a layer's 2D content at `res` texels per canvas pixel.
-    fn placed(&mut self, ctx: &Context, layer: &Layer, res: f32) -> Option<(egui::TextureId, Rect, Vec2)> {
+    pub fn placed(&mut self, ctx: &Context, layer: &Layer, res: f32) -> Option<(egui::TextureId, Rect, Vec2)> {
         let key = content_key(layer) ^ (res.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let frame = self.frame;
         if let Some(e) = self.placed.get_mut(&layer.id) {

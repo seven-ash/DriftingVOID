@@ -649,6 +649,14 @@ pub struct App {
     space_axis: u8,
     space_line: Option<usize>,
     space_new: bool,
+    /// 3D workspace (phase 3): on/off, its view, a running G/R/S, a navigation drag,
+    /// when Tab went down, and the hold-Tab peek at the other workspace.
+    ws3d: bool,
+    view3d: Option<crate::view3d::View3d>,
+    modal3d: Option<crate::view3d::Modal>,
+    nav3d: Option<crate::view3d::Nav>,
+    tab_t0: Option<f64>,
+    peek: bool,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
     show_log: bool,
@@ -717,6 +725,12 @@ impl App {
             space_axis: 0,
             space_line: None,
             space_new: false,
+            ws3d: false,
+            view3d: None,
+            modal3d: None,
+            nav3d: None,
+            tab_t0: None,
+            peek: false,
             middle_moved: false,
             input_log: Default::default(),
             show_log: false,
@@ -796,6 +810,27 @@ impl App {
                     if mode == "select" {
                         app.tool = Tool::Select;
                         app.sel = Some(t1);
+                    }
+                    // DV_WS3D=persp|camera|top|front|peek: open the 3D workspace (or its peek)
+                    if let Ok(v) = std::env::var("DV_WS3D") {
+                        app.sel = Some(t2);
+                        if v == "peek" {
+                            app.peek = true;
+                        } else {
+                            app.toggle_ws();
+                            if let Some(view) = app.view3d.as_mut() {
+                                match v.as_str() {
+                                    "camera" => view.camera = true,
+                                    "top" => view.preset(7, false),
+                                    "front" => view.preset(1, false),
+                                    _ => {
+                                        view.yaw += 35.0;
+                                        view.pitch += 12.0;
+                                        view.dist *= 1.6;
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Ok(out) = std::env::var("DV_SPACE_EXPORT") {
                         if let Some(b) = app.doc.content_bounds() {
@@ -1881,6 +1916,323 @@ impl App {
         }
     }
 
+    /// Space the 3D workspace shows: the selected layer's, the one already in view,
+    /// the active one in the space tool, else the first that can be solved.
+    fn ws_space(&self) -> Option<(u64, crate::persp::Camera)> {
+        let cams = crate::persp::cameras(&self.doc.spaces);
+        let ok = |s: &u64| cams.contains_key(s);
+        let pick = self
+            .sel_layer()
+            .and_then(|l| l.place.as_ref())
+            .map(|p| p.space)
+            .filter(ok)
+            .or(self.view3d.as_ref().map(|v| v.space).filter(ok))
+            .or(self.space_sel.filter(ok))
+            .or_else(|| self.doc.spaces.iter().map(|s| s.id).find(ok))?;
+        cams.get(&pick).map(|c| (pick, c.clone()))
+    }
+
+    fn toggle_ws(&mut self) {
+        if self.ws3d {
+            self.cancel_modal3d();
+            self.nav3d = None;
+            self.ws3d = false;
+            self.status = "2D 작업 공간".into();
+        } else if let Some((sid, cam)) = self.ws_space() {
+            if self.view3d.as_ref().is_none_or(|v| v.space != sid) {
+                self.view3d = Some(crate::view3d::View3d::user(sid, &cam));
+            }
+            self.finish_text_edit();
+            self.drag = None;
+            self.ws3d = true;
+            self.status = "3D 작업 공간 · Tab: 2D로 · 꾹 누르면 미리보기".into();
+        }
+    }
+
+    fn cancel_modal3d(&mut self) {
+        if let Some(m) = self.modal3d.take() {
+            if let Some(l) = self.doc.get_mut(m.id) {
+                l.place = Some(m.orig);
+            }
+        }
+    }
+
+    fn canvas_3d(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, rect: Rect, sid: u64, cam: &crate::persp::Camera) {
+        use crate::view3d::{Proj, View3d};
+        if self.view3d.as_ref().is_none_or(|v| v.space != sid) {
+            self.view3d = Some(View3d::user(sid, cam));
+        }
+        let painter = ui.painter_at(rect);
+        theme::draw_void(&painter, rect);
+        self.tex.begin_frame();
+        let proj = Proj::new(self.view3d.as_ref().unwrap(), cam, rect);
+        self.handle_3d_input(ctx, rect, ui.layer_id(), &proj);
+        let view = self.view3d.clone().unwrap();
+        let proj = Proj::new(&view, cam, rect);
+        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel);
+        if crate::glass::available() {
+            painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
+        }
+        match &self.modal3d {
+            Some(m) => {
+                crate::view3d::hud(&painter, rect, &m.label());
+                if m.op != crate::view3d::Op::Grab {
+                    if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+                        painter.extend(Shape::dashed_line(&[m.center, hp], Stroke::new(1.0, INK_2), 4.0, 4.0));
+                    }
+                }
+            }
+            None => {
+                let name = self.doc.spaces.iter().find(|s| s.id == sid).map(|s| s.name.clone()).unwrap_or_default();
+                let mode = if view.camera { "카메라" } else if view.ortho { "직교" } else { "원근" };
+                crate::view3d::hud(&painter, rect, &format!("{name} · {mode} · 가운데 버튼: 회전 (Shift 이동, Ctrl 확대) · 휠: 확대 · G/R/S · Tab: 2D"));
+            }
+        }
+        if crate::glass::available() {
+            painter.add(crate::glass::ui_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
+        }
+        if self.modal3d.is_some() || self.nav3d.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn handle_3d_input(&mut self, ctx: &egui::Context, rect: Rect, layer: egui::LayerId, proj: &crate::view3d::Proj) {
+        use crate::view3d::{Modal, Nav, Op};
+        let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        let typing = ctx.egui_wants_keyboard_input();
+        let over = |p: Pos2| rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == layer);
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let pen = crate::penhook::state();
+        let sid = self.view3d.as_ref().map(|v| v.space);
+        let nav_of = |m: Modifiers| if m.shift { Nav::Pan } else if m.ctrl { Nav::Zoom } else { Nav::Orbit };
+        // pen side button: orbit (Shift: pan, Ctrl: zoom) while hovering
+        if pen.barrel && pen.in_range && self.nav3d.is_none() && self.modal3d.is_none() {
+            if let Some(hp) = hover.filter(|p| over(*p)) {
+                self.nav3d = Some(nav_of(mods));
+                self.source = Source::PenHover;
+                self.last_screen = hp;
+            }
+        }
+        if (!pen.barrel || !pen.in_range) && self.source == Source::PenHover && self.nav3d.is_some() {
+            self.nav3d = None;
+        }
+        let mut click: Option<Pos2> = None;
+        let mut cancel = false;
+        for ev in &events {
+            match ev {
+                egui::Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, modifiers } if over(*pos) && self.modal3d.is_none() => {
+                    self.nav3d = Some(nav_of(*modifiers));
+                    self.source = Source::Middle;
+                    self.last_screen = *pos;
+                }
+                egui::Event::PointerButton { button: PointerButton::Middle, pressed: false, .. } if self.source == Source::Middle => {
+                    self.nav3d = None;
+                }
+                egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } if over(*pos) => click = Some(*pos),
+                egui::Event::PointerButton { pos, button: PointerButton::Secondary, pressed: true, .. } if over(*pos) => cancel = true,
+                egui::Event::Touch { phase: TouchPhase::Start, pos, force: Some(_), .. } if over(*pos) && !pen.barrel => click = Some(*pos),
+                egui::Event::Touch { phase: TouchPhase::Move, pos, .. } if self.nav3d.is_some() && self.source == Source::PenHover => {
+                    let d = *pos - self.last_screen;
+                    self.last_screen = *pos;
+                    if let (Some(v), Some(n)) = (self.view3d.as_mut(), self.nav3d) {
+                        crate::view3d::navigate(v, proj, n, d);
+                    }
+                }
+                egui::Event::PointerMoved(p) if self.nav3d.is_some() => {
+                    let d = *p - self.last_screen;
+                    self.last_screen = *p;
+                    if let (Some(v), Some(n)) = (self.view3d.as_mut(), self.nav3d) {
+                        crate::view3d::navigate(v, proj, n, d);
+                    }
+                }
+                egui::Event::MouseWheel { unit, delta, .. } if hover.is_some_and(|p| over(p)) => {
+                    let dy = match unit {
+                        egui::MouseWheelUnit::Point => delta.y,
+                        egui::MouseWheelUnit::Line => delta.y * 40.0,
+                        egui::MouseWheelUnit::Page => delta.y * 400.0,
+                    };
+                    if let Some(v) = self.view3d.as_mut() {
+                        crate::view3d::zoom(v, dy as f64 * 0.0025);
+                    }
+                }
+                egui::Event::Text(t) if !typing => {
+                    if let Some(m) = self.modal3d.as_mut() {
+                        for c in t.chars() {
+                            m.type_char(c);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !typing {
+            let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
+            if self.modal3d.is_some() {
+                for (key, a) in [(Key::X, 0usize), (Key::Y, 1), (Key::Z, 2)] {
+                    if k(Modifiers::NONE, key) || k(Modifiers::SHIFT, key) {
+                        if let Some(m) = self.modal3d.as_mut() {
+                            m.press_axis(a);
+                        }
+                    }
+                }
+                if k(Modifiers::NONE, Key::Backspace) {
+                    if let Some(m) = self.modal3d.as_mut() {
+                        m.typed.pop();
+                    }
+                }
+                if k(Modifiers::NONE, Key::Enter) {
+                    click = Some(hover.unwrap_or(rect.center()));
+                }
+                if k(Modifiers::NONE, Key::Escape) {
+                    cancel = true;
+                }
+            } else {
+                let target = self
+                    .sel_layer()
+                    .and_then(|l| l.place.clone().filter(|p| Some(p.space) == sid).map(|p| (l.id, p)));
+                for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
+                    if k(Modifiers::ALT, key) {
+                        if let Some((id, _)) = &target {
+                            if let Some(pl) = self.doc.get_mut(*id).and_then(|l| l.place.as_mut()) {
+                                match op {
+                                    Op::Grab => pl.pos = [0.0; 3],
+                                    Op::Rotate => pl.rot = [0.0; 3],
+                                    Op::Scale => pl.scale = 1.0,
+                                }
+                            }
+                            self.mark();
+                        }
+                    } else if k(Modifiers::NONE, key) {
+                        match (&target, hover) {
+                            (Some((id, pl)), Some(hp)) => self.modal3d = Some(Modal::new(op, *id, pl.clone(), hp, proj)),
+                            _ => self.status = "이 공간에 있는 레이어를 먼저 선택해 줘".into(),
+                        }
+                    }
+                }
+                if let Some(v) = self.view3d.as_mut() {
+                    for (key, n) in [(Key::Num1, 1u8), (Key::Num3, 3), (Key::Num7, 7)] {
+                        if k(Modifiers::NONE, key) {
+                            v.preset(n, false);
+                        } else if k(Modifiers::CTRL, key) {
+                            v.preset(n, true);
+                        }
+                    }
+                    if k(Modifiers::NONE, Key::Num5) {
+                        v.ortho = !v.ortho;
+                        v.camera = false;
+                    }
+                    if k(Modifiers::NONE, Key::Num0) {
+                        v.camera = true;
+                    }
+                    if k(Modifiers::NONE, Key::Period) {
+                        if let Some((_, pl)) = &target {
+                            v.target = pl.world_affine().1;
+                            v.camera = false;
+                        }
+                    }
+                }
+                if k(Modifiers::NONE, Key::Home) {
+                    if let Some((sid, cam)) = self.ws_space() {
+                        self.view3d = Some(crate::view3d::View3d::user(sid, &cam));
+                    }
+                }
+                if k(Modifiers::NONE, Key::Escape) {
+                    self.select_only(None);
+                }
+            }
+        }
+        // live transform
+        if let Some(m) = &self.modal3d {
+            let cur = hover.unwrap_or(m.start);
+            let pl = m.apply(proj, cur, mods.ctrl, mods.shift);
+            if let Some(l) = self.doc.get_mut(m.id) {
+                l.place = Some(pl);
+            }
+        }
+        if cancel {
+            self.cancel_modal3d();
+        } else if let Some(p) = click {
+            if self.modal3d.take().is_some() {
+                self.mark();
+            } else {
+                let id = match proj.canvas_xf() {
+                    Some(xf) => self.hit_layer(xf.s2w(p), 6.0 / xf.zoom),
+                    None => sid.and_then(|s| crate::view3d::pick(&self.doc, proj, s, p)),
+                };
+                self.select_only(id);
+            }
+        }
+    }
+
+    fn header3d(&mut self, ctx: &egui::Context) {
+        let mut back = false;
+        egui::Area::new(egui::Id::new("header3d"))
+            .order(egui::Order::Middle)
+            .anchor(Align2::CENTER_TOP, vec2(0.0, SPACE_LG))
+            .show(ctx, |ui| {
+                theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let Some(v) = self.view3d.as_mut() else { return };
+                        if ui.selectable_label(v.camera, "카메라 0").clicked() {
+                            v.camera = true;
+                        }
+                        if ui.button("앞 1").clicked() {
+                            v.preset(1, false);
+                        }
+                        if ui.button("오른쪽 3").clicked() {
+                            v.preset(3, false);
+                        }
+                        if ui.button("위 7").clicked() {
+                            v.preset(7, false);
+                        }
+                        if ui.selectable_label(v.ortho && !v.camera, "직교 5").clicked() {
+                            v.ortho = !v.ortho;
+                            v.camera = false;
+                        }
+                        ui.separator();
+                        if ui.button("2D로 · Tab").clicked() {
+                            back = true;
+                        }
+                    });
+                });
+            });
+        if back {
+            self.toggle_ws();
+        }
+    }
+
+    /// Hold Tab: the other workspace in a card that nearly fills the canvas.
+    fn peek_ui(&mut self, ctx: &egui::Context) {
+        if !self.peek {
+            return;
+        }
+        let cr = self.canvas_rect;
+        let pr = cr.shrink2(cr.size() * 0.04);
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("peek")));
+        p.rect_filled(cr, 0.0, Color32::from_black_alpha(110));
+        let clip = p.with_clip_rect(pr);
+        if self.ws3d {
+            // the 2D canvas as it is, scaled into the card
+            let k = pr.width() / cr.width();
+            let xf = Xf { min: pr.min, pan: self.pan * k, zoom: self.zoom * k };
+            theme::draw_ground(&clip, pr, &xf);
+            canvas::draw_doc(&clip, ctx, &self.doc, &xf, &mut self.tex, None);
+        } else if let Some((sid, cam)) = self.ws_space() {
+            let view = match &self.view3d {
+                Some(v) if v.space == sid => v.clone(),
+                _ => crate::view3d::View3d::user(sid, &cam),
+            };
+            theme::draw_void(&clip, pr);
+            let proj = crate::view3d::Proj::new(&view, &cam, pr);
+            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel);
+        }
+        p.rect_stroke(pr, 12.0, Stroke::new(1.5, INK_3), StrokeKind::Outside);
+        p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), INK_2);
+        ctx.request_repaint();
+    }
+
+
     fn space_idx(&self) -> Option<usize> {
         self.space_sel.and_then(|id| self.doc.spaces.iter().position(|s| s.id == id))
     }
@@ -2689,6 +3041,47 @@ impl App {
         if paste {
             self.paste();
         }
+        let tabs: Vec<(bool, bool)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key: Key::Tab, pressed, repeat: false, modifiers, .. } => Some((*pressed, modifiers.shift)),
+                    _ => None,
+                })
+                .collect()
+        });
+        ctx.input_mut(|i| {
+            i.consume_key(Modifiers::NONE, Key::Tab);
+            i.consume_key(Modifiers::SHIFT, Key::Tab);
+        });
+        let can3d = self.ws3d || self.ws_space().is_some();
+        for (pressed, shift) in tabs {
+            if shift || !can3d {
+                if pressed {
+                    self.ui_hidden = !self.ui_hidden;
+                }
+                continue;
+            }
+            if pressed {
+                self.tab_t0 = Some(self.now);
+            } else {
+                if self.peek {
+                    self.peek = false;
+                } else if self.tab_t0.is_some() {
+                    self.toggle_ws();
+                }
+                self.tab_t0 = None;
+            }
+        }
+        if let Some(t0) = self.tab_t0 {
+            if self.now - t0 > 0.3 {
+                self.peek = true;
+            }
+            ctx.request_repaint();
+        }
+        if self.modal3d.is_some() {
+            return;
+        }
         let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
         if k(cs, Key::Z) || k(cmd, Key::Y) {
             self.redo();
@@ -2713,6 +3106,10 @@ impl App {
         }
         if k(cmd, Key::E) {
             self.open_export();
+        }
+        if self.ws3d {
+            // the 3D workspace handles its own keys (G/R/S, views, Esc)
+            return;
         }
         if k(cs, Key::C) {
             self.quick_copy();
@@ -2747,9 +3144,6 @@ impl App {
         }
         if k(Modifiers::NONE, Key::F12) {
             self.show_log = !self.show_log;
-        }
-        if k(Modifiers::NONE, Key::Tab) {
-            self.ui_hidden = !self.ui_hidden;
         }
         if k(Modifiers::NONE, Key::Escape) {
             if self.pan_latch {
@@ -4250,6 +4644,13 @@ impl App {
         }
         let resp = ui.allocate_rect(rect, Sense::hover());
         let ctx = ui.ctx().clone();
+        if self.ws3d {
+            if let Some((sid, cam)) = self.ws_space() {
+                self.canvas_3d(&ctx, ui, rect, sid, &cam);
+                return;
+            }
+            self.ws3d = false;
+        }
         self.handle_canvas_input(&ctx, rect, ui.layer_id());
 
         let painter = ui.painter_at(rect);
@@ -5283,7 +5684,11 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         if !self.ui_hidden {
             self.top_bar(&ctx);
-            self.tool_rail(&ctx);
+            if self.ws3d {
+                self.header3d(&ctx);
+            } else {
+                self.tool_rail(&ctx);
+            }
             self.inspector(&ctx);
             self.status_pill(&ctx);
         }
@@ -5314,6 +5719,7 @@ impl eframe::App for App {
         }
         self.export_ui(&ctx);
         self.unsaved_modal(&ctx);
+        self.peek_ui(&ctx);
 
         let typing = ctx.egui_wants_keyboard_input();
         self.commit_if_idle(typing);

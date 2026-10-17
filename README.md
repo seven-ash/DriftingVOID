@@ -32,7 +32,8 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | Layer list | Drag to reorder, double-click to rename |
 | Number fields | Accept maths: `40*1.5`, `2^3+1` |
 | Dials | Drag the tick ring (Shift: fine, wheel: one step); ↺ resets to the default |
-| Tab | Hide/show UI |
+| Tab | With a solvable 3D space: tap switches 2D ↔ 3D workspace, hold peeks at the other one. Otherwise hides the UI |
+| Shift+Tab | Hide the UI |
 | F12 | Input log (pen flags, mouse/touch events) |
 
 Tools: V select, Q lasso, H pan, B brush (raster), P pen (vector), E eraser, T text,
@@ -41,6 +42,16 @@ L line, A arrow, R rectangle, O ellipse, C crop, F export frame, K 3D space
 
 Drawing layers are created when you first draw, reused afterwards, and removed
 when empty. Photos are placed under drawing layers.
+
+## 3D workspace (Tab)
+
+Blender-style keys. Middle drag or the pen's side button orbits; Shift pans; Ctrl
+zooms; the wheel zooms. 1/3/7 give front/right/top views (Ctrl: the opposite side),
+5 toggles orthographic, 0 looks through the matched camera, . frames the selection,
+and Home resets the view. G/R/S move/rotate/scale the selected layer: X/Y/Z
+constrains the axis (press again for local, again for free), digits type a value,
+Ctrl snaps, Shift is fine control, and Enter or a click confirms while Esc or a
+right-click cancels. Alt+G/R/S clears the value.
 
 ## Files
 
@@ -75,6 +86,7 @@ when empty. Photos are placed under drawing layers.
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
 | `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
+| `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
 | `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |
 | `src/dial.rs` | Focus-ring dial control with reset pin |
 | `src/calc.rs` | Maths parser for number fields |
