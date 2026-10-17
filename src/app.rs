@@ -807,6 +807,8 @@ pub struct App {
     right_reserve: f32,
     /// Content heights of the property columns last frame.
     col_h: [f32; 2],
+    /// Timeline card height last frame.
+    tl_h: f32,
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
@@ -926,6 +928,7 @@ impl App {
             scrub_shown: Default::default(),
             right_reserve: 600.0,
             col_h: [200.0, 200.0],
+            tl_h: 120.0,
             tl_play: None,
             tl_key: None,
             tl_sel: Vec::new(),
@@ -2008,8 +2011,9 @@ impl App {
 
     fn timeline_ui(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        let width = (screen.width() - 70.0 - self.right_reserve).clamp(360.0, 1600.0);
-        egui::Area::new(egui::Id::new("timeline"))
+        // full width along the bottom; the property columns stop above it
+        let width = (screen.width() - 70.0 - SPACE_LG - 20.0).max(360.0);
+        let resp = egui::Area::new(egui::Id::new("timeline"))
             .order(egui::Order::Middle)
             .anchor(Align2::LEFT_BOTTOM, vec2(70.0, -64.0))
             .show(ctx, |ui| {
@@ -2018,6 +2022,7 @@ impl App {
                     self.timeline_body(ui, width);
                 });
             });
+        self.tl_h = resp.response.rect.height();
     }
 
     fn timeline_body(&mut self, ui: &mut egui::Ui, width: f32) {
@@ -6936,7 +6941,9 @@ impl App {
         let screen = ctx.content_rect();
         let gap = 10.0;
         let pad = theme::SPACE_MD;
-        let max_h = (screen.height() - SPACE_LG * 2.0 - 2.0 * pad - 56.0).max(200.0);
+        // with the timeline open the columns end above it
+        let bottom = if self.doc.timeline.on && !self.ui_hidden { self.tl_h + 64.0 + 10.0 } else { 56.0 };
+        let max_h = (screen.height() - SPACE_LG * 2.0 - 2.0 * pad - bottom).max(160.0);
         let card = |w: f32| w + pad * 2.0;
         let layers_w = 232.0;
         egui::Area::new(egui::Id::new("layers_col"))
