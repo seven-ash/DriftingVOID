@@ -149,7 +149,7 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo, String> {
 
 fn decode_args(path: &Path, t: f64, size: (u32, u32)) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = Vec::new();
-    for s in ["-v", "error", "-nostdin", "-ss"] {
+    for s in ["-v", "error", "-nostdin", "-hwaccel", "auto", "-ss"] {
         a.push(s.into());
     }
     a.push(format!("{:.4}", t.max(0.0)).into());

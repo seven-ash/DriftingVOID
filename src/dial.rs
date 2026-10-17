@@ -294,6 +294,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
     let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
     let before = *value;
     let w = 40.0;
+    let ring_w = 24.0;
     let ring_h = 92.0;
     let mut out = ui
         .vertical(|ui| {
@@ -315,7 +316,8 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 }
             }
             // ring
-            let (r, resp) = ui.allocate_exact_size(vec2(w, ring_h), Sense::click_and_drag());
+            let (full, resp) = ui.allocate_exact_size(vec2(w, ring_h), Sense::click_and_drag());
+            let r = egui::Rect::from_center_size(full.center(), vec2(ring_w, ring_h));
             let mut u = value.clamp(lo, hi);
             let mut moved = false;
             if resp.dragged() && resp.drag_delta().y != 0.0 {
@@ -334,7 +336,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
             if moved && (nv - *value).abs() > f32::EPSILON {
                 *value = nv;
             }
-            let p = ui.painter().with_clip_rect(r);
+            let p = ui.painter().with_clip_rect(r.expand2(vec2(4.0, 0.0)));
             let radius = r.height() * 0.5;
             let ang_per_u = TICK_PX / radius / dt;
             let (vis_lo, vis_hi) = (u - 1.55 / ang_per_u, u + 1.55 / ang_per_u);
@@ -345,9 +347,10 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 if a.abs() > 1.5 {
                     return;
                 }
-                let y = r.center().y - radius * a.sin();
+                // higher values sit below, so the ring moves with the pointer
+                let y = r.center().y + radius * a.sin();
                 let fade = a.cos().powf(1.6);
-                let half = r.width() * if end { 0.36 } else if major { 0.27 } else { 0.16 };
+                let half = r.width() * if end { 0.48 } else if major { 0.36 } else { 0.2 };
                 let col = (if end { INK_2() } else if major { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
                 p.line_segment([pos2(cx - half, y), pos2(cx + half, y)], Stroke::new(if major || end { 1.3 } else { 1.0 }, col));
             };
@@ -360,8 +363,8 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
             draw(lo, true, true);
             draw(hi, true, true);
             let cy = r.center().y;
-            p.line_segment([pos2(r.left() + 5.0, cy), pos2(r.right() - 5.0, cy)], Stroke::new(1.8, ACCENT));
-            p.add(Shape::convex_polygon(vec![pos2(r.left() + 1.0, cy - 3.0), pos2(r.left() + 1.0, cy + 3.0), pos2(r.left() + 5.0, cy)], ACCENT, Stroke::NONE));
+            p.line_segment([pos2(r.left() + 2.0, cy), pos2(r.right() - 2.0, cy)], Stroke::new(1.6, ACCENT));
+            p.add(Shape::convex_polygon(vec![pos2(r.left() - 3.0, cy - 2.5), pos2(r.left() - 3.0, cy + 2.5), pos2(r.left() + 1.0, cy)], ACCENT, Stroke::NONE));
             if resp.hovered() || resp.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             }

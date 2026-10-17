@@ -373,6 +373,10 @@ pub struct Space {
     /// Moves, scales and turns with this photo (its transform when last applied).
     #[serde(default)]
     pub follow: Option<SpaceFollow>,
+    /// How far the image has been turned since the axes were drawn (radians): the
+    /// axis directions are told apart relative to it, so turning keeps them.
+    #[serde(default)]
+    pub roll: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -416,6 +420,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
             w.corners = w.corners.map(map);
         }
         sp.follow = Some(SpaceFollow { layer: f.layer, last: cur });
+        sp.roll += th;
         let id = sp.id;
         let kk = k as f64;
         for l in &mut doc.layers {
@@ -432,7 +437,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0 }
     }
 
     /// The canvas area the space shows in.
@@ -667,13 +672,17 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
         d[ax] = Some(dir(vp[ax].unwrap(), f0));
     }
     let flip = |v: V3| scale(v, -1.0);
+    // "right" and "up" of the image, turned with the photo it follows
+    let (rs, rc) = (space.roll as f64).sin_cos();
+    let right = |v: V3| v[0] * rc + v[1] * rs;
+    let up = |v: V3| v[0] * rs - v[1] * rc;
     if let Some(z) = d[2] {
-        if z[1] > 0.0 {
+        if up(z) < 0.0 {
             d[2] = Some(flip(z));
         }
     }
     if let Some(x) = d[0] {
-        if x[0] < 0.0 {
+        if right(x) < 0.0 {
             d[0] = Some(flip(x));
         }
     }
@@ -684,12 +693,12 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
             }
         }
         (None, Some(y), Some(z)) => {
-            if cross(y, z)[0] < 0.0 {
+            if right(cross(y, z)) < 0.0 {
                 d[1] = Some(flip(y));
             }
         }
         (Some(x), Some(y), None) => {
-            if cross(x, y)[1] > 0.0 {
+            if up(cross(x, y)) < 0.0 {
                 d[1] = Some(flip(y));
             }
         }
@@ -1407,19 +1416,23 @@ mod tests {
             let h = pl.homography(&cam);
             [pos2(900.0, 600.0), pos2(960.0, 640.0)].map(|p| apply_h(&h, p).unwrap())
         };
-        // the photo moves, grows 1.5× and turns 0.3 rad
-        if let Some(LayerKind::Image(im)) = doc.get_mut(pid).map(|l| &mut l.kind) {
-            im.center = pos2(1100.0, 300.0);
-            im.scale = 1.5;
-            im.rotation = 0.3;
+        // the photo moves, grows 1.5× and turns 2.6 rad (past where the axes used to flip),
+        // in steps as a drag would
+        for i in 1..=10 {
+            let u = i as f32 / 10.0;
+            if let Some(LayerKind::Image(im)) = doc.get_mut(pid).map(|l| &mut l.kind) {
+                im.center = pos2(800.0 + 300.0 * u, 500.0 - 200.0 * u);
+                im.scale = 1.0 + 0.5 * u;
+                im.rotation = 2.6 * u;
+            }
+            follow_photos(&mut doc);
         }
-        follow_photos(&mut doc);
         let cam2 = solve(&doc.spaces[0]).unwrap();
         let pl = doc.get(sid).unwrap().place.clone().unwrap();
         let h2 = pl.homography(&cam2);
         let map = |p: Pos2| {
             let d = (p - pos2(800.0, 500.0)) * 1.5;
-            let (s, c) = 0.3f32.sin_cos();
+            let (s, c) = 2.6f32.sin_cos();
             pos2(1100.0 + d.x * c - d.y * s, 300.0 + d.x * s + d.y * c)
         };
         for (i, p) in [pos2(900.0, 600.0), pos2(960.0, 640.0)].iter().enumerate() {

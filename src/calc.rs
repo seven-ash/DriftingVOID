@@ -4,7 +4,8 @@
 pub fn parse(s: &str) -> Option<f64> {
     let s: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).map(|c| if c == ',' { '.' } else { c }).collect();
     if s.is_empty() {
-        return None;
+        // a cleared field means zero
+        return Some(0.0);
     }
     let mut p = Parser { s: &s, i: 0 };
     let v = p.expr()?;
@@ -110,4 +111,9 @@ mod tests {
         assert_eq!(parse("2*"), None);
         assert_eq!(parse("1/0"), None);
     }
+}
+
+/// A DragValue whose text accepts maths and treats an empty field as 0.
+pub fn drag<'a, N: egui::emath::Numeric>(v: &'a mut N) -> egui::DragValue<'a> {
+    egui::DragValue::new(v).custom_parser(parse)
 }

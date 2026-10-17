@@ -62,6 +62,10 @@ pub struct Key {
     /// Easing towards the next key.
     #[serde(default)]
     pub ease: Ease,
+    /// Cameras: the follow constraint at this key (None: not keyed, Some(None): off).
+    /// Offsets blend between keys on the same layer; switching holds.
+    #[serde(default)]
+    pub follow: Option<Option<Follow>>,
 }
 
 fn lerp(a: f32, b: f32, u: f64) -> f32 {
@@ -90,6 +94,14 @@ impl Key {
                 (a, _) => a,
             },
             ease: self.ease,
+            follow: match (self.follow, o.follow) {
+                (Some(Some(a)), Some(Some(b))) if a.layer == b.layer => Some(Some(Follow {
+                    offset: [lerp(a.offset[0], b.offset[0], u), lerp(a.offset[1], b.offset[1], u)],
+                    rot_offset: lerp(a.rot_offset, b.rot_offset, u),
+                    ..a
+                })),
+                (a, _) => a,
+            },
         }
     }
 }
@@ -248,12 +260,15 @@ pub struct Follow {
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default() }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow) }
     }
 
     pub fn apply(&mut self, k: &Key) {
         self.rect = Rect::from_center_size(pos2(k.center[0], k.center[1]), vec2(k.ext[0].max(1.0), k.ext[1].max(1.0)));
         self.rot = k.rot;
+        if let Some(f) = k.follow {
+            self.follow = f;
+        }
     }
 
     /// Corners (TL, TR, BR, BL) in world space, rotation included.
@@ -330,6 +345,7 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         opacity: l.opacity,
         place: l.place.as_ref().map(|p| PlaceKey { pos: p.pos, rot: p.rot, scale: p.scale, thick: p.thick }),
         ease: Ease::default(),
+        follow: None,
     }
 }
 
@@ -430,7 +446,7 @@ mod tests {
     use egui::Color32;
 
     fn k(t: f64, x: f32) -> Key {
-        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear }
+        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None }
     }
 
     #[test]
@@ -556,5 +572,23 @@ mod tests {
         assert_eq!(c.rect.size(), vec2(160.0, 90.0));
         assert!((c.rot - 0.6).abs() < 1e-6);
         assert!(c.contains(pos2(160.0, 125.0)));
+    }
+
+    #[test]
+    fn camera_follow_and_orientation_are_keyed() {
+        let mut cam = CanvasCam { id: 1, name: "c".into(), rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(160.0, 90.0)), anim: Anim::default(), rot: 0.0, follow: None };
+        let k0 = cam.key(0.0);
+        cam.rect = Rect::from_center_size(pos2(0.0, 0.0), vec2(90.0, 160.0));
+        cam.follow = Some(Follow { layer: 5, pos: true, rot: false, offset: [0.0, 0.0], rot_offset: 0.0 });
+        let mut k1 = cam.key(2.0);
+        k1.ease = Ease::Hold;
+        let mut k0 = k0;
+        k0.ease = Ease::Hold;
+        cam.anim.keys = vec![k0, k1];
+        cam.apply(&cam.anim.sample(1.0).unwrap());
+        assert_eq!((cam.rect.width(), cam.follow), (160.0, None));
+        cam.apply(&cam.anim.sample(2.5).unwrap());
+        assert_eq!(cam.rect.width(), 90.0);
+        assert_eq!(cam.follow.map(|f| f.layer), Some(5));
     }
 }

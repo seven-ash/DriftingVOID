@@ -236,6 +236,10 @@ enum TlDrag {
     SpanOut(TlRow),
     /// Audio clip: move (grabbed at `grab` seconds into it) or trim either end.
     AudioMove { id: u64, grab: f64 },
+    /// Shift-drag box over the tracks.
+    Marquee { start: Pos2 },
+    /// Several selected keys moving together (last snapped time under the pointer).
+    Keys { last: f64 },
     AudioIn(u64),
     AudioOut(u64),
 }
@@ -798,10 +802,17 @@ pub struct App {
     scrub_gen: std::collections::HashMap<LayerId, u64>,
     scrub_want: std::collections::HashMap<LayerId, f64>,
     scrub_busy: usize,
+    scrub_shown: std::collections::HashMap<LayerId, u64>,
+    /// Width the right-hand columns take (the timeline stops short of them).
+    right_reserve: f32,
+    /// Content heights of the property columns last frame.
+    col_h: [f32; 2],
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
     tl_key: Option<(TlRow, f64)>,
+    /// Keys picked on the timeline (click, Shift-drag box).
+    tl_sel: Vec<(TlRow, f64)>,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
@@ -912,8 +923,12 @@ impl App {
             scrub_gen: Default::default(),
             scrub_want: Default::default(),
             scrub_busy: 0,
+            scrub_shown: Default::default(),
+            right_reserve: 600.0,
+            col_h: [200.0, 200.0],
             tl_play: None,
             tl_key: None,
+            tl_sel: Vec::new(),
             tl_drag: None,
             cam_sel: None,
             audio_out: None,
@@ -1161,6 +1176,12 @@ impl App {
     fn commit_if_idle(&mut self, typing: bool) {
         if self.changed && self.drag.is_none() && !typing && self.doc.timeline.on && self.doc.timeline.autokey && self.tl_play.is_none() {
             let t = self.doc.timeline.time;
+            if self.tool == Tool::Frame {
+                if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter_mut().find(|c| c.id == id)) {
+                    let k = c.key(t);
+                    c.anim.set_key(k);
+                }
+            }
             for id in self.selected_ids() {
                 if let Some(l) = self.doc.get_mut(id) {
                     let key = crate::anim::key_of(l, t);
@@ -1473,7 +1494,7 @@ impl App {
     }
 
     fn dispatch_scrubs(&mut self) {
-        while self.scrub_busy < 2 {
+        while self.scrub_busy < 3 {
             let Some((&id, &t)) = self.scrub_want.iter().next() else { return };
             self.scrub_want.remove(&id);
             let Some(v) = self.video_of(id) else { continue };
@@ -1481,7 +1502,7 @@ impl App {
             self.scrub_gen.insert(id, g);
             let tx = self.scrub_tx.clone();
             let path = PathBuf::from(&v.path);
-            let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
+            let size = v.info.preview_size(1280);
             self.scrub_busy += 1;
             std::thread::spawn(move || {
                 let img = crate::video::frame_at(&path, t, size).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
@@ -1556,7 +1577,10 @@ impl App {
     fn tick_videos(&mut self, ctx: &egui::Context) {
         while let Ok((id, g, t, img)) = self.scrub_rx.try_recv() {
             self.scrub_busy = self.scrub_busy.saturating_sub(1);
-            if self.scrub_gen.get(&id) == Some(&g) && img.width() > 1 {
+            // any answer newer than what is shown goes up at once (dragging shows
+            // frames along the way, the last request still wins)
+            if self.scrub_shown.get(&id).is_none_or(|s| g > *s) && img.width() > 1 {
+                self.scrub_shown.insert(id, g);
                 self.set_video_frame(id, t, img);
             }
         }
@@ -1786,6 +1810,22 @@ impl App {
         self.mark();
     }
 
+    fn delete_selected_keys(&mut self) {
+        let sel = std::mem::take(&mut self.tl_sel);
+        let n = sel.len();
+        for (row, t) in sel {
+            if let Some(a) = self.row_anim_mut(row) {
+                a.keys.retain(|k| (k.t - t).abs() >= 1e-6);
+            }
+        }
+        self.tl_key = None;
+        if n > 0 {
+            self.set_time(self.doc.timeline.time);
+            self.mark();
+        }
+        self.status = format!("키 {n}개 지움");
+    }
+
     /// Alt+I: removes the selection's keys at the playhead.
     fn delete_keys_here(&mut self) {
         let t = self.doc.timeline.time;
@@ -1968,7 +2008,7 @@ impl App {
 
     fn timeline_ui(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        let width = (screen.width() - 70.0 - 360.0).clamp(420.0, 1400.0);
+        let width = (screen.width() - 70.0 - self.right_reserve).clamp(360.0, 1600.0);
         egui::Area::new(egui::Id::new("timeline"))
             .order(egui::Order::Middle)
             .anchor(Align2::LEFT_BOTTOM, vec2(70.0, -64.0))
@@ -1985,7 +2025,7 @@ impl App {
         let mut act_play = false;
         let mut new_time: Option<f64> = None;
         let mut changed = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if ui.button(if playing { "멈춤" } else { "재생" }).on_hover_text("Alt+A").clicked() {
                 act_play = true;
@@ -1999,9 +2039,9 @@ impl App {
             ui.separator();
             let tl = &mut self.doc.timeline;
             ui.label("fps");
-            changed |= ui.add(egui::DragValue::new(&mut tl.fps).range(1.0..=240.0).speed(0.1).max_decimals(3)).changed();
+            changed |= ui.add(crate::calc::drag(&mut tl.fps).range(1.0..=240.0).speed(0.1).max_decimals(3)).changed();
             ui.label("길이");
-            changed |= ui.add(egui::DragValue::new(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
+            changed |= ui.add(crate::calc::drag(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
             changed |= ui.checkbox(&mut tl.autokey, "자동 키").on_hover_text("선택 레이어 변경 시 자동으로 키").changed();
             let rec_label = egui::RichText::new("● 녹화").color(if self.rec_on { Color32::from_rgb(255, 90, 90) } else { INK_3() });
             if ui
@@ -2015,8 +2055,12 @@ impl App {
             if ui.button("키 넣기").on_hover_text("I").clicked() {
                 self.insert_keys();
             }
-            if ui.button("키 지우기").on_hover_text("Alt+I").clicked() {
-                self.delete_keys_here();
+            if ui.button("키 지우기").on_hover_text("선택한 키 (Delete) · 없으면 재생 헤드의 키 (Alt+I)").clicked() {
+                if self.tl_sel.is_empty() {
+                    self.delete_keys_here();
+                } else {
+                    self.delete_selected_keys();
+                }
             }
             ui.separator();
             if ui.button("영상 내보내기").on_hover_text("Ctrl+Shift+E").clicked() {
@@ -2030,7 +2074,9 @@ impl App {
                 Some(e) => {
                     let mut pick = None;
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("선택한 키 {}", crate::video::timecode(kt))).color(INK_2()));
+                        let n = self.tl_sel.len().max(1);
+                        let what = if n > 1 { format!("선택한 키 {n}개") } else { format!("선택한 키 {}", crate::video::timecode(kt)) };
+                        ui.label(egui::RichText::new(what).color(INK_2()));
                         ui.label("다음 키까지");
                         for o in crate::anim::Ease::ALL {
                             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
@@ -2041,9 +2087,15 @@ impl App {
                         }
                     });
                     if let Some(o) = pick {
-                        if let Some(k) = self.row_anim_mut(row).and_then(|a| a.keys.iter_mut().find(|k| (k.t - kt).abs() < 1e-6)) {
-                            k.ease = o;
-                            changed = true;
+                        let mut targets = self.tl_sel.clone();
+                        if targets.is_empty() {
+                            targets.push((row, kt));
+                        }
+                        for (rw, t) in targets {
+                            if let Some(k) = self.row_anim_mut(rw).and_then(|a| a.keys.iter_mut().find(|k| (k.t - t).abs() < 1e-6)) {
+                                k.ease = o;
+                                changed = true;
+                            }
                         }
                     }
                 }
@@ -2056,7 +2108,7 @@ impl App {
                 let a = &mut self.doc.audio[i];
                 ui.label(egui::RichText::new(format!("소리 · {}", a.name)).color(AUDIO_COLOR));
                 ui.label("볼륨");
-                changed |= ui.add(egui::DragValue::new(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2)).changed();
+                changed |= ui.add(crate::calc::drag(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2)).changed();
                 changed |= ui.checkbox(&mut a.mute, "음소거").changed();
                 ui.label(egui::RichText::new(format!("{} ~ {}", crate::video::timecode(a.start), crate::video::timecode(a.end()))).monospace().color(INK_3()));
                 del = ui.button("삭제").clicked();
@@ -2213,7 +2265,7 @@ impl App {
                 }
                 for k in &a.keys {
                     let c = pos2(x_of(k.t), cy);
-                    let on = self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
+                    let on = self.tl_sel.iter().any(|(r, t)| r == row && (t - k.t).abs() < 1e-6) || self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
                     let fill = if on { ACCENT } else { INK() };
                     let edge = Stroke::new(1.0, Color32::from_black_alpha(170));
                     key_icon(&p, c, k.ease, fill, edge);
@@ -2233,7 +2285,10 @@ impl App {
         if resp.drag_started() || resp.clicked() {
             if let Some(pp) = pointer {
                 let mut drag = TlDrag::Scrub;
-                if pp.y > rect.top() + ruler_h {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if shift && pp.y > rect.top() + ruler_h && pp.x >= tr.left() {
+                    drag = TlDrag::Marquee { start: pp };
+                } else if pp.y > rect.top() + ruler_h {
                     if let Some((TlRow::Audio(aid), _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
                         self.aud_sel = Some(aid);
                         if let Some(a) = self.doc.audio.iter().find(|a| a.id == aid) {
@@ -2251,8 +2306,14 @@ impl App {
                         let key = anim.and_then(|a| a.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
                         let span = anim.and_then(|a| a.span);
                         if let Some(kt) = key {
+                            let picked = self.tl_sel.iter().any(|(r, t)| *r == row && (t - kt).abs() < 1e-6);
                             self.tl_key = Some((row, kt));
-                            drag = TlDrag::Key { row, from: kt };
+                            if picked && self.tl_sel.len() > 1 {
+                                drag = TlDrag::Keys { last: kt };
+                            } else {
+                                self.tl_sel = vec![(row, kt)];
+                                drag = TlDrag::Key { row, from: kt };
+                            }
                         } else if span.is_some_and(|[a, _]| (x_of(a) - pp.x).abs() <= 5.0) {
                             drag = TlDrag::SpanIn(row);
                         } else if span.is_some_and(|[_, b]| (x_of(b) - pp.x).abs() <= 5.0) {
@@ -2272,12 +2333,39 @@ impl App {
                         }
                     }
                 }
+                if drag == TlDrag::Scrub {
+                    self.tl_sel.clear();
+                }
                 self.tl_drag = Some(drag);
             }
         }
         if let (Some(d), Some(pp)) = (self.tl_drag, pointer) {
             let t = tl.snap(t_of(pp.x));
             match d {
+                TlDrag::Marquee { start } => {
+                    let mr = Rect::from_two_pos(start, pp);
+                    ui.painter().rect(mr, 2.0, ACCENT.gamma_multiply(0.12), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+                }
+                TlDrag::Keys { last } => {
+                    let dlt = t - last;
+                    if dlt.abs() > 1e-9 {
+                        let sel = self.tl_sel.clone();
+                        let mut moved = Vec::new();
+                        for (row, kt) in sel {
+                            if let Some(a) = self.row_anim_mut(row) {
+                                if let Some(k) = a.keys.iter_mut().find(|k| (k.t - kt).abs() < 1e-6) {
+                                    k.t = (kt + dlt).max(0.0);
+                                    moved.push((row, k.t));
+                                }
+                                a.sort();
+                            }
+                        }
+                        self.tl_sel = moved;
+                        self.tl_key = self.tl_sel.first().copied();
+                        self.tl_drag = Some(TlDrag::Keys { last: t });
+                        changed = true;
+                    }
+                }
                 TlDrag::Scrub => {
                     if (t - self.doc.timeline.time).abs() > 1e-9 {
                         new_time = Some(t);
@@ -2293,6 +2381,7 @@ impl App {
                                 a.sort();
                                 self.tl_drag = Some(TlDrag::Key { row, from: t });
                                 self.tl_key = Some((row, t));
+                                self.tl_sel = vec![(row, t)];
                                 changed = true;
                             }
                         }
@@ -2343,7 +2432,25 @@ impl App {
             }
         }
         if resp.drag_stopped() || (resp.clicked() && !resp.dragged()) {
-            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_) | TlDrag::AudioMove { .. } | TlDrag::AudioIn(_) | TlDrag::AudioOut(_))) {
+            if let (Some(TlDrag::Marquee { start }), Some(pp)) = (self.tl_drag, pointer.or(resp.hover_pos())) {
+                let mr = Rect::from_two_pos(start, pp);
+                let mut picked = Vec::new();
+                for (row, rr) in &hit_rows {
+                    if rr.max.y < mr.min.y || rr.min.y > mr.max.y {
+                        continue;
+                    }
+                    if let Some(a) = self.row_anim(*row) {
+                        for k in &a.keys {
+                            if mr.contains(pos2(x_of(k.t), rr.center().y)) {
+                                picked.push((*row, k.t));
+                            }
+                        }
+                    }
+                }
+                self.tl_key = picked.first().copied();
+                self.tl_sel = picked;
+            }
+            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::Keys { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_) | TlDrag::AudioMove { .. } | TlDrag::AudioIn(_) | TlDrag::AudioOut(_))) {
                 self.mark();
                 self.set_time(self.doc.timeline.time);
             }
@@ -2670,7 +2777,7 @@ impl App {
                                 d.n = *v;
                             }
                         }
-                        ui.add(egui::DragValue::new(&mut d.n).range(16..=8192).suffix(" px"));
+                        ui.add(crate::calc::drag(&mut d.n).range(16..=8192).suffix(" px"));
                     });
                     let (w, h) = match &region {
                         Some((_, r)) => crate::vexport::size_for(r.width() / r.height().max(1.0), d.by_width, d.n, d.codec.even()),
@@ -2679,15 +2786,15 @@ impl App {
                     ui.label(egui::RichText::new(if w > 0 { format!("→ {w} × {h} px (영역 비율)") } else { "영역 없음".into() }).color(INK_2()));
                     ui.horizontal(|ui| {
                         ui.label("fps");
-                        ui.add(egui::DragValue::new(&mut d.fps).range(1.0..=240.0).speed(0.1).max_decimals(3));
+                        ui.add(crate::calc::drag(&mut d.fps).range(1.0..=240.0).speed(0.1).max_decimals(3));
                         ui.checkbox(&mut d.all, "타임라인 전체");
                     });
                     if !d.all {
                         ui.horizontal(|ui| {
                             ui.label("구간");
-                            ui.add(egui::DragValue::new(&mut d.t0).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
+                            ui.add(crate::calc::drag(&mut d.t0).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
                             ui.label("~");
-                            ui.add(egui::DragValue::new(&mut d.t1).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
+                            ui.add(crate::calc::drag(&mut d.t1).range(0.0..=36000.0).speed(0.05).suffix(" s").max_decimals(2));
                         });
                     }
                     ui.add_space(SPACE_SM);
@@ -2710,7 +2817,7 @@ impl App {
                             ui.selectable_value(&mut d.use_mbps, false, "품질");
                             ui.selectable_value(&mut d.use_mbps, true, "비트레이트");
                             if d.use_mbps {
-                                ui.add(egui::DragValue::new(&mut d.mbps).range(0.2..=400.0).speed(0.1).suffix(" Mbps").max_decimals(1));
+                                ui.add(crate::calc::drag(&mut d.mbps).range(0.2..=400.0).speed(0.1).suffix(" Mbps").max_decimals(1));
                             } else {
                                 ui.add(egui::Slider::new(&mut d.quality, 0..=51).text("낮을수록 고화질"));
                             }
@@ -5312,6 +5419,9 @@ impl App {
                 self.set_time(self.doc.timeline.duration);
             }
         }
+        if self.doc.timeline.on && !self.tl_sel.is_empty() && (k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace)) {
+            self.delete_selected_keys();
+        }
         if self.ws3d {
             // the 3D workspace handles its own keys (G/R/S, views, Esc)
             return;
@@ -5603,7 +5713,7 @@ impl App {
                         d.scale = s;
                     }
                 }
-                ui.add(egui::DragValue::new(&mut d.scale).custom_parser(crate::calc::parse).range(0.05..=8.0).speed(0.01).suffix("×"));
+                ui.add(crate::calc::drag(&mut d.scale).custom_parser(crate::calc::parse).range(0.05..=8.0).speed(0.01).suffix("×"));
             });
             ui.horizontal(|ui| {
                 ui.label("배경");
@@ -5928,7 +6038,6 @@ impl App {
                         self.mark();
                     }
                 }
-                self.cameras_panel(ui);
             }
             Tool::Space => self.space_panel(ui),
             Tool::Select => {
@@ -6149,7 +6258,7 @@ impl App {
                             changed = true;
                         }
                         if t.wrap > 0.0 {
-                            changed |= ui.add(egui::DragValue::new(&mut t.wrap).custom_parser(crate::calc::parse).range(10.0..=20000.0).suffix(" px")).changed();
+                            changed |= ui.add(crate::calc::drag(&mut t.wrap).custom_parser(crate::calc::parse).range(10.0..=20000.0).suffix(" px")).changed();
                         }
                     });
                     if changed {
@@ -6707,7 +6816,7 @@ impl App {
                 self.delete_selected();
             }
         }));
-        egui::containers::menu::MenuButton::new("보기").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| {
+        egui::containers::menu::MenuButton::new("보기").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| theme::glass_popup(ui, |ui| {
             self.view_menu_body(ui);
         }));
     }
@@ -6720,12 +6829,15 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 4.0;
                 if ui.button("전체 보기  Ctrl+0").clicked() {
                     self.fit_view();
+                    ui.close();
                 }
                 if ui.button("100%  Ctrl+1").clicked() {
                     self.set_zoom_center(1.0);
+                    ui.close();
                 }
                 if ui.button("UI 숨기기  Ctrl+H").clicked() {
                     self.ui_hidden = true;
+                    ui.close();
                 }
                 ui.separator();
                 let mut on = crate::glass::enabled();
@@ -6818,33 +6930,73 @@ impl App {
         ui.add_space(2.0);
     }
 
+    /// Right side, from the edge inwards: layers, the tool's main properties (with
+    /// the selection), and a secondary column only where a tool needs one (cameras).
     fn inspector(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        egui::Area::new(egui::Id::new("inspector"))
+        let gap = 10.0;
+        let pad = theme::SPACE_MD;
+        let max_h = (screen.height() - SPACE_LG * 2.0 - 2.0 * pad - 56.0).max(200.0);
+        let card = |w: f32| w + pad * 2.0;
+        let layers_w = 232.0;
+        egui::Area::new(egui::Id::new("layers_col"))
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-SPACE_LG, SPACE_LG))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::RADIUS_CARD, |ui| {
-                    ui.set_width(268.0);
-                    Self::section(ui, "도구");
-                    self.tool_options(ui);
-                    ui.add_space(SPACE_MD);
-                    Self::section(ui, "선택한 항목");
-                    self.properties(ui);
-                    ui.add_space(SPACE_MD);
+                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                    ui.set_width(layers_w);
                     Self::section(ui, "레이어");
-                    let remaining = (screen.bottom() - ui.next_widget_position().y - SPACE_LG * 2.0 - 70.0).max(160.0);
                     // floating areas size from the previous frame, so ask for the height explicitly
                     let needed = self.doc.layers.len().max(1) as f32 * 32.0 + 48.0;
+                    let room = max_h - 30.0;
                     egui::ScrollArea::vertical()
                         .id_salt("layers")
-                        .max_height(remaining)
-                        .min_scrolled_height(needed.min(remaining))
+                        .max_height(room)
+                        .min_scrolled_height(needed.min(room))
                         .show(ui, |ui| {
                             self.layers_panel(ui);
                         });
                 });
             });
+        let mut x = SPACE_LG + card(layers_w) + gap;
+        let main_w = 264.0;
+        egui::Area::new(egui::Id::new("inspector"))
+            .order(egui::Order::Middle)
+            .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
+            .show(ctx, |ui| {
+                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                    ui.set_width(main_w);
+                    // floating areas size from the previous frame: ask for last frame's content height
+                    let want = self.col_h[0].min(max_h);
+                    let out = egui::ScrollArea::vertical().id_salt("props").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
+                        Self::section(ui, "도구");
+                        self.tool_options(ui);
+                        ui.add_space(SPACE_MD);
+                        Self::section(ui, "선택한 항목");
+                        self.properties(ui);
+                    });
+                    self.col_h[0] = out.content_size.y;
+                });
+            });
+        x += card(main_w) + gap;
+        if self.tool == Tool::Frame {
+            let side_w = 244.0;
+            egui::Area::new(egui::Id::new("inspector2"))
+                .order(egui::Order::Middle)
+                .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
+                .show(ctx, |ui| {
+                    theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                        ui.set_width(side_w);
+                        let want = self.col_h[1].min(max_h);
+                        let out = egui::ScrollArea::vertical().id_salt("props2").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
+                            self.cameras_panel(ui);
+                        });
+                        self.col_h[1] = out.content_size.y;
+                    });
+                });
+            x += card(side_w) + gap;
+        }
+        self.right_reserve = x;
     }
 
     // ------------------------------------------------------------ palette
@@ -8317,16 +8469,16 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str) -> bool {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label("X");
-        ch |= ui.add(egui::DragValue::new(&mut x).speed(1.0).max_decimals(0)).changed();
+        ch |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(0)).changed();
         ui.label("Y");
-        ch |= ui.add(egui::DragValue::new(&mut y).speed(1.0).max_decimals(0)).changed();
+        ch |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(0)).changed();
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label("W");
-        ch |= ui.add(egui::DragValue::new(&mut w).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
+        ch |= ui.add(crate::calc::drag(&mut w).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
         ui.label("H");
-        ch |= ui.add(egui::DragValue::new(&mut h).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
+        ch |= ui.add(crate::calc::drag(&mut h).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
         if ui.button("가로 ↔ 세로").on_hover_text("가운데 유지, 가로·세로 교체").clicked() {
             let c = pos2(x + w * 0.5, y + h * 0.5);
             std::mem::swap(&mut w, &mut h);

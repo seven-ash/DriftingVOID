@@ -82,7 +82,9 @@ impl TexCache {
         let (pm, rect, res) = crate::export::flatten_layer(layer, res)?;
         let size = vec2(pm.width() as f32, pm.height() as f32) / res;
         let ci = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
-        let tex = ctx.load_texture(format!("placed{}", layer.id), ci, TEX_OPTS);
+        // no mipmaps: at grazing angles and from afar they averaged thin strokes away
+        let opts = TextureOptions { mipmap_mode: None, ..TEX_OPTS };
+        let tex = ctx.load_texture(format!("placed{}", layer.id), ci, opts);
         let id = tex.id();
         self.placed.insert(layer.id, (key, tex, frame, rect, size));
         Some((id, rect, size))
