@@ -318,18 +318,18 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
                 }
             }
         }
-        let region = match job.region {
+        let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
-                Some(c) => c.rect,
+                Some(c) => (c.rect, c.rot),
                 None => return fail(&mut child, "카메라가 없어".into()),
             },
-            Region::Fixed(r) => r,
+            Region::Fixed(r) => (r, 0.0),
         };
         let r = fit_aspect(region, w as f32 / h as f32);
         let scale = w as f32 / r.width();
-        let r = Rect::from_min_size(r.min, vec2(w as f32 / scale, h as f32 / scale));
+        let size = vec2(w as f32 / scale, h as f32 / scale);
         let bg = if job.codec.alpha() { job.bg } else { Some(job.bg.unwrap_or(Color32::BLACK)) };
-        let pm = match crate::export::render(&d, r, scale, bg) {
+        let pm = match crate::export::render_rotated(&d, r.center(), size, rot, scale, bg) {
             Ok(pm) => pm,
             Err(e) => return fail(&mut child, e),
         };

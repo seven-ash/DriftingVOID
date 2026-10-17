@@ -85,6 +85,27 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     Ok(out)
 }
 
+/// A rotated region (centre, size in world pixels, rotation clockwise) at `scale`:
+/// its bounding box is rendered, then turned back into an upright image.
+pub fn render_rotated(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>) -> Result<Pixmap, String> {
+    if rot.abs() < 1e-6 {
+        return render(doc, Rect::from_center_size(center, size), scale, bg);
+    }
+    let (s, c) = rot.sin_cos();
+    let h = size * 0.5;
+    let ext = vec2((h.x * c).abs() + (h.y * s).abs(), (h.x * s).abs() + (h.y * c).abs());
+    let bb = Rect::from_center_size(center, ext * 2.0 + vec2(4.0, 4.0) / scale);
+    let src = render(doc, bb, scale, bg)?;
+    let (w, hh) = ((size.x * scale).round().max(1.0) as u32, (size.y * scale).round().max(1.0) as u32);
+    let mut out = Pixmap::new(w, hh).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let ts = Transform::from_translate((bb.min.x - center.x) * scale, (bb.min.y - center.y) * scale)
+        .post_rotate(-rot.to_degrees())
+        .post_translate(w as f32 * 0.5, hh as f32 * 0.5);
+    let paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
+    out.draw_pixmap(0, 0, src.as_ref(), &paint, ts, None);
+    Ok(out)
+}
+
 /// Composites premultiplied `src` onto `dst` with a separable blend mode
 /// (W3C compositing: Co = as(1-ad)cs + as·ad·B(cd,cs) + (1-as)ad·cd).
 /// `bg`: the export background, which 지우기 (erase) reveals instead of punching
@@ -430,4 +451,25 @@ pub fn sample(doc: &Document, p: Pos2) -> Option<Color32> {
     let pm = render(doc, r, 1.0, None).ok()?;
     let c = pm.pixel(0, 0)?.demultiply();
     (c.alpha() > 0).then(|| Color32::from_rgb(c.red(), c.green(), c.blue()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::{ShapeKind, ShapeLayer};
+    use egui::pos2;
+
+    /// A camera turned 90° clockwise looks "up" along world +x, so the red right half
+    /// of the scene comes out at the top of the image.
+    #[test]
+    fn rotated_region() {
+        let mut doc = Document::default();
+        doc.insert("r".into(), LayerKind::Shape(ShapeLayer { kind: ShapeKind::Rect, a: pos2(0.0, -50.0), b: pos2(50.0, 50.0), color: Color32::RED, width: 0.0, fill: Some(Color32::RED), rotation: 0.0 }), None);
+        let pm = render_rotated(&doc, pos2(0.0, 0.0), vec2(100.0, 60.0), std::f32::consts::FRAC_PI_2, 1.0, Some(Color32::WHITE)).unwrap();
+        assert_eq!((pm.width(), pm.height()), (100, 60));
+        let top = pm.pixel(50, 10).unwrap().demultiply();
+        let bottom = pm.pixel(50, 50).unwrap().demultiply();
+        assert!(top.red() > 200 && top.green() < 60, "top {top:?}");
+        assert!(bottom.green() > 200, "bottom {bottom:?}");
+    }
 }

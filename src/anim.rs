@@ -226,16 +226,82 @@ pub struct CanvasCam {
     pub rect: Rect,
     #[serde(default)]
     pub anim: Anim,
+    /// Radians about the centre (clockwise on screen).
+    #[serde(default)]
+    pub rot: f32,
+    /// Follows a layer (constraint), applied after its keys.
+    #[serde(default)]
+    pub follow: Option<Follow>,
+}
+
+/// Camera constraint: keep the centre on a layer (plus `offset`) and/or turn with it
+/// (plus `rot_offset`).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Follow {
+    pub layer: u64,
+    pub pos: bool,
+    pub rot: bool,
+    pub offset: [f32; 2],
+    pub rot_offset: f32,
 }
 
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: 0.0, opacity: 1.0, place: None, ease: Ease::default() }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default() }
     }
 
     pub fn apply(&mut self, k: &Key) {
         self.rect = Rect::from_center_size(pos2(k.center[0], k.center[1]), vec2(k.ext[0].max(1.0), k.ext[1].max(1.0)));
+        self.rot = k.rot;
+    }
+
+    /// Corners (TL, TR, BR, BL) in world space, rotation included.
+    pub fn corners(&self) -> [Pos2; 4] {
+        let r = self.rect;
+        let c = r.center();
+        [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| crate::doc::rot_about(p, c, self.rot))
+    }
+
+    /// Is a world point inside the (rotated) frame?
+    pub fn contains(&self, p: Pos2) -> bool {
+        self.rect.contains(crate::doc::rot_about(p, self.rect.center(), -self.rot))
+    }
+}
+
+/// Where a layer is and how it is turned, as seen on the canvas (for snapping and
+/// constraints).
+pub fn target_pose(doc: &Document, l: &Layer) -> Option<(Pos2, f32)> {
+    if l.place.is_some() {
+        let q = l.shown_quad(&crate::persp::cameras(&doc.spaces))?;
+        let c = pos2((q[0].x + q[1].x + q[2].x + q[3].x) * 0.25, (q[0].y + q[1].y + q[2].y + q[3].y) * 0.25);
+        return Some((c, (q[1] - q[0]).angle()));
+    }
+    Some(match &l.kind {
+        LayerKind::Image(im) => (im.center, im.rotation),
+        LayerKind::Text(tx) => (Rect::from_min_size(tx.pos, crate::text::layout(tx).size).center(), tx.rotation),
+        LayerKind::Shape(s) => (s.a + (s.b - s.a) * 0.5, s.rotation),
+        _ => (l.bounds()?.center(), 0.0),
+    })
+}
+
+/// Cameras that follow a layer take its centre and/or rotation.
+pub fn apply_constraints(doc: &mut Document) {
+    let poses: Vec<(usize, Follow, Option<(Pos2, f32)>)> = doc
+        .cameras
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| c.follow.map(|f| (i, f, doc.get(f.layer).and_then(|l| target_pose(doc, l)))))
+        .collect();
+    for (i, f, pose) in poses {
+        let Some((p, a)) = pose else { continue };
+        let c = &mut doc.cameras[i];
+        if f.pos {
+            c.rect = Rect::from_center_size(p + vec2(f.offset[0], f.offset[1]), c.rect.size());
+        }
+        if f.rot {
+            c.rot = a + f.rot_offset;
+        }
     }
 }
 
@@ -313,6 +379,7 @@ pub fn evaluate(doc: &mut Document) {
             c.apply(&k);
         }
     }
+    apply_constraints(doc);
 }
 
 /// A layer as it shows at the playhead when it has recorded strokes (pen strokes
@@ -465,5 +532,29 @@ mod tests {
         assert_eq!(mid.pixel(350, 50)[3], 0, "second not yet");
         let later = r.replayed(5.55).unwrap();
         assert!(later.pixel(90, 50)[3] > 200 && later.pixel(340, 50)[3] > 200 && later.pixel(395, 50)[3] == 0);
+    }
+
+    #[test]
+    fn camera_follows_a_layer() {
+        let mut doc = Document::default();
+        let id = doc.insert(
+            "s".into(),
+            LayerKind::Shape(ShapeLayer { kind: ShapeKind::Rect, a: pos2(100.0, 100.0), b: pos2(200.0, 150.0), color: Color32::WHITE, width: 1.0, fill: None, rotation: 0.5 }),
+            None,
+        );
+        doc.cameras.push(CanvasCam {
+            id: 9,
+            name: "c".into(),
+            rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(160.0, 90.0)),
+            anim: Anim::default(),
+            rot: 0.0,
+            follow: Some(Follow { layer: id, pos: true, rot: true, offset: [10.0, 0.0], rot_offset: 0.1 }),
+        });
+        apply_constraints(&mut doc);
+        let c = &doc.cameras[0];
+        assert_eq!(c.rect.center(), pos2(160.0, 125.0));
+        assert_eq!(c.rect.size(), vec2(160.0, 90.0));
+        assert!((c.rot - 0.6).abs() < 1e-6);
+        assert!(c.contains(pos2(160.0, 125.0)));
     }
 }

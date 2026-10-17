@@ -806,6 +806,7 @@ pub struct App {
     audio_tx: std::sync::mpsc::Sender<(String, Result<crate::audio::AudioData, String>)>,
     audio_rx: std::sync::mpsc::Receiver<(String, Result<crate::audio::AudioData, String>)>,
     aud_sel: Option<u64>,
+    voice_sig: u64,
     /// Stroke recording: the record switch, and for the stroke being drawn its clock
     /// (wall start, timeline start, live timing or instant) with the points' times
     /// (and, for brushes, the input points).
@@ -915,6 +916,7 @@ impl App {
             audio_tx: audio_ch.0,
             audio_rx: audio_ch.1,
             aud_sel: None,
+            voice_sig: 0,
             rec_on: false,
             rec_clock: None,
             rec_times: Vec::new(),
@@ -1091,16 +1093,27 @@ impl App {
                     k1.center[0] += 400.0;
                     k1.ext[0] *= 0.5;
                     k1.rot = 0.4;
-                    l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], span: Some([0.0, 6.0]), video_start: 0.0 });
+                    k1.ease = crate::anim::Ease::Linear;
+                    let mut k2 = k1;
+                    k2.t = 3.5;
+                    k2.ease = crate::anim::Ease::Hold;
+                    let mut k3 = k2;
+                    k3.t = 5.0;
+                    k3.center[1] += 200.0;
+                    l.anim = Some(crate::anim::Anim { keys: vec![k0, k1, k2, k3], span: Some([0.0, 6.0]), video_start: 0.0 });
                 }
             }
             let cid = app.doc.new_id();
-            let mut cam = crate::anim::CanvasCam { id: cid, name: "카메라 1".into(), rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(640.0, 360.0)), anim: Default::default() };
+            let mut cam = crate::anim::CanvasCam { id: cid, name: "카메라 1".into(), rect: Rect::from_center_size(pos2(0.0, 0.0), vec2(640.0, 360.0)), anim: Default::default(), rot: 0.0, follow: None };
             let c0 = cam.key(0.0);
             let mut c1 = c0;
             c1.t = 3.0;
             c1.center[0] += 300.0;
             cam.anim.keys = vec![c0, c1];
+            if std::env::var_os("DV_CAM_FOLLOW").is_some() {
+                cam.follow = app.sel.map(|id| crate::anim::Follow { layer: id, pos: true, rot: true, offset: [0.0, 0.0], rot_offset: 0.0 });
+                app.tool = Tool::Frame;
+            }
             app.doc.cameras.push(cam);
             app.cam_sel = Some(cid);
             app.set_time(1.0);
@@ -1546,6 +1559,11 @@ impl App {
         for id in ids {
             let Some(v) = self.video_of(id) else {
                 self.playing.remove(&id);
+                if self.tl_play.is_none() && self.playing.is_empty() {
+                    if let Some(o) = &self.audio_out {
+                        o.stop();
+                    }
+                }
                 continue;
             };
             let now = self.now;
@@ -1821,7 +1839,7 @@ impl App {
             });
             let id = self.doc.new_id();
             let n = self.doc.cameras.len() + 1;
-            self.doc.cameras.push(crate::anim::CanvasCam { id, name: format!("카메라 {n}"), rect: Rect::from_min_max(rect.min.round(), rect.max.round()), anim: Default::default() });
+            self.doc.cameras.push(crate::anim::CanvasCam { id, name: format!("카메라 {n}"), rect: Rect::from_min_max(rect.min.round(), rect.max.round()), anim: Default::default(), rot: 0.0, follow: None });
             self.cam_sel = Some(id);
             self.mark();
         }
@@ -1834,13 +1852,90 @@ impl App {
                 ui.label("이름");
                 ch |= ui.text_edit_singleline(&mut c.name).changed();
             });
-            ui.label(format!("{:.0} × {:.0} px · 키 {}개", c.rect.width(), c.rect.height(), c.anim.keys.len()));
+            ui.label(format!("키 {}개", c.anim.keys.len()));
+            ch |= rect_fields(ui, &mut c.rect, "cam");
+            let mut deg = c.rot.to_degrees();
+            if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text("회전 °").default(0.0)).changed() {
+                c.rot = deg.to_radians();
+                ch = true;
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 from_frame = ui.add_enabled(self.doc.export_frame.is_some(), egui::Button::new("영역 → 카메라")).clicked();
                 to_frame = ui.button("카메라 → 영역").clicked();
                 del = ui.button("카메라 삭제").clicked();
             });
+        }
+        // centre on a layer, or follow one (constraint)
+        let targets: Vec<(LayerId, String)> = self.doc.layers.iter().rev().map(|l| (l.id, l.display_name())).collect();
+        let mut snap_to = None;
+        let follow = self.doc.cameras[i].follow;
+        let mut new_follow = follow;
+        ui.horizontal(|ui| {
+            ui.label("객체 중심에");
+            egui::ComboBox::from_id_salt(("cam_snap", self.doc.cameras[i].id))
+                .selected_text("맞추기…")
+                .width(120.0)
+                .popup_style(theme::glass_popup_style(false))
+                .show_ui(ui, |ui| {
+                    theme::glass_popup(ui, |ui| {
+                        for (id, name) in &targets {
+                            if ui.selectable_label(false, name.as_str()).clicked() {
+                                snap_to = Some(*id);
+                            }
+                        }
+                    })
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("따라가기");
+            let shown = follow.and_then(|f| targets.iter().find(|t| t.0 == f.layer)).map_or("없음".to_string(), |t| t.1.clone());
+            egui::ComboBox::from_id_salt(("cam_follow", self.doc.cameras[i].id))
+                .selected_text(shown)
+                .width(120.0)
+                .popup_style(theme::glass_popup_style(false))
+                .show_ui(ui, |ui| {
+                    theme::glass_popup(ui, |ui| {
+                        if ui.selectable_label(follow.is_none(), "없음").clicked() {
+                            new_follow = None;
+                        }
+                        for (id, name) in &targets {
+                            if ui.selectable_label(follow.is_some_and(|f| f.layer == *id), name.as_str()).clicked() {
+                                new_follow = Some(crate::anim::Follow { layer: *id, pos: true, rot: false, offset: [0.0, 0.0], rot_offset: 0.0 });
+                            }
+                        }
+                    })
+                });
+        });
+        if let Some(mut f) = new_follow {
+            ui.horizontal(|ui| {
+                let mut c2 = false;
+                c2 |= ui.checkbox(&mut f.pos, "위치").changed();
+                c2 |= ui.checkbox(&mut f.rot, "회전").changed();
+                if ui.button("지금 배치 유지").on_hover_text("지금 카메라와 객체의 간격·각도 차이를 그대로 두고 따라가").clicked() {
+                    if let Some((p, a)) = self.doc.get(f.layer).and_then(|l| crate::anim::target_pose(&self.doc, l)) {
+                        let c = &self.doc.cameras[i];
+                        let d = c.rect.center() - p;
+                        f.offset = [d.x, d.y];
+                        f.rot_offset = c.rot - a;
+                        c2 = true;
+                    }
+                }
+                if c2 {
+                    new_follow = Some(f);
+                }
+            });
+        }
+        if new_follow != follow {
+            self.doc.cameras[i].follow = new_follow;
+            ch = true;
+        }
+        if let Some(id) = snap_to {
+            if let Some((p, _)) = self.doc.get(id).and_then(|l| crate::anim::target_pose(&self.doc, l)) {
+                let c = &mut self.doc.cameras[i];
+                c.rect = Rect::from_center_size(p, c.rect.size());
+                ch = true;
+            }
         }
         if from_frame {
             if let Some(f) = self.doc.export_frame {
@@ -1929,6 +2024,8 @@ impl App {
                         ui.label(egui::RichText::new(format!("선택한 키 {}", crate::video::timecode(kt))).color(INK_2));
                         ui.label("다음 키까지");
                         for o in crate::anim::Ease::ALL {
+                            let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                            key_icon(ui.painter(), ir.center(), o, if e == o { ACCENT } else { INK_2 }, Stroke::new(1.0, Color32::from_black_alpha(170)));
                             if ui.selectable_label(e == o, o.label()).clicked() {
                                 pick = Some(o);
                             }
@@ -2086,12 +2183,31 @@ impl App {
                 }
             }
             if let Some(a) = anim {
+                // the curve between keys shows how it eases: straight, S-shaped or a step
+                for w2 in a.keys.windows(2) {
+                    let (x0, x1) = (x_of(w2[0].t), x_of(w2[1].t));
+                    if x1 - x0 < 6.0 {
+                        continue;
+                    }
+                    let (y0, y1) = (cy + 4.0, cy - 4.0);
+                    let pts: Vec<Pos2> = match w2[0].ease {
+                        crate::anim::Ease::Linear => vec![pos2(x0, y0), pos2(x1, y1)],
+                        crate::anim::Ease::Hold => vec![pos2(x0, y0), pos2(x1, y0), pos2(x1, y1)],
+                        crate::anim::Ease::Smooth => (0..=16)
+                            .map(|i| {
+                                let u = i as f32 / 16.0;
+                                pos2(x0 + (x1 - x0) * u, y0 + (y1 - y0) * u * u * (3.0 - 2.0 * u))
+                            })
+                            .collect(),
+                    };
+                    p.add(Shape::line(pts, Stroke::new(1.0, col.gamma_multiply(0.45))));
+                }
                 for k in &a.keys {
                     let c = pos2(x_of(k.t), cy);
                     let on = self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
-                    let d = 5.5;
-                    let pts = vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)];
-                    p.add(Shape::convex_polygon(pts, if on { ACCENT } else { INK }, Stroke::new(1.0, Color32::from_black_alpha(160))));
+                    let fill = if on { ACCENT } else { INK };
+                    let edge = Stroke::new(1.0, Color32::from_black_alpha(170));
+                    key_icon(&p, c, k.ease, fill, edge);
                 }
             }
         }
@@ -2305,7 +2421,40 @@ impl App {
         self.mark();
     }
 
+    /// Fingerprint of everything that can sound (to refresh a running mix).
+    fn voices_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for a in &self.doc.audio {
+            (a.id, a.start.to_bits(), a.offset.to_bits(), a.len.to_bits(), a.gain.to_bits(), a.mute).hash(&mut h);
+        }
+        for l in &self.doc.layers {
+            if let LayerKind::Image(im) = &l.kind {
+                if let Some(v) = &im.video {
+                    (l.id, l.visible, v.mute, v.speed.to_bits(), l.anim.as_ref().and_then(|a| a.span).map(|s| (s[0].to_bits(), s[1].to_bits()))).hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
     fn tick_audio(&mut self) {
+        // sources changed while the timeline plays (a layer deleted, a clip muted …)
+        let sig = self.voices_sig();
+        if sig != self.voice_sig {
+            self.voice_sig = sig;
+            if self.tl_play.is_some() {
+                let v = self.timeline_voices();
+                let t = self.doc.timeline.time;
+                if let Some(o) = &self.audio_out {
+                    if v.is_empty() {
+                        o.stop();
+                    } else {
+                        o.play(v, t);
+                    }
+                }
+            }
+        }
         while let Ok((path, res)) = self.audio_rx.try_recv() {
             match res {
                 Ok(d) => {
@@ -3481,15 +3630,15 @@ impl App {
             Tool::Frame => {
                 // the selected camera comes first
                 if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter().find(|c| c.id == id)) {
-                    let (id, cr) = (c.id, c.rect);
+                    let (id, cr, upright, inside) = (c.id, c.rect, c.rot.abs() < 1e-6, c.contains(w));
                     for (i, p) in rect_handles(cr).iter().enumerate() {
-                        if xf.w2s(*p).distance(sp) <= 9.0 {
+                        if upright && xf.w2s(*p).distance(sp) <= 9.0 {
                             self.drag = Some(Drag::Cam { id, handle: i as u8, start: w, orig: cr });
                             self.mark();
                             return;
                         }
                     }
-                    if cr.contains(w) {
+                    if inside {
                         self.drag = Some(Drag::Cam { id, handle: 8, start: w, orig: cr });
                         self.mark();
                         return;
@@ -5494,7 +5643,11 @@ impl App {
                 {
                     let is_jpg = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
                     let bg = if is_jpg { bg.or(Some(Color32::WHITE)) } else { bg };
-                    self.status = match crate::export::render(&self.export_doc(), r, d.scale, bg)
+                    let rot = match d.region {
+                        ExportRegion::Camera(id) => self.doc.cameras.iter().find(|c| c.id == id).map_or(0.0, |c| c.rot),
+                        _ => 0.0,
+                    };
+                    self.status = match crate::export::render_rotated(&self.export_doc(), r.center(), r.size(), rot, d.scale, bg)
                         .and_then(|pm| crate::export::save(&pm, &path, d.jpeg_quality).map(|_| (pm.width(), pm.height())))
                     {
                         Ok((w, h)) => format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
@@ -5746,8 +5899,11 @@ impl App {
             Tool::Frame => {
                 ui.strong("내보낼 영역");
                 ui.small("끌어서 영역 지정 · 손잡이로 조절 · Ctrl+E: 내보내기");
-                if let Some(r) = self.doc.export_frame {
-                    ui.label(format!("{:.0} × {:.0} px", r.width(), r.height()));
+                if let Some(mut r) = self.doc.export_frame {
+                    if rect_fields(ui, &mut r, "frame") {
+                        self.doc.export_frame = Some(r);
+                        self.mark();
+                    }
                     if ui.button("영역 지우기").clicked() {
                         self.doc.export_frame = None;
                         self.mark();
@@ -7416,13 +7572,16 @@ impl App {
         for c in &self.doc.cameras {
             let sr = xf.rect_w2s(c.rect);
             let sel = self.cam_sel == Some(c.id) && self.tool == Tool::Frame;
+            let corners = c.corners().map(|p| xf.w2s(p));
             let alive = !self.doc.timeline.on || c.anim.alive(self.doc.timeline.time);
             let col = if alive { CAM_COLOR } else { CAM_COLOR.gamma_multiply(0.35) };
-            let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+            let pts = vec![corners[0], corners[1], corners[2], corners[3], corners[0]];
             painter.extend(Shape::dashed_line(&pts, Stroke::new(if sel { 2.0 } else { 1.4 }, col), 10.0, 4.0));
             let tag = if Some(c.id) == active && self.doc.timeline.on { format!("● {}", c.name) } else { c.name.clone() };
-            painter.text(sr.left_top() + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, format!("{tag}  {:.0}×{:.0}", c.rect.width(), c.rect.height()), FontId::proportional(12.0), col);
-            if sel {
+            let follow = if c.follow.is_some() { " ⛓" } else { "" };
+            painter.text(corners[0] + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, format!("{tag}{follow}  {:.0}×{:.0}", c.rect.width(), c.rect.height()), FontId::proportional(12.0), col);
+            let _ = sr;
+            if sel && c.rot.abs() < 1e-6 {
                 for p in rect_handles(c.rect) {
                     handle_box(painter, xf.w2s(p), CAM_COLOR);
                 }
@@ -8006,6 +8165,77 @@ fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width
     resp.on_hover_text(if wall { "벽 폴더 · 레이어를 끌어다 놓으면 이 벽에 붙어" } else { "공간 폴더 · 레이어를 끌어다 놓으면 이 공간에 들어가" })
 }
 
+/// Keyframe mark by easing: a diamond (linear), a bow tie (smooth in/out, like an
+/// hourglass on its side) or a square (hold).
+fn key_icon(p: &egui::Painter, c: Pos2, ease: crate::anim::Ease, fill: Color32, edge: Stroke) {
+    use crate::anim::Ease;
+    match ease {
+        Ease::Linear => {
+            let d = 5.5;
+            p.add(Shape::convex_polygon(vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)], fill, edge));
+        }
+        Ease::Smooth => {
+            for s in [-1.0f32, 1.0] {
+                let pts = vec![c + vec2(s * 5.5, -5.5), c + vec2(s * 5.5, 5.5), c + vec2(s * 1.0, 1.6), c + vec2(s * 1.0, -1.6)];
+                let pts = if s < 0.0 { pts } else { pts.into_iter().rev().collect() };
+                p.add(Shape::convex_polygon(pts, fill, edge));
+            }
+        }
+        Ease::Hold => {
+            p.rect(Rect::from_center_size(c, vec2(9.5, 9.5)), 1.0, fill, edge, StrokeKind::Inside);
+        }
+    }
+}
+
+/// Pixel fields (x, y, width, height), size presets that keep the centre, and a
+/// landscape/portrait swap for a region. True when it changed.
+fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str) -> bool {
+    let mut ch = false;
+    let (mut x, mut y, mut w, mut h) = (r.min.x, r.min.y, r.width(), r.height());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label("X");
+        ch |= ui.add(egui::DragValue::new(&mut x).speed(1.0).max_decimals(0)).changed();
+        ui.label("Y");
+        ch |= ui.add(egui::DragValue::new(&mut y).speed(1.0).max_decimals(0)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label("W");
+        ch |= ui.add(egui::DragValue::new(&mut w).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
+        ui.label("H");
+        ch |= ui.add(egui::DragValue::new(&mut h).range(2.0..=32000.0).speed(1.0).max_decimals(0)).changed();
+        if ui.button("가로 ↔ 세로").on_hover_text("가운데를 그대로 두고 가로·세로를 바꿔").clicked() {
+            let c = pos2(x + w * 0.5, y + h * 0.5);
+            std::mem::swap(&mut w, &mut h);
+            x = c.x - w * 0.5;
+            y = c.y - h * 0.5;
+            ch = true;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        let portrait = h > w;
+        for (pw, ph) in [(1920.0f32, 1080.0f32), (1280.0, 720.0), (2560.0, 1440.0), (3840.0, 2160.0), (1080.0, 1080.0), (1080.0, 1350.0)] {
+            let (pw, ph) = if portrait && pw != ph { (ph.min(pw), ph.max(pw)) } else { (pw, ph) };
+            let on = (w - pw).abs() < 0.5 && (h - ph).abs() < 0.5;
+            if ui.selectable_label(on, format!("{pw:.0}×{ph:.0}")).on_hover_text("가운데를 그대로 두고 이 크기로").clicked() {
+                let c = pos2(x + w * 0.5, y + h * 0.5);
+                w = pw;
+                h = ph;
+                x = c.x - w * 0.5;
+                y = c.y - h * 0.5;
+                ch = true;
+            }
+        }
+    });
+    let _ = salt;
+    if ch {
+        *r = Rect::from_min_size(pos2(x.round(), y.round()), vec2(w.round().max(2.0), h.round().max(2.0)));
+    }
+    ch
+}
+
 /// Distance from `p` to the segment `a`-`b`.
 fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
@@ -8159,6 +8389,7 @@ impl eframe::App for App {
 
         self.handle_shortcuts(&ctx);
         crate::persp::sync_walls(&mut self.doc);
+        crate::anim::apply_constraints(&mut self.doc);
         self.tick_audio();
         self.tick_timeline(&ctx);
         self.tick_videos(&ctx);
