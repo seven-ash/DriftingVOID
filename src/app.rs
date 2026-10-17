@@ -28,6 +28,7 @@ pub enum Tool {
     Ellipse,
     Crop,
     Frame,
+    Space,
     Picker,
 }
 
@@ -45,6 +46,7 @@ const TOOLS: &[(Tool, &str, &str, Key)] = &[
     (Tool::Ellipse, "원", "O", Key::O),
     (Tool::Crop, "사진 자르기", "C", Key::C),
     (Tool::Frame, "내보낼 영역", "F", Key::F),
+    (Tool::Space, "3D 공간", "K", Key::K),
     (Tool::Picker, "스포이드", "I", Key::I),
 ];
 
@@ -138,6 +140,11 @@ enum Drag {
     MoveMany { start: Pos2, origs: Vec<(Layer, Part)>, d: Vec2 },
     /// Group scale/rotate about the selection's common centre.
     Group { rotate: bool, center: Pos2, start: Pos2, box_: Rect, origs: Vec<(Layer, Part)>, s: f32, th: f32 },
+    /// 3D space frame (handle 0..7 as `rect_handles`; a zero-size `orig` = new space).
+    SpaceFrame { id: u64, handle: u8, start: Pos2, orig: Rect },
+    /// Vanishing line: `end` 0 = a, 1 = b, 2 = whole line.
+    SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
+    SpaceOrigin { id: u64 },
 }
 
 /// Which part of a layer a selection covers.
@@ -636,6 +643,12 @@ pub struct App {
     extra_sel: Vec<LayerId>,
     sub: SubSel,
     pan_latch: bool,
+    /// Active 3D space, axis for new vanishing lines, selected line, and whether the
+    /// next drag makes a new space.
+    space_sel: Option<u64>,
+    space_axis: u8,
+    space_line: Option<usize>,
+    space_new: bool,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
     show_log: bool,
@@ -700,6 +713,10 @@ impl App {
             extra_sel: Vec::new(),
             sub: SubSel::default(),
             pan_latch: false,
+            space_sel: None,
+            space_axis: 0,
+            space_line: None,
+            space_new: false,
             middle_moved: false,
             input_log: Default::default(),
             show_log: false,
@@ -736,6 +753,35 @@ impl App {
         if std::env::var_os("DV_SELECT_PHOTO").is_some() {
             // selects the first photo (for screenshots of its properties)
             app.sel = app.doc.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))).map(|l| l.id);
+        }
+        if let Ok(v) = std::env::var("DV_SPACE_LINES") {
+            // "x1,y1,x2,y2,axis;..." in the first photo's source pixels; opens the space
+            // tool on a space fitted to that photo (screenshots of the solver)
+            if let Some(im) = app.doc.layers.iter().find_map(|l| match &l.kind {
+                LayerKind::Image(im) => Some(im.clone()),
+                _ => None,
+            }) {
+                let b = Rect::from_points(&im.corners());
+                let id = app.doc.new_id();
+                let mut sp = crate::persp::Space::new(id, "공간 1".into(), b);
+                for part in v.split(';') {
+                    let n: Vec<f32> = part.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 5 {
+                        let a = im.src_to_world(pos2(n[0], n[1]));
+                        let bb = im.src_to_world(pos2(n[2], n[3]));
+                        sp.lines.push(crate::persp::VLine { a, b: bb, axis: n[4] as u8 });
+                    }
+                }
+                if let Ok(o) = std::env::var("DV_SPACE_ORIGIN") {
+                    let n: Vec<f32> = o.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 2 {
+                        sp.origin = im.src_to_world(pos2(n[0], n[1]));
+                    }
+                }
+                app.doc.spaces.push(sp);
+                app.space_sel = Some(id);
+                app.tool = Tool::Space;
+            }
         }
         if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
             app.pending = Some(Pending::New);
@@ -1759,8 +1805,90 @@ impl App {
                 self.drag = Some(Drag::Frame { handle: 4, start: p, orig: Rect::from_min_max(p, p) });
                 self.mark();
             }
+            Tool::Space => self.space_down(sp, w),
             Tool::Hand | Tool::Picker => {}
         }
+    }
+
+    fn space_idx(&self) -> Option<usize> {
+        self.space_sel.and_then(|id| self.doc.spaces.iter().position(|s| s.id == id))
+    }
+
+    fn set_space_axis(&mut self, ax: u8) {
+        self.space_axis = ax;
+        if let (Some(i), Some(li)) = (self.space_idx(), self.space_line) {
+            if let Some(l) = self.doc.spaces[i].lines.get_mut(li) {
+                if l.axis != ax {
+                    l.axis = ax;
+                    self.mark();
+                }
+            }
+        }
+    }
+
+    fn space_down(&mut self, sp: Pos2, w: Pos2) {
+        let xf = self.xf();
+        if let (Some(i), false) = (self.space_idx(), self.space_new) {
+            let s = &self.doc.spaces[i];
+            let id = s.id;
+            let mut hit: Option<Drag> = None;
+            // endpoints first (the selected line wins ties)
+            let order: Vec<usize> = self.space_line.into_iter().chain(0..s.lines.len()).collect();
+            'ends: for &li in &order {
+                let Some(l) = s.lines.get(li) else { continue };
+                for (end, p) in [(0u8, l.a), (1, l.b)] {
+                    if xf.w2s(p).distance(sp) <= 8.0 {
+                        self.space_line = Some(li);
+                        hit = Some(Drag::SpaceLine { id, idx: li, end, start: w, orig: *l });
+                        break 'ends;
+                    }
+                }
+            }
+            if hit.is_none() && xf.w2s(s.origin).distance(sp) <= 10.0 {
+                hit = Some(Drag::SpaceOrigin { id });
+            }
+            if hit.is_none() {
+                for (h, p) in rect_handles(s.frame).iter().enumerate() {
+                    if xf.w2s(*p).distance(sp) <= 8.0 {
+                        hit = Some(Drag::SpaceFrame { id, handle: h as u8, start: w, orig: s.frame });
+                        break;
+                    }
+                }
+            }
+            if hit.is_none() {
+                for (li, l) in s.lines.iter().enumerate() {
+                    if seg_dist(sp, xf.w2s(l.a), xf.w2s(l.b)) <= 5.0 {
+                        self.space_line = Some(li);
+                        hit = Some(Drag::SpaceLine { id, idx: li, end: 2, start: w, orig: *l });
+                        break;
+                    }
+                }
+            }
+            let drag = match hit {
+                Some(d) => d,
+                None => {
+                    // a new vanishing line on the current axis
+                    let l = crate::persp::VLine { a: w, b: w, axis: self.space_axis };
+                    self.doc.spaces[i].lines.push(l);
+                    let idx = self.doc.spaces[i].lines.len() - 1;
+                    self.space_line = Some(idx);
+                    Drag::SpaceLine { id, idx, end: 1, start: w, orig: l }
+                }
+            };
+            self.drag = Some(drag);
+            self.mark();
+            return;
+        }
+        // a new space: drag its frame (a click fits it to the photo underneath)
+        let id = self.doc.new_id();
+        let n = self.doc.spaces.len() + 1;
+        let p = w.round();
+        self.doc.spaces.push(crate::persp::Space::new(id, format!("공간 {n}"), Rect::from_min_max(p, p)));
+        self.space_sel = Some(id);
+        self.space_new = false;
+        self.space_line = None;
+        self.drag = Some(Drag::SpaceFrame { id, handle: 4, start: p, orig: Rect::from_min_max(p, p) });
+        self.mark();
     }
 
     fn mark_if_changed_raster(&mut self) {
@@ -1965,6 +2093,50 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::SpaceFrame { id, handle, start, orig } => {
+                let p = w.round();
+                let mut r = *orig;
+                if orig.width() == 0.0 && orig.height() == 0.0 {
+                    r = Rect::from_two_pos(*start, p);
+                } else {
+                    let (hx, hy) = handle_axes(*handle);
+                    if hx < 0 { r.min.x = p.x }
+                    if hx > 0 { r.max.x = p.x }
+                    if hy < 0 { r.min.y = p.y }
+                    if hy > 0 { r.max.y = p.y }
+                    r = Rect::from_two_pos(r.min, r.max);
+                }
+                let id = *id;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    s.frame = r;
+                }
+                self.changed = true;
+                self.modified = true;
+            }
+            Drag::SpaceLine { id, idx, end, start, orig } => {
+                let (id, idx, end, start, orig) = (*id, *idx, *end, *start, *orig);
+                if let Some(l) = self.doc.spaces.iter_mut().find(|s| s.id == id).and_then(|s| s.lines.get_mut(idx)) {
+                    match end {
+                        0 => l.a = w,
+                        1 => l.b = w,
+                        _ => {
+                            let d = w - start;
+                            l.a = orig.a + d;
+                            l.b = orig.b + d;
+                        }
+                    }
+                }
+                self.changed = true;
+                self.modified = true;
+            }
+            Drag::SpaceOrigin { id } => {
+                let id = *id;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    s.origin = w;
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::Frame { handle, start, orig } => {
                 let p = w.round();
                 let mut r = *orig;
@@ -2164,6 +2336,45 @@ impl App {
                 }
                 self.changed = true;
                 self.modified = true;
+            }
+            Drag::SpaceLine { id, idx, .. } => {
+                let zoom = self.zoom;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    if s.lines.get(idx).is_some_and(|l| l.a.distance(l.b) * zoom < 4.0) {
+                        s.lines.remove(idx);
+                        self.space_line = None;
+                    }
+                }
+            }
+            Drag::SpaceFrame { id, orig, .. } => {
+                let fresh = orig.width() == 0.0 && orig.height() == 0.0;
+                if let Some(i) = self.doc.spaces.iter().position(|s| s.id == id) {
+                    let r = self.doc.spaces[i].frame;
+                    if r.width() * self.zoom < 6.0 || r.height() * self.zoom < 6.0 {
+                        if fresh {
+                            // a click: fit the space to the photo under the pointer
+                            let w = self.xf().s2w(sp);
+                            let img = self.doc.layers.iter().rev().find_map(|l| match &l.kind {
+                                LayerKind::Image(im) if l.visible && im.contains(w) => l.bounds(),
+                                _ => None,
+                            });
+                            match img {
+                                Some(b) => self.doc.spaces[i].frame = b,
+                                None => {
+                                    self.doc.spaces.remove(i);
+                                    self.space_sel = self.doc.spaces.last().map(|s| s.id);
+                                    return;
+                                }
+                            }
+                        } else {
+                            self.doc.spaces[i].frame = orig;
+                        }
+                    }
+                    if fresh {
+                        let f = self.doc.spaces[i].frame;
+                        self.doc.spaces[i].origin = pos2(f.center().x, f.top() + f.height() * 0.7);
+                    }
+                }
             }
             Drag::Frame { .. } => {
                 if let Some(r) = self.doc.export_frame {
@@ -2433,6 +2644,22 @@ impl App {
         if k(cmd, Key::Num1) {
             self.set_zoom_center(1.0);
         }
+        if self.tool == Tool::Space {
+            for (key, ax) in [(Key::Num1, 0u8), (Key::Num2, 1), (Key::Num3, 2), (Key::X, 0), (Key::Y, 1), (Key::Z, 2)] {
+                if k(Modifiers::NONE, key) {
+                    self.set_space_axis(ax);
+                }
+            }
+            if let (Some(i), Some(li)) = (self.space_idx(), self.space_line) {
+                if k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace) {
+                    if li < self.doc.spaces[i].lines.len() {
+                        self.doc.spaces[i].lines.remove(li);
+                        self.mark();
+                    }
+                    self.space_line = None;
+                }
+            }
+        }
         if k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace) {
             self.delete_selected();
         }
@@ -2454,6 +2681,9 @@ impl App {
                 self.cancel_drag();
             } else if self.tool == Tool::Crop {
                 self.tool = Tool::Select;
+            } else if self.tool == Tool::Space && (self.space_line.is_some() || self.space_new) {
+                self.space_line = None;
+                self.space_new = false;
             } else {
                 self.select_only(None);
             }
@@ -2743,7 +2973,7 @@ impl App {
                         &[Tool::Select, Tool::Lasso, Tool::Hand],
                         &[Tool::Brush, Tool::Pen, Tool::Eraser],
                         &[Tool::Text, Tool::Line, Tool::Arrow, Tool::Rect, Tool::Ellipse],
-                        &[Tool::Crop, Tool::Frame, Tool::Picker],
+                        &[Tool::Crop, Tool::Frame, Tool::Space, Tool::Picker],
                     ];
                     for (gi, g) in groups.iter().enumerate() {
                         if gi > 0 {
@@ -2947,6 +3177,7 @@ impl App {
                     }
                 }
             }
+            Tool::Space => self.space_panel(ui),
             Tool::Select => {
                 ui.strong("선택");
                 ui.small("클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전");
@@ -3958,7 +4189,208 @@ impl App {
         painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT.gamma_multiply(0.5));
     }
 
+    fn space_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::persp::{AXIS_COLORS, AXIS_NAMES};
+        ui.strong("3D 공간");
+        ui.small("끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점·원점 끌기 · Delete: 선 지우기");
+        let mut pick = None;
+        let mut new = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for sp in &self.doc.spaces {
+                if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, &sp.name).clicked() {
+                    pick = Some(sp.id);
+                }
+            }
+            if ui.selectable_label(self.space_new, "+ 새 공간").clicked() {
+                new = true;
+            }
+        });
+        if let Some(id) = pick {
+            self.space_sel = Some(id);
+            self.space_new = false;
+            self.space_line = None;
+        }
+        if new {
+            self.space_new = true;
+            self.space_line = None;
+        }
+        if self.space_new || self.doc.spaces.is_empty() {
+            ui.small("캔버스에서 끌어서 공간 영역을 지정해 줘");
+            return;
+        }
+        let Some(i) = self.space_idx() else { return };
+        let mut axis_pick = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.label("축");
+            for ax in 0..3u8 {
+                let n = self.doc.spaces[i].count(ax);
+                let txt = egui::RichText::new(format!("{} · {n}", AXIS_NAMES[ax as usize])).color(AXIS_COLORS[ax as usize]);
+                if ui.selectable_label(self.space_axis == ax, txt).clicked() {
+                    axis_pick = Some(ax);
+                }
+            }
+        });
+        if let Some(ax) = axis_pick {
+            self.set_space_axis(ax);
+        }
+        let sp = &self.doc.spaces[i];
+        match crate::persp::solve(sp) {
+            Ok(cam) => {
+                ui.label(format!(
+                    "초점거리 {:.0} mm{} · 시야각 {:.1}°",
+                    cam.focal_35mm(),
+                    if cam.f_assumed { " (가정)" } else { "" },
+                    cam.fov_deg()
+                ));
+                ui.small(format!("35 mm 환산 · 선 오차 {:.2}° (RMS)", cam.rms_deg));
+            }
+            Err(e) => {
+                ui.small(egui::RichText::new(e).color(INK_2));
+            }
+        }
+        let all3 = (0..3).all(|a| sp.count(a) >= 2);
+        let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
+        let mut ch = ui.checkbox(&mut grid, "바닥 격자").changed();
+        ch |= ui.add_enabled(all3, egui::Checkbox::new(&mut fpp, "주점도 추정 (세 축 모두 2개 이상)")).changed();
+        let img_b = self.sel.and_then(|id| self.doc.get(id)).filter(|l| matches!(l.kind, LayerKind::Image(_))).and_then(|l| l.bounds());
+        let (mut clear, mut fit, mut del) = (false, false, false);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            clear = ui.button("선 모두 지우기").clicked();
+            fit = ui.add_enabled(img_b.is_some(), egui::Button::new("선택한 사진에 맞추기")).clicked();
+            del = ui.button("공간 삭제").clicked();
+        });
+        let s = &mut self.doc.spaces[i];
+        if ch {
+            s.grid = grid;
+            s.free_pp = fpp;
+        }
+        if clear && !s.lines.is_empty() {
+            s.lines.clear();
+            self.space_line = None;
+            ch = true;
+        }
+        if let (true, Some(b)) = (fit, img_b) {
+            s.frame = b;
+            ch = true;
+        }
+        if del {
+            self.doc.spaces.remove(i);
+            self.space_sel = self.doc.spaces.last().map(|s| s.id);
+            self.space_line = None;
+            ch = true;
+        }
+        if ch {
+            self.mark();
+        }
+    }
+
+    fn draw_spaces(&self, painter: &egui::Painter, xf: &Xf) {
+        use crate::persp::{AXIS_COLORS, AXIS_NAMES, V3};
+        if self.tool != Tool::Space {
+            return;
+        }
+        for s in &self.doc.spaces {
+            let active = self.space_sel == Some(s.id) && !self.space_new;
+            let sr = xf.rect_w2s(s.frame);
+            let col = if active { INK } else { INK_3 };
+            let pts = vec![sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.2, col), 6.0, 4.0));
+            painter.text(sr.left_top() - vec2(0.0, 4.0), Align2::LEFT_BOTTOM, &s.name, FontId::proportional(12.0), col);
+            if !active {
+                continue;
+            }
+            let cam = crate::persp::solve(s).ok();
+            let pc = painter.with_clip_rect(sr.intersect(painter.clip_rect()));
+            if let Some(cam) = &cam {
+                let seg = |a: V3, b: V3| cam.project_segment(a, b).map(|(p, q)| [xf.w2s(p), xf.w2s(q)]);
+                if s.grid {
+                    let g = nice_f64(s.frame.width().max(s.frame.height()) as f64 / 12.0);
+                    let n = 12i32;
+                    let ext = g * n as f64;
+                    for k in -n..=n {
+                        if k == 0 {
+                            continue;
+                        }
+                        let t = k as f64 * g;
+                        let c = Color32::from_white_alpha(if k % 5 == 0 { 120 } else { 60 });
+                        for sgm in [seg([-ext, t, 0.0], [ext, t, 0.0]), seg([t, -ext, 0.0], [t, ext, 0.0])].into_iter().flatten() {
+                            pc.line_segment(sgm, Stroke::new(1.0, c));
+                        }
+                    }
+                    for ax in 0..3 {
+                        let mut e = [0.0; 3];
+                        e[ax] = if ax == 2 { ext * 0.4 } else { ext };
+                        if let Some(sgm) = seg([0.0; 3], e) {
+                            pc.line_segment(sgm, Stroke::new(1.6, AXIS_COLORS[ax]));
+                        }
+                        if ax < 2 {
+                            let mut ne = [0.0; 3];
+                            ne[ax] = -ext;
+                            if let Some(sgm) = seg([0.0; 3], ne) {
+                                pc.line_segment(sgm, Stroke::new(1.0, AXIS_COLORS[ax].gamma_multiply(0.4)));
+                            }
+                        }
+                    }
+                }
+                // horizon: the image of the ground plane's line at infinity, l = K^-T n
+                let n = cam.axis_dir(2);
+                let l = [n[0] / cam.f, n[1] / cam.f, -(cam.c[0] * n[0] + cam.c[1] * n[1]) / cam.f + n[2]];
+                if l[1].abs() > 1e-12 {
+                    let y_at = |x: f64| -(l[0] * x + l[2]) / l[1];
+                    let (x0, x1) = (s.frame.left() as f64, s.frame.right() as f64);
+                    let a = xf.w2s(pos2(x0 as f32, y_at(x0) as f32));
+                    let b = xf.w2s(pos2(x1 as f32, y_at(x1) as f32));
+                    let hc = Color32::from_rgb(255, 196, 90);
+                    painter.extend(Shape::dashed_line(&[a, b], Stroke::new(1.2, hc), 10.0, 6.0));
+                    painter.text(b + vec2(-4.0, -4.0), Align2::RIGHT_BOTTOM, "지평선", FontId::proportional(11.0), hc);
+                }
+                for ax in 0..3 {
+                    if s.count(ax as u8) == 0 {
+                        continue;
+                    }
+                    if let Some(v) = cam.vp(ax) {
+                        let v = xf.w2s(v);
+                        painter.circle_stroke(v, 6.0, Stroke::new(1.5, AXIS_COLORS[ax]));
+                        painter.text(v + vec2(8.0, -8.0), Align2::LEFT_BOTTOM, AXIS_NAMES[ax], FontId::proportional(12.0), AXIS_COLORS[ax]);
+                    }
+                }
+            }
+            for (i, l) in s.lines.iter().enumerate() {
+                let c = AXIS_COLORS[(l.axis as usize).min(2)];
+                let (a, b) = (xf.w2s(l.a), xf.w2s(l.b));
+                if let Some(v) = cam.as_ref().and_then(|cam| cam.vp(l.axis as usize)) {
+                    let v = xf.w2s(v);
+                    let near = if a.distance(v) < b.distance(v) { a } else { b };
+                    painter.line_segment([near, v], Stroke::new(1.0, c.gamma_multiply(0.3)));
+                }
+                if self.space_line == Some(i) {
+                    painter.line_segment([a, b], Stroke::new(6.0, Color32::from_white_alpha(70)));
+                }
+                painter.line_segment([a, b], Stroke::new(2.0, c));
+                for p in [a, b] {
+                    painter.circle_filled(p, 4.0, c);
+                    painter.circle_stroke(p, 4.0, Stroke::new(1.0, Color32::WHITE));
+                }
+                if let Some(e) = cam.as_ref().and_then(|cam| cam.line_err.get(i).copied()).filter(|e| e.is_finite() && *e > 1.0) {
+                    painter.text(a.lerp(b, 0.5) + vec2(0.0, -6.0), Align2::CENTER_BOTTOM, format!("{e:.1}°"), FontId::proportional(11.0), Color32::from_rgb(255, 120, 120));
+                }
+            }
+            for p in rect_handles(s.frame) {
+                handle_box(painter, xf.w2s(p), INK);
+            }
+            let o = xf.w2s(s.origin);
+            painter.circle_filled(o, 6.0, Color32::from_black_alpha(150));
+            painter.circle_stroke(o, 6.0, Stroke::new(1.5, Color32::WHITE));
+            painter.circle_filled(o, 1.8, Color32::WHITE);
+        }
+    }
+
+
     fn draw_overlays(&self, painter: &egui::Painter, xf: &Xf) {
+        self.draw_spaces(painter, xf);
         let accent = ACCENT;
         // export frame
         if let Some(fr) = self.doc.export_frame {
@@ -4502,6 +4934,20 @@ fn snap_angle(a: f32, start: f32, mods: Modifiers) -> f32 {
     } else {
         a
     }
+}
+
+/// Distance from `p` to the segment `a`-`b`.
+fn seg_dist(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let t = if ab.length_sq() > 0.0 { ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+    p.distance(a + ab * t)
+}
+
+/// Nearest 1-2-5 x 10^n.
+fn nice_f64(x: f64) -> f64 {
+    let e = 10f64.powf(x.max(1e-9).log10().floor());
+    let m = x / e;
+    (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
 }
 
 fn handle_box(painter: &egui::Painter, p: Pos2, c: Color32) {

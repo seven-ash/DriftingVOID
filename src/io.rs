@@ -51,6 +51,8 @@ struct FileDoc {
     next_id: u64,
     export_frame: Option<[f32; 4]>,
     layers: Vec<FileLayer>,
+    #[serde(default)]
+    spaces: Vec<crate::persp::Space>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -186,7 +188,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind });
         }
-        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers };
+        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         zip.finish().map_err(|e| e.to_string())?;
@@ -205,7 +207,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     };
     let fd: FileDoc = serde_json::from_slice(&read("doc.json")?).map_err(|e| e.to_string())?;
     let mut images: HashMap<String, ImageSource> = HashMap::new();
-    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id };
+    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces };
     for fl in fd.layers {
         let kind = match fl.kind {
             FileKind::Image { file, center, scale, rotation, crop, adjust } => {

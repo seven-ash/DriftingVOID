@@ -329,6 +329,14 @@ pub fn tool_icon(p: &Painter, tool: crate::app::Tool, r: Rect, c: Color32) {
             }
             p.circle_filled(r.center(), 1.8, c);
         }
+        Tool::Space => {
+            // a wall receding to a vanishing point
+            let vp = at(0.9, 0.42);
+            p.add(egui::Shape::closed_line(vec![at(0.12, 0.14), at(0.52, 0.3), at(0.52, 0.62), at(0.12, 0.86)], s));
+            p.line_segment([at(0.52, 0.3), vp], Stroke::new(1.0, c.gamma_multiply(0.55)));
+            p.line_segment([at(0.52, 0.62), vp], Stroke::new(1.0, c.gamma_multiply(0.55)));
+            p.circle_filled(vp, 1.8, c);
+        }
         Tool::Picker => {
             p.line_segment([at(0.16, 0.84), at(0.56, 0.44)], s);
             p.add(egui::Shape::convex_polygon(vec![at(0.5, 0.38), at(0.62, 0.5), at(0.86, 0.26), at(0.74, 0.14)], c, Stroke::NONE));

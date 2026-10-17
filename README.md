@@ -36,7 +36,8 @@ Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow
 | F12 | Input log (pen flags, mouse/touch events) |
 
 Tools: V select, Q lasso, H pan, B brush (raster), P pen (vector), E eraser, T text,
-L line, A arrow, R rectangle, O ellipse, C crop, F export frame, I eyedropper.
+L line, A arrow, R rectangle, O ellipse, C crop, F export frame, K 3D space
+(perspective match from vanishing lines, see `docs/SPACES.md`), I eyedropper.
 
 Drawing layers are created when you first draw, reused afterwards, and removed
 when empty. Photos are placed under drawing layers.
@@ -55,6 +56,8 @@ when empty. Photos are placed under drawing layers.
 - `--selftest --list-fonts fonts.txt` dumps the installed font families.
 - `DV_SHOW_PALETTE=RRGGBB` / `DV_SHOW_EXPORT=1` open those panels at start (for screenshots).
 - `DV_SHOW_UNSAVED=1` shows the unsaved-changes dialog at start.
+- `DV_SPACE_LINES="x1,y1,x2,y2,axis;..."` (+ `DV_SPACE_ORIGIN="x,y"`, photo pixels) opens the
+  space tool on a space fitted to the first photo.
 - `DV_TEST_TEXT_FONT="<family>"` starts editing a text box in that installed font.
 - Crashes are logged to `%APPDATA%\DriftingVOID\crash.log`.
 
@@ -71,6 +74,7 @@ when empty. Photos are placed under drawing layers.
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
 | `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
 | `src/theme.rs` | Tokens, visuals, icons |
+| `src/persp.rs` | 3D spaces: vanishing-line camera solver (robust LM fit) |
 | `src/dial.rs` | Focus-ring dial control with reset pin |
 | `src/calc.rs` | Maths parser for number fields |
 | `src/okhsv.rs` | OKHSV colour conversions |
@@ -78,6 +82,7 @@ when empty. Photos are placed under drawing layers.
 | `src/io.rs` | Image import and `.void` save/load |
 | `docs/ROADMAP.md` | Planned work and known issues |
 | `docs/CHANGELOG.md` | What shipped, per version |
+| `docs/SPACES.md` | 3D spaces: design, maths, references, phases |
 | `assets/icon.svg`, `icon.ico`, `icon-256.png` | App icon (source, exe icon, window icon) |
 | `assets/icon-candidates/` | Other icon candidates (`preview.html` shows them all) |
 | `build.rs` | Embeds the icon and version info into the exe |

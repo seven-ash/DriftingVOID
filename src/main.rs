@@ -10,6 +10,7 @@ mod fontdb;
 mod glass;
 mod okhsv;
 mod penhook;
+mod persp;
 mod theme;
 mod io;
 mod raster;

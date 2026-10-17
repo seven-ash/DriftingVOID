@@ -378,6 +378,8 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub export_frame: Option<Rect>,
     pub next_id: LayerId,
+    /// Perspective-matched 3D spaces (docs/SPACES.md).
+    pub spaces: Vec<crate::persp::Space>,
 }
 
 impl Document {
