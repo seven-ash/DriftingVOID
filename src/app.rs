@@ -1990,6 +1990,22 @@ impl App {
         // ruler
         let px_per_s = tr.width() as f64 / dur;
         let step = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0].into_iter().find(|s| s * px_per_s >= 50.0).unwrap_or(600.0);
+        // frame ticks at the real fps; when they would crowd closer than 3 physical
+        // pixels, every 2nd, then every 4th, … frame
+        let fps = tl.fps.max(1.0);
+        let ppp = ui.ctx().pixels_per_point() as f64;
+        let mut every = 1u64;
+        while px_per_s / fps * every as f64 * ppp < 3.0 && every < (1 << 24) {
+            every *= 2;
+        }
+        let frames = (dur * fps + 1e-6).floor() as u64;
+        let tick = Stroke::new(1.0 / ui.ctx().pixels_per_point(), INK_3.gamma_multiply(0.55));
+        let mut f = 0u64;
+        while f <= frames {
+            let x = x_of(f as f64 / fps);
+            p.line_segment([pos2(x, rect.top() + ruler_h - 5.0), pos2(x, rect.top() + ruler_h)], tick);
+            f += every;
+        }
         let mut t = 0.0;
         while t <= dur + 1e-9 {
             let x = x_of(t);
