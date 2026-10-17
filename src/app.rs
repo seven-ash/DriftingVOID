@@ -657,6 +657,9 @@ pub struct App {
     nav3d: Option<crate::view3d::Nav>,
     tab_t0: Option<f64>,
     peek: bool,
+    /// Tab presses taken out of the raw input (pressed, shift) before egui could use
+    /// them for focus traversal.
+    tab_raw: Vec<(bool, bool)>,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
     show_log: bool,
@@ -731,6 +734,7 @@ impl App {
             nav3d: None,
             tab_t0: None,
             peek: false,
+            tab_raw: Vec::new(),
             middle_moved: false,
             input_log: Default::default(),
             show_log: false,
@@ -1999,7 +2003,7 @@ impl App {
     fn handle_3d_input(&mut self, ctx: &egui::Context, rect: Rect, layer: egui::LayerId, proj: &crate::view3d::Proj) {
         use crate::view3d::{Modal, Nav, Op};
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
-        let typing = ctx.egui_wants_keyboard_input();
+        let typing = ctx.text_edit_focused();
         let over = |p: Pos2| rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == layer);
         let hover = ctx.input(|i| i.pointer.hover_pos());
         let pen = crate::penhook::state();
@@ -2832,7 +2836,7 @@ impl App {
 
     fn handle_canvas_input(&mut self, ctx: &egui::Context, rect: Rect, canvas_layer: egui::LayerId) {
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
-        let typing = ctx.egui_wants_keyboard_input();
+        let typing = ctx.text_edit_focused();
         // Track Space ourselves: the Korean IME can swallow the key-up of a Space typed
         // into a text box, which left egui thinking Space was still held (every click
         // then panned until Space was pressed again).
@@ -3019,7 +3023,7 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let typing = ctx.egui_wants_keyboard_input();
+        let typing = ctx.text_edit_focused();
         let cmd = Modifiers::COMMAND;
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let mut paste = false;
@@ -3041,19 +3045,7 @@ impl App {
         if paste {
             self.paste();
         }
-        let tabs: Vec<(bool, bool)> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Key { key: Key::Tab, pressed, repeat: false, modifiers, .. } => Some((*pressed, modifiers.shift)),
-                    _ => None,
-                })
-                .collect()
-        });
-        ctx.input_mut(|i| {
-            i.consume_key(Modifiers::NONE, Key::Tab);
-            i.consume_key(Modifiers::SHIFT, Key::Tab);
-        });
+        let tabs = std::mem::take(&mut self.tab_raw);
         let can3d = self.ws3d || self.ws_space().is_some();
         for (pressed, shift) in tabs {
             if shift || !can3d {
@@ -5647,6 +5639,34 @@ fn shape_hit(s: &ShapeLayer, w: Pos2, tol: f32) -> bool {
 }
 
 impl eframe::App for App {
+    /// Takes Tab out of the input before egui sees it: egui would otherwise move
+    /// keyboard focus to the next button (File, View, ...) and Tab would never reach
+    /// the workspace switch. Text fields still get Tab while one is being edited.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if ctx.text_edit_focused() {
+            return;
+        }
+        let tabs = &mut self.tab_raw;
+        let before = tabs.len();
+        raw.events.retain(|e| match e {
+            egui::Event::Key { key: Key::Tab, pressed, repeat, modifiers, .. } => {
+                if !repeat {
+                    tabs.push((*pressed, modifiers.shift));
+                }
+                false
+            }
+            _ => true,
+        });
+        // a button focused earlier (by an old Tab) would keep stealing keys
+        if tabs.len() > before {
+            ctx.memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
@@ -5721,7 +5741,7 @@ impl eframe::App for App {
         self.unsaved_modal(&ctx);
         self.peek_ui(&ctx);
 
-        let typing = ctx.egui_wants_keyboard_input();
+        let typing = ctx.text_edit_focused();
         self.commit_if_idle(typing);
         self.tex.gc();
 
