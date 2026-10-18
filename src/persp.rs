@@ -402,6 +402,12 @@ impl Light {
         let row = |i: usize| [cam.r[i][0], cam.r[i][1], cam.r[i][2]];
         let (right, down, fwd) = (row(0), row(1), row(2));
         let d = normalize(add(add(fwd, scale(down, 0.8)), scale(right, 0.6)));
+        Self::from_dir(d, 0.35)
+    }
+
+    /// A light travelling along `d` (angles fitted to whole degrees... refined).
+    pub fn from_dir(d: V3, ambient: f32) -> Self {
+        let d = normalize(d);
         // the X/Y angles whose rotation sends +Z closest to d (whole degrees)
         let mut best = ([0.0, 0.0, 0.0], f64::MAX);
         for a in -180..180 {
@@ -414,7 +420,23 @@ impl Light {
                 }
             }
         }
-        Self { rot: best.0, ambient: 0.35 }
+        // refine to a tenth of a degree around the best whole-degree fit
+        let (mut r0, mut e0) = best;
+        for _ in 0..2 {
+            let base = r0;
+            for i in -10..=10 {
+                for j in -10..=10 {
+                    let r = [base[0] + i as f64 * 0.1, base[1] + j as f64 * 0.1, 0.0];
+                    let e = sub(mul_mv(&euler_xyz(r), [0.0, 0.0, 1.0]), d);
+                    let e = dot(e, e);
+                    if e < e0 {
+                        r0 = r;
+                        e0 = e;
+                    }
+                }
+            }
+        }
+        Self { rot: r0, ambient }
     }
 
     /// Direction the light travels, in world space.

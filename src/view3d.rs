@@ -234,14 +234,46 @@ fn content_to_world(pl: &Placement, m: &M3, t: V3, p: Pos2) -> V3 {
 
 /// Draws the workspace. Camera view reuses the 2D renderer (it is the same picture).
 #[allow(clippy::too_many_arguments)]
-pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>) {
+/// Where the light gizmo sits: the sun (up-light of the origin) and the arrow tip.
+pub fn light_handle(cam: &Camera, l: &persp::Light) -> (V3, V3) {
+    let len = cam.origin_depth().max(1.0) * 0.3;
+    let d = l.dir();
+    let sun = persp::scale(d, -len);
+    (sun, persp::scale(d, -len * 0.04))
+}
+
+fn light_gizmo(painter: &Painter, proj: &Proj, cam: &Camera, l: &persp::Light, selected: bool) {
+    let (sun, tip) = light_handle(cam, l);
+    let col = if selected { crate::theme::ACCENT } else { Color32::from_rgb(255, 214, 102) };
+    let (Some(s), Some(t)) = (proj.project(sun), proj.project(tip)) else { return };
+    painter.circle_stroke(s, 7.0, Stroke::new(1.8, col));
+    for k in 0..8 {
+        let a = k as f32 * std::f32::consts::TAU / 8.0;
+        let v = egui::vec2(a.cos(), a.sin());
+        painter.line_segment([s + v * 10.0, s + v * 14.0], Stroke::new(1.4, col));
+    }
+    let dir = (t - s).normalized();
+    if (t - s).length() > 4.0 {
+        let from = s + dir * (16.0f32).min((t - s).length() * 0.5);
+        painter.line_segment([from, t], Stroke::new(2.0, col));
+        let n = egui::vec2(-dir.y, dir.x);
+        painter.add(Shape::convex_polygon(vec![t + dir * 6.0, t - dir * 4.0 + n * 5.0, t - dir * 4.0 - n * 5.0], col, Stroke::NONE));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>, light_sel: bool) {
     let rect = proj.rect;
+    let light = doc.spaces.iter().find(|s| s.id == view.space).and_then(|s| s.light);
     if let Some(xf) = proj.canvas_xf() {
         let fr = xf.rect_w2s(cam.frame);
         let clip = painter.with_clip_rect(fr.intersect(rect));
         crate::canvas::draw_doc(&clip, ctx, doc, &xf, cache, None);
         painter.rect_stroke(fr, 0.0, Stroke::new(1.0, INK_3()), egui::StrokeKind::Outside);
         draw_selection(painter, doc, proj, sel);
+        if let Some(l) = light {
+            light_gizmo(painter, proj, cam, &l, light_sel);
+        }
         return;
     }
     // floor grid (XY) with the X and Y axes
@@ -283,6 +315,9 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         draw_plane(painter, ctx, l, pl, proj, cache);
     }
     draw_selection(painter, doc, proj, sel);
+    if let Some(l) = light {
+        light_gizmo(painter, proj, cam, &l, light_sel);
+    }
     // origin
     if let Some(o) = proj.project([0.0; 3]) {
         painter.circle_stroke(o, 3.5, Stroke::new(1.2, INK_2()));

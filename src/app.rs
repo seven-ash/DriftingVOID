@@ -802,6 +802,10 @@ pub struct App {
     ws3d: bool,
     view3d: Option<crate::view3d::View3d>,
     modal3d: Option<crate::view3d::Modal>,
+    /// The 3D view's light gizmo is selected.
+    light_sel: bool,
+    /// R on the light: (space, light before, pointer at start).
+    light_rot: Option<(u64, crate::persp::Light, Pos2)>,
     nav3d: Option<crate::view3d::Nav>,
     tab_t0: Option<f64>,
     peek: bool,
@@ -941,6 +945,8 @@ impl App {
             ws3d: false,
             view3d: None,
             modal3d: None,
+            light_sel: false,
+            light_rot: None,
             nav3d: None,
             tab_t0: None,
             peek: false,
@@ -1364,6 +1370,7 @@ impl App {
     }
 
     fn select_only(&mut self, id: Option<LayerId>) {
+        self.light_sel = false;
         self.sel = id;
         self.extra_sel.clear();
         self.sub = SubSel::default();
@@ -4598,7 +4605,7 @@ impl App {
         self.handle_3d_input(ctx, rect, ui.layer_id(), &proj);
         let view = self.view3d.clone().unwrap();
         let proj = Proj::new(&view, cam, rect);
-        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel);
+        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel, self.light_sel);
         if crate::glass::available() {
             painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
         }
@@ -4715,6 +4722,19 @@ impl App {
                 if k(Modifiers::NONE, Key::Escape) {
                     cancel = true;
                 }
+            } else if self.light_rot.is_some() {
+                if k(Modifiers::NONE, Key::Escape) {
+                    cancel = true;
+                }
+                if k(Modifiers::NONE, Key::Enter) {
+                    click = Some(hover.unwrap_or(rect.center()));
+                }
+            } else if self.light_sel && k(Modifiers::NONE, Key::R) {
+                let light = sid.and_then(|s| self.doc.spaces.iter().find(|x| x.id == s)).and_then(|x| x.light.map(|l| (x.id, l)));
+                if let (Some((s, l)), Some(hp)) = (light, hover) {
+                    self.light_rot = Some((s, l, hp));
+                    self.status = "빛 회전 · 클릭: 확정 · Esc: 취소".into();
+                }
             } else {
                 let target = self
                     .sel_layer()
@@ -4778,17 +4798,46 @@ impl App {
                 l.place = Some(pl);
             }
         }
+        // live light turn: horizontal motion about the view's up, vertical about its right
+        if let Some((s, l0, start)) = self.light_rot {
+            let cur = hover.unwrap_or(start);
+            let d = cur - start;
+            if let Some(v) = &self.view3d {
+                let right = v.right();
+                let up = crate::persp::normalize(crate::persp::cross(v.forward(), right));
+                let dir = rotate_about(rotate_about(l0.dir(), up, d.x as f64 * 0.01), right, -d.y as f64 * 0.01);
+                let nl = crate::persp::Light::from_dir(dir, l0.ambient);
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|x| x.id == s) {
+                    sp.light = Some(nl);
+                }
+            }
+        }
         if cancel {
+            if let Some((s, l0, _)) = self.light_rot.take() {
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|x| x.id == s) {
+                    sp.light = Some(l0);
+                }
+            }
             self.cancel_modal3d();
         } else if let Some(p) = click {
-            if self.modal3d.take().is_some() {
+            if self.light_rot.take().is_some() || self.modal3d.take().is_some() {
                 self.mark();
             } else {
-                let id = match proj.canvas_xf() {
-                    Some(xf) => self.hit_layer(xf.s2w(p), 6.0 / xf.zoom),
-                    None => sid.and_then(|s| crate::view3d::pick(&self.doc, proj, s, p)),
-                };
-                self.select_only(id);
+                // the light gizmo first
+                let cam_l = sid.and_then(|s| self.doc.spaces.iter().find(|x| x.id == s)).and_then(|x| x.light.and_then(|l| crate::persp::solve(x).ok().map(|c| (l, c))));
+                let on_light = cam_l.and_then(|(l, c)| proj.project(crate::view3d::light_handle(&c, &l).0)).is_some_and(|q| q.distance(p) < 16.0);
+                if on_light {
+                    self.select_only(None);
+                    self.light_sel = true;
+                    self.status = "빛 · R: 회전".into();
+                } else {
+                    self.light_sel = false;
+                    let id = match proj.canvas_xf() {
+                        Some(xf) => self.hit_layer(xf.s2w(p), 6.0 / xf.zoom),
+                        None => sid.and_then(|s| crate::view3d::pick(&self.doc, proj, s, p)),
+                    };
+                    self.select_only(id);
+                }
             }
         }
     }
@@ -4854,7 +4903,7 @@ impl App {
             };
             theme::draw_void(&clip, pr);
             let proj = crate::view3d::Proj::new(&view, &cam, pr);
-            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel);
+            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel, self.light_sel);
         }
         p.rect_stroke(pr, 12.0, Stroke::new(1.5, INK_3()), StrokeKind::Outside);
         p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), INK_2());
@@ -9367,6 +9416,13 @@ fn guided_filter(i: &[f32], p: &[f32], w: usize, h: usize, r: usize, eps: f32) -
     let ma = box_mean(&a, w, h, r);
     let mb = box_mean(&b, w, h, r);
     (0..w * h).map(|k| ma[k] * i[k] + mb[k]).collect()
+}
+
+/// `v` turned by `a` radians about the unit axis `k` (Rodrigues).
+fn rotate_about(v: crate::persp::V3, k: crate::persp::V3, a: f64) -> crate::persp::V3 {
+    use crate::persp::{add, cross, dot, scale};
+    let (s, c) = a.sin_cos();
+    add(add(scale(v, c), scale(cross(k, v), s)), scale(k, dot(k, v) * (1.0 - c)))
 }
 
 /// Key state of an animation at `t` (a key within `tol` counts as here).
