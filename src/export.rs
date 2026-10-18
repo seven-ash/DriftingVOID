@@ -204,7 +204,20 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     Ok(out)
 }
 
-/// `render_rotated` drawn `k` times larger and box-filtered back down (k = 1..4,
+thread_local! {
+    /// The supersampling factor of the render in progress on this thread (1: none).
+    static SS_K: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+fn srgb_to_lin(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn lin_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// `render_rotated` drawn `k` times larger and averaged back down in linear light (k = 1..4,
 /// lowered when the large image would not fit). Smooths edges and the slice
 /// lines of thick 3D layers.
 pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8) -> Result<Pixmap, String> {
@@ -216,31 +229,51 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
         }
         k -= 1;
     }
-    let big = render_rotated(doc, center, size, rot, scale * k as f32, bg)?;
     if k == 1 {
-        return Ok(big);
+        return render_rotated(doc, center, size, rot, scale, bg);
     }
+    SS_K.with(|c| c.set(k as f32));
+    let big = render_rotated(doc, center, size, rot, scale * k as f32, bg);
+    SS_K.with(|c| c.set(1.0));
+    let big = big?;
     let (w, h) = (big.width() / k, big.height() / k);
     let mut out = Pixmap::new(w.max(1), h.max(1)).ok_or("이미지 버퍼를 만들 수 없음")?;
     let (bw, src) = (big.width() as usize, big.data());
-    let n = (k * k) as u32;
+    // average in linear light (premultiplied), then back to sRGB
+    let lut: Vec<f32> = (0..256).map(|i| srgb_to_lin(i as f32 / 255.0)).collect();
+    let n = (k * k) as f32;
     let dst = out.data_mut();
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let mut acc = [0u32; 4];
+            let mut acc = [0f32; 4];
             for dy in 0..k as usize {
                 let row = (y * k as usize + dy) * bw;
                 for dx in 0..k as usize {
                     let i = (row + x * k as usize + dx) * 4;
-                    for c in 0..4 {
-                        acc[c] += src[i + c] as u32;
+                    let a = src[i + 3];
+                    if a == 0 {
+                        continue;
                     }
+                    let af = a as f32 / 255.0;
+                    for c in 0..3 {
+                        // un-premultiply, to linear, premultiply again
+                        let v = ((src[i + c] as f32 / af).round().min(255.0)) as usize;
+                        acc[c] += lut[v] * af;
+                    }
+                    acc[3] += af;
                 }
             }
             let o = (y * w as usize + x) * 4;
-            for c in 0..4 {
-                dst[o + c] = ((acc[c] + n / 2) / n) as u8;
+            let a = acc[3] / n;
+            if a <= 0.0 {
+                dst[o..o + 4].copy_from_slice(&[0; 4]);
+                continue;
             }
+            for c in 0..3 {
+                let lin = (acc[c] / n) / a;
+                dst[o + c] = ((lin_to_srgb(lin.clamp(0.0, 1.0)) * a * 255.0).round().min(a * 255.0)) as u8;
+            }
+            dst[o + 3] = (a * 255.0).round() as u8;
         }
     }
     Ok(out)
@@ -570,7 +603,10 @@ fn draw_image(pm: &mut Pixmap, im: &ImageLayer, base: Transform, scale: f32, reg
         .pre_translate(-cw / 2.0, -ch / 2.0)
         .pre_scale(factor, factor);
     let ts = place.post_concat(base);
-    let quality = if (im.scale * scale - 1.0).abs() < 1e-4 && im.rotation == 0.0 {
+    // pixel for pixel (also 1:1 at the target of a supersampled render: each source
+    // pixel becomes a k×k block that averages back to itself)
+    let ss = SS_K.with(|c| c.get());
+    let quality = if (im.scale * scale / ss - 1.0).abs() < 1e-4 && im.rotation == 0.0 {
         FilterQuality::Nearest
     } else {
         FilterQuality::Bicubic
@@ -650,5 +686,24 @@ mod ss_tests {
         // the fill shows in both
         let px = |p: &Pixmap| p.pixel(50, 40).unwrap();
         assert!(px(&three).blue() > 200 && px(&one).blue() > 200);
+    }
+
+    #[test]
+    fn photos_stay_pixel_exact_when_supersampled() {
+        // a noisy 40x30 photo placed 1:1 on whole pixels
+        let mut img = image::RgbaImage::new(40, 30);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 37 % 256) as u8, (y * 91 % 256) as u8, ((x * y) * 13 % 256) as u8, 255]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let src = crate::io::decode_image(png, Some("png")).unwrap();
+        let im = crate::doc::ImageLayer { src, center: egui::pos2(20.0, 15.0), scale: 1.0, rotation: 0.0, crop: Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 30.0)), adjust: Default::default(), video: None };
+        let mut doc = Document::default();
+        doc.insert("p".into(), LayerKind::Image(im), None);
+        let one = render_ss(&doc, egui::pos2(20.0, 15.0), egui::vec2(40.0, 30.0), 0.0, 1.0, None, 1).unwrap();
+        let four = render_ss(&doc, egui::pos2(20.0, 15.0), egui::vec2(40.0, 30.0), 0.0, 1.0, None, 4).unwrap();
+        let worst = one.data().iter().zip(four.data()).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+        assert!(worst <= 1, "max channel difference {worst}");
     }
 }

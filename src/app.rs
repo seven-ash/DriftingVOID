@@ -814,6 +814,8 @@ pub struct App {
     light_sel: bool,
     /// R on the light: (space, light before, pointer at start).
     light_rot: Option<(u64, crate::persp::Light, Pos2)>,
+    /// An image export running on a worker thread (its status line when done).
+    img_job: Option<std::sync::mpsc::Receiver<String>>,
     nav3d: Option<crate::view3d::Nav>,
     tab_t0: Option<f64>,
     peek: bool,
@@ -955,6 +957,7 @@ impl App {
             modal3d: None,
             light_sel: false,
             light_rot: None,
+            img_job: None,
             nav3d: None,
             tab_t0: None,
             peek: false,
@@ -6457,12 +6460,19 @@ impl App {
                         ExportRegion::Camera(id) => self.doc.cameras.iter().find(|c| c.id == id).map_or(0.0, |c| c.rot),
                         _ => 0.0,
                     };
-                    self.status = match crate::export::render_ss(&self.export_doc(), r.center(), r.size(), rot, d.scale, bg, d.ss)
-                        .and_then(|pm| crate::export::save(&pm, &path, d.jpeg_quality).map(|_| (pm.width(), pm.height())))
-                    {
-                        Ok((w, h)) => format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
-                        Err(e) => format!("내보내기 실패: {e}"),
-                    };
+                    // on a worker thread: big supersampled renders take a while
+                    let doc = self.export_doc();
+                    let (scale, ss, q) = (d.scale, d.ss, d.jpeg_quality);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let res = crate::export::render_ss(&doc, r.center(), r.size(), rot, scale, bg, ss)
+                            .and_then(|pm| crate::export::save(&pm, &path, q).map(|_| (pm.width(), pm.height())))
+                            .map(|(w, h)| format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")))
+                            .unwrap_or_else(|e| format!("내보내기 실패: {e}"));
+                        let _ = tx.send(res);
+                    });
+                    self.img_job = Some(rx);
+                    self.status = "이미지 내보내는 중…".into();
                 }
             } else {
                 self.copy_region(r, d.scale, bg);
@@ -9714,6 +9724,16 @@ impl eframe::App for App {
         self.tick_audio();
         self.tick_timeline(&ctx);
         self.tick_videos(&ctx);
+        if let Some(rx) = &self.img_job {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.status = msg;
+                    self.img_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.img_job = None,
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
 
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         if !self.ui_hidden {
