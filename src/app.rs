@@ -1214,7 +1214,9 @@ impl App {
         if self.changed && self.drag.is_none() && !typing {
             // drawing layers are created on demand, so empty ones just go away
             let before = self.doc.layers.len();
+            // (masks stay: an empty mask is a valid "hide nothing" mask)
             self.doc.layers.retain(|l| match &l.kind {
+                LayerKind::Raster(_) if l.mask_of.is_some() => true,
                 LayerKind::Raster(r) => !r.tiles.is_empty(),
                 LayerKind::Vector(v) => !v.strokes.is_empty(),
                 _ => true,
@@ -3169,7 +3171,7 @@ impl App {
         if ids.is_empty() {
             return;
         }
-        self.doc.layers.retain(|l| !ids.contains(&l.id));
+        self.doc.layers.retain(|l| !ids.contains(&l.id) && !l.mask_of.is_some_and(|o| ids.contains(&o)));
         if self.editing.is_some_and(|e| ids.contains(&e)) {
             self.editing = None;
         }
