@@ -94,6 +94,8 @@ pub struct Settings {
     pub peek_delay: f32,
     /// Folded property sections: tool, selection, cameras.
     pub folded: [bool; 3],
+    /// Colour tolerance of the mask's automatic selection (0..100).
+    pub wand_tol: f32,
 }
 
 impl Default for Settings {
@@ -123,6 +125,7 @@ impl Default for Settings {
             theme: 1,
             peek_delay: 0.2,
             folded: [false; 3],
+            wand_tol: 24.0,
         }
     }
 }
@@ -820,6 +823,8 @@ pub struct App {
     tl_sel: Vec<(TlRow, f64)>,
     /// A rect tool drag that fills (or with Alt clears) this mask.
     mask_rect: Option<(LayerId, bool)>,
+    /// Automatic selection armed for this mask: a canvas click picks a region.
+    wand: Option<LayerId>,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
@@ -938,6 +943,7 @@ impl App {
             tl_key: None,
             tl_sel: Vec::new(),
             mask_rect: None,
+            wand: None,
             tl_drag: None,
             cam_sel: None,
             audio_out: None,
@@ -1155,6 +1161,19 @@ impl App {
                 app.mask_button(id);
                 if let Some(LayerKind::Raster(r)) = app.sel.and_then(|m| app.doc.get_mut(m)).map(|l| &mut l.kind) {
                     r.fill_rect(Rect::from_min_max(pos2(c[0], c[1] - 4000.0), pos2(c[0] + 4000.0, c[1] + 4000.0)), true);
+                }
+                if std::env::var_os("DV_WAND").is_some() {
+                    // automatic selection at the layer's centre instead of the half fill
+                    if let Some(mid) = app.sel {
+                        if let Some(LayerKind::Raster(r)) = app.doc.get_mut(mid).map(|l| &mut l.kind) {
+                            r.tiles.clear();
+                        }
+                        let xf = app.xf();
+                        app.canvas_rect = Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0));
+                        let _ = xf;
+                        app.wand_fill(mid, pos2(c[0], c[1]), true);
+                        eprintln!("wand: {}", app.status);
+                    }
                 }
                 if std::env::var_os("DV_MASK_OWNER").is_some() {
                     app.select_only(Some(id));
@@ -1831,6 +1850,82 @@ impl App {
             }
         }
         self.status = format!("키 {}개 · {}", ids.len(), crate::video::timecode(t));
+        self.mark();
+    }
+
+    /// Automatic selection: renders what is visible under the masked layer, takes
+    /// the region of similar colour connected to `w`, and hides it (or shows it).
+    fn wand_fill(&mut self, mid: LayerId, w: Pos2, on: bool) {
+        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        let xf = self.xf();
+        let view = Rect::from_min_max(xf.s2w(self.canvas_rect.min), xf.s2w(self.canvas_rect.max));
+        if !view.contains(w) {
+            return;
+        }
+        let mut scale = self.zoom.min(1.0);
+        while view.width() * scale > 2048.0 || view.height() * scale > 2048.0 {
+            scale *= 0.5;
+        }
+        let mut d = self.doc.clone();
+        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Ok(pm) = crate::export::render(&d, view, scale, Some(Color32::BLACK)) else { return };
+        let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+        let px = pm.data();
+        let at = |x: i32, y: i32| {
+            let i = ((y * pw + x) * 4) as usize;
+            [px[i] as f32, px[i + 1] as f32, px[i + 2] as f32]
+        };
+        let sx = (((w.x - view.min.x) * scale) as i32).clamp(0, pw - 1);
+        let sy = (((w.y - view.min.y) * scale) as i32).clamp(0, ph - 1);
+        let seed = at(sx, sy);
+        let tol = self.s.wand_tol / 100.0 * 255.0 * 1.732;
+        let mut hit = vec![false; (pw * ph) as usize];
+        let mut stack = vec![(sx, sy)];
+        hit[(sy * pw + sx) as usize] = true;
+        let (mut x0, mut y0, mut x1, mut y1) = (sx, sy, sx, sy);
+        while let Some((x, y)) = stack.pop() {
+            for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                if nx < 0 || ny < 0 || nx >= pw || ny >= ph {
+                    continue;
+                }
+                let j = (ny * pw + nx) as usize;
+                if hit[j] {
+                    continue;
+                }
+                let c = at(nx, ny);
+                let dd = ((c[0] - seed[0]).powi(2) + (c[1] - seed[1]).powi(2) + (c[2] - seed[2]).powi(2)).sqrt();
+                if dd <= tol {
+                    hit[j] = true;
+                    stack.push((nx, ny));
+                    x0 = x0.min(nx);
+                    y0 = y0.min(ny);
+                    x1 = x1.max(nx);
+                    y1 = y1.max(ny);
+                }
+            }
+        }
+        // back to world pixels
+        let wx0 = (view.min.x + x0 as f32 / scale).floor() as i32;
+        let wy0 = (view.min.y + y0 as f32 / scale).floor() as i32;
+        let wx1 = (view.min.x + (x1 + 1) as f32 / scale).ceil() as i32;
+        let wy1 = (view.min.y + (y1 + 1) as f32 / scale).ceil() as i32;
+        let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return };
+        let mut n = 0usize;
+        for y in wy0..wy1 {
+            let py = (((y as f32 + 0.5) - view.min.y) * scale) as i32;
+            if py < 0 || py >= ph {
+                continue;
+            }
+            for x in wx0..wx1 {
+                let pxx = (((x as f32 + 0.5) - view.min.x) * scale) as i32;
+                if pxx < 0 || pxx >= pw || !hit[(py * pw + pxx) as usize] {
+                    continue;
+                }
+                m.set_world(x, y, on);
+                n += 1;
+            }
+        }
+        self.status = format!("자동 선택 · {n} px {}", if on { "가림" } else { "되살림" });
         self.mark();
     }
 
@@ -3598,6 +3693,13 @@ impl App {
     fn pointer_down(&mut self, sp: Pos2, pressure: f32, mods: Modifiers, space: bool) {
         let xf = self.xf();
         let w = xf.s2w(sp);
+        if let Some(mid) = self.wand.filter(|_| !space) {
+            if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
+                self.wand_fill(mid, w, !mods.alt);
+                return;
+            }
+            self.wand = None;
+        }
         let tol = 6.0 / self.zoom;
         self.last_screen = sp;
         if self.editing.is_some() && self.tool != Tool::Text {
@@ -5555,6 +5657,9 @@ impl App {
                 self.set_time(self.doc.timeline.duration);
             }
         }
+        if self.wand.is_some() && k(Modifiers::NONE, Key::Escape) {
+            self.wand = None;
+        }
         if self.doc.timeline.on && !self.tl_sel.is_empty() && (k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace)) {
             self.delete_selected_keys();
         }
@@ -6638,9 +6743,16 @@ impl App {
             });
         });
         let mut clear = false;
+        let armed = self.wand == Some(id);
+        let mut toggle = false;
         ui.horizontal(|ui| {
+            toggle = ui.selectable_label(armed, "자동 선택").on_hover_text("클릭한 면을 가림 · Alt+클릭: 되살리기 · Esc: 끝").clicked();
             clear = ui.button("비우기").clicked();
         });
+        ui.add(crate::dial::Dial::new(&mut self.s.wand_tol, 0.0..=100.0).step(1.0).integer().text("허용 오차").default(24.0));
+        if toggle {
+            self.wand = if armed { None } else { Some(id) };
+        }
         if let Some(a) = pick {
             let c = a.and_then(|a| self.doc.get(a)).map(|l| crate::anim::key_of(l, 0.0).center);
             if let Some(l) = self.doc.get_mut(id) {

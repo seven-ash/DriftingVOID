@@ -113,6 +113,18 @@ pub fn tile_of(x: i32, y: i32) -> ((i32, i32), usize) {
 }
 
 impl RasterLayer {
+    /// Sets (white, opaque) or clears one world pixel.
+    pub fn set_world(&mut self, x: i32, y: i32, on: bool) {
+        let (lx, ly) = (x - self.offset.x as i32, y - self.offset.y as i32);
+        let (k, i) = tile_of(lx, ly);
+        if !on && !self.tiles.contains_key(&k) {
+            return;
+        }
+        let t = Arc::make_mut(self.tiles.entry(k).or_insert_with(|| Arc::new(Tile::empty())));
+        t.rev = next_rev();
+        t.px[i..i + 4].copy_from_slice(&if on { [255; 4] } else { [0; 4] });
+    }
+
     /// Sets (white, opaque) or clears every pixel of a world-space rect.
     pub fn fill_rect(&mut self, r: Rect, on: bool) {
         let x0 = (r.min.x - self.offset.x).floor() as i32;
