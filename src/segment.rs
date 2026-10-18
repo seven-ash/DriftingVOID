@@ -321,4 +321,97 @@ mod tests {
         assert!(fg(20, 20) && fg(13, 13) && fg(26, 26));
         assert!(!fg(8, 8) && !fg(31, 20) && !fg(20, 32));
     }
+
+    #[test]
+    fn live_wire_follows_an_edge() {
+        // dark left half, bright right half: the edge is between x=19 and x=20
+        let (w, h) = (40, 40);
+        let lum: Vec<f32> = (0..w * h).map(|i| if i % w < 20 { 0.1 } else { 0.9 }).collect();
+        let lw = LiveWire::new(&lum, w, h, (100, 200), (20, 2));
+        let path = lw.path_to(120, 237).unwrap();
+        assert_eq!(path.first(), Some(&(120, 202)));
+        assert_eq!(path.last(), Some(&(120, 237)));
+        // a straight line would also be x=20; check it never wanders off the edge
+        assert!(path.iter().all(|&(x, _)| (119..=120).contains(&x)), "{path:?}");
+        let diag = lw.path_to(119, 30 + 200).unwrap();
+        assert!(diag.iter().all(|&(x, _)| (119..=120).contains(&x)));
+    }
+}
+
+/// Intelligent scissors (Mortensen & Barrett 1995), gradient cost only: one
+/// Dijkstra from the seed over a window, so the path to any point is a lookup.
+pub struct LiveWire {
+    /// World pixel of the window's (0,0).
+    pub origin: (i32, i32),
+    w: usize,
+    h: usize,
+    pred: Vec<u32>,
+}
+
+impl LiveWire {
+    /// `lum`: luminance 0..1 of the window; `seed`: window pixel.
+    pub fn new(lum: &[f32], w: usize, h: usize, origin: (i32, i32), seed: (usize, usize)) -> Self {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let n = w * h;
+        // Sobel gradient magnitude -> cost (low on strong edges)
+        let at = |x: isize, y: isize| lum[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
+        let mut g = vec![0f32; n];
+        let mut gmax = 1e-6f32;
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let gx = at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x - 1, y) - at(x - 1, y + 1);
+                let gy = at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x, y - 1) - at(x + 1, y - 1);
+                let m = (gx * gx + gy * gy).sqrt();
+                g[y as usize * w + x as usize] = m;
+                gmax = gmax.max(m);
+            }
+        }
+        let cost: Vec<f32> = g.iter().map(|m| 1.0 - m / gmax + 0.02).collect();
+        let mut dist = vec![f32::INFINITY; n];
+        let mut pred = vec![u32::MAX; n];
+        let s = seed.1.min(h - 1) * w + seed.0.min(w - 1);
+        dist[s] = 0.0;
+        let mut heap = BinaryHeap::new();
+        heap.push(Reverse(((0.0f32).to_bits(), s as u32)));
+        while let Some(Reverse((db, u))) = heap.pop() {
+            let u = u as usize;
+            let du = f32::from_bits(db);
+            if du > dist[u] {
+                continue;
+            }
+            let (ux, uy) = ((u % w) as isize, (u / w) as isize);
+            for (dx, dy, k) in [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (-1, -1, 1.414)] {
+                let (vx, vy) = (ux + dx, uy + dy);
+                if vx < 0 || vy < 0 || vx >= w as isize || vy >= h as isize {
+                    continue;
+                }
+                let v = vy as usize * w + vx as usize;
+                let nd = du + cost[v] * k as f32;
+                if nd < dist[v] {
+                    dist[v] = nd;
+                    pred[v] = u as u32;
+                    // non-negative f32 bits order like the values
+                    heap.push(Reverse((nd.to_bits(), v as u32)));
+                }
+            }
+        }
+        Self { origin, w, h, pred }
+    }
+
+    /// World pixels from the seed to (x, y), or None outside the window.
+    pub fn path_to(&self, x: i32, y: i32) -> Option<Vec<(i32, i32)>> {
+        let (lx, ly) = (x - self.origin.0, y - self.origin.1);
+        if lx < 0 || ly < 0 || lx >= self.w as i32 || ly >= self.h as i32 {
+            return None;
+        }
+        let mut v = ly as usize * self.w + lx as usize;
+        let mut out = vec![];
+        while v != u32::MAX as usize && out.len() <= self.w * self.h {
+            out.push(((v % self.w) as i32 + self.origin.0, (v / self.w) as i32 + self.origin.1));
+            v = self.pred[v] as usize;
+        }
+        out.reverse();
+        Some(out)
+    }
 }

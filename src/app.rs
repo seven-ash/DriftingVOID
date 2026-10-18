@@ -135,6 +135,15 @@ impl Default for Settings {
     }
 }
 
+/// Intelligent scissors in progress: the outline so far and the live wire from
+/// its last anchor.
+struct Scissor {
+    mid: LayerId,
+    on: bool,
+    pts: Vec<Pos2>,
+    wire: Option<crate::segment::LiveWire>,
+}
+
 enum Drag {
     Pan,
     Move { id: LayerId, start: Pos2, orig: Layer },
@@ -834,6 +843,8 @@ pub struct App {
     wand_mode: u8,
     /// The rect drag on a mask runs GrabCut instead of a plain fill.
     mask_cut: bool,
+    /// Scissors outline in progress.
+    scissor: Option<Scissor>,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
@@ -955,6 +966,7 @@ impl App {
             wand: None,
             wand_mode: 0,
             mask_cut: false,
+            scissor: None,
             tl_drag: None,
             cam_sel: None,
             audio_out: None,
@@ -1194,6 +1206,20 @@ impl App {
                         let t0 = std::time::Instant::now();
                         app.grabcut_fill(mid, Rect::from_center_size(pos2(c[0] - 640.0, c[1]), vec2(500.0, 500.0)), true);
                         eprintln!("grabcut: {} in {:?}", app.status, t0.elapsed());
+                    }
+                }
+                if std::env::var_os("DV_SCISSOR").is_some() {
+                    if let Some(mid) = app.sel {
+                        if let Some(LayerKind::Raster(r)) = app.doc.get_mut(mid).map(|l| &mut l.kind) {
+                            r.tiles.clear();
+                        }
+                        let t0 = std::time::Instant::now();
+                        let o = pos2(c[0] - 640.0, c[1]);
+                        for d in [vec2(-200.0, -200.0), vec2(200.0, -200.0), vec2(200.0, 200.0), vec2(-200.0, 200.0)] {
+                            app.scissor_click(mid, o + d, true);
+                        }
+                        app.scissor_close();
+                        eprintln!("scissor: {} in {:?}", app.status, t0.elapsed());
                     }
                 }
                 if std::env::var_os("DV_MASK_OWNER").is_some() {
@@ -1995,6 +2021,94 @@ impl App {
             }
         }
         n
+    }
+
+    /// A live wire seeded at `at` (a 768 px window of what lies under the masked layer).
+    fn scissor_wire(&self, mid: LayerId, at: Pos2) -> Option<crate::segment::LiveWire> {
+        let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
+        let reg = Rect::from_center_size(at, vec2(768.0, 768.0));
+        let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
+        let mut d = self.doc.clone();
+        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let pm = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)).ok()?;
+        let (pw, ph) = (pm.width() as usize, pm.height() as usize);
+        let px = pm.data();
+        let lum: Vec<f32> = (0..pw * ph).map(|i| (0.299 * px[i * 4] as f32 + 0.587 * px[i * 4 + 1] as f32 + 0.114 * px[i * 4 + 2] as f32) / 255.0).collect();
+        let seed = ((at.x - reg.min.x) as usize, (at.y - reg.min.y) as usize);
+        Some(crate::segment::LiveWire::new(&lum, pw, ph, (reg.min.x as i32, reg.min.y as i32), seed))
+    }
+
+    /// The outline from the last anchor to `w`: along the live wire, or straight.
+    fn scissor_path(sc: &Scissor, w: Pos2) -> Vec<Pos2> {
+        match sc.wire.as_ref().and_then(|wr| wr.path_to(w.x.floor() as i32, w.y.floor() as i32)) {
+            Some(p) => p.into_iter().map(|(x, y)| pos2(x as f32 + 0.5, y as f32 + 0.5)).collect(),
+            None => vec![w],
+        }
+    }
+
+    fn scissor_click(&mut self, mid: LayerId, w: Pos2, on: bool) {
+        let near_first = self.scissor.as_ref().is_some_and(|sc| sc.pts.len() > 2 && (sc.pts[0] - w).length() * self.zoom < 10.0);
+        if near_first {
+            self.scissor_close();
+            return;
+        }
+        match self.scissor.take() {
+            Some(mut sc) if sc.mid == mid => {
+                let path = Self::scissor_path(&sc, w);
+                sc.pts.extend(path);
+                sc.wire = self.scissor_wire(mid, w);
+                self.scissor = Some(sc);
+            }
+            _ => {
+                let wire = self.scissor_wire(mid, w);
+                self.scissor = Some(Scissor { mid, on, pts: vec![w], wire });
+                self.status = "가위 · 경계를 따라 클릭 · 첫 점/Enter: 닫기 · Esc: 취소".into();
+            }
+        }
+    }
+
+    /// Closes the outline and fills it into the mask (anti-aliased).
+    fn scissor_close(&mut self) {
+        let Some(sc) = self.scissor.take() else { return };
+        if sc.pts.len() < 3 {
+            return;
+        }
+        let b = Rect::from_points(&sc.pts);
+        let b = Rect::from_min_max(b.min.floor() - vec2(1.0, 1.0), b.max.ceil() + vec2(1.0, 1.0));
+        let (w, h) = (b.width() as u32, b.height() as u32);
+        if w == 0 || h == 0 || w > 8192 || h > 8192 {
+            return;
+        }
+        let Some(mut pm) = tiny_skia::Pixmap::new(w, h) else { return };
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.move_to(sc.pts[0].x - b.min.x, sc.pts[0].y - b.min.y);
+        for p in &sc.pts[1..] {
+            pb.line_to(p.x - b.min.x, p.y - b.min.y);
+        }
+        pb.close();
+        let Some(path) = pb.finish() else { return };
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(255, 255, 255, 255);
+        paint.anti_alias = true;
+        pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+        let Some(LayerKind::Raster(m)) = self.doc.get_mut(sc.mid).map(|l| &mut l.kind) else { return };
+        let data = pm.data();
+        let mut n = 0;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let a = data[((y * w as i32 + x) * 4 + 3) as usize] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                let (wx, wy) = (b.min.x as i32 + x, b.min.y as i32 + y);
+                let old = m.alpha_at_world(pos2(wx as f32 + 0.5, wy as f32 + 0.5)) as f32 / 255.0;
+                let nv = if sc.on { old.max(a) } else { old * (1.0 - a) };
+                m.set_alpha_world(wx, wy, (nv * 255.0).round() as u8);
+                n += 1;
+            }
+        }
+        self.status = format!("가위 · {n} px {}", if sc.on { "가림" } else { "되살림" });
+        self.mark();
     }
 
     /// GrabCut over a dragged box: what is inside the box and stands apart from its
@@ -3829,7 +3943,9 @@ impl App {
         let w = xf.s2w(sp);
         if let Some(mid) = self.wand.filter(|_| !space) {
             if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
-                if self.wand_mode == 1 {
+                if self.wand_mode == 2 {
+                    self.scissor_click(mid, w, !mods.alt);
+                } else if self.wand_mode == 1 {
                     // GrabCut: drag a box (a temporary outline, run on release)
                     let s = ShapeLayer { kind: ShapeKind::Rect, a: w, b: w, color: ACCENT, width: 1.5 / self.zoom, fill: None, rotation: 0.0 };
                     let id = self.doc.insert("영역".into(), LayerKind::Shape(s), None);
@@ -5804,8 +5920,13 @@ impl App {
                 self.set_time(self.doc.timeline.duration);
             }
         }
-        if self.wand.is_some() && k(Modifiers::NONE, Key::Escape) {
+        if self.scissor.is_some() && k(Modifiers::NONE, Key::Escape) {
+            self.scissor = None;
+        } else if self.wand.is_some() && k(Modifiers::NONE, Key::Escape) {
             self.wand = None;
+        }
+        if self.scissor.is_some() && k(Modifiers::NONE, Key::Enter) {
+            self.scissor_close();
         }
         if self.doc.timeline.on && !self.tl_sel.is_empty() && (k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace)) {
             self.delete_selected_keys();
@@ -6895,7 +7016,7 @@ impl App {
         let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기")] {
+            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "경계를 따라 클릭 · 첫 점 클릭/Enter: 닫기 · Esc: 취소 · Alt: 되살리기")] {
                 if ui.selectable_label(armed && self.wand_mode == m, label).on_hover_text(tip).clicked() {
                     pick_mode = Some(m);
                 }
@@ -7852,6 +7973,18 @@ impl App {
         // constraints again after this frame's input, so a following camera never trails
         crate::anim::apply_constraints(&mut self.doc);
         canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None);
+        // scissors outline in progress
+        if let Some(sc) = &self.scissor {
+            let hover = ctx.input(|i| i.pointer.hover_pos()).map(|p| xf.s2w(p));
+            let mut pts = sc.pts.clone();
+            if let Some(hw) = hover {
+                pts.extend(Self::scissor_path(sc, hw));
+            }
+            let sp: Vec<Pos2> = pts.iter().map(|p| xf.w2s(*p)).collect();
+            painter.add(Shape::line(sp, Stroke::new(1.6, ACCENT)));
+            painter.circle_stroke(xf.w2s(sc.pts[0]), 5.0, Stroke::new(1.5, ACCENT));
+            ctx.request_repaint();
+        }
         // the mask being edited shows as a red veil
         if let Some(l) = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_some() && l.visible) {
             if let LayerKind::Raster(r) = &l.kind {
