@@ -50,6 +50,58 @@ pub struct PlaceKey {
     pub thick: f64,
 }
 
+/// What a key holds (bits); each value interpolates only between keys holding it.
+pub mod ch {
+    pub const POS: u16 = 1;
+    pub const SIZE: u16 = 2;
+    pub const ROT: u16 = 4;
+    pub const OPA: u16 = 8;
+    pub const P_POS: u16 = 16;
+    pub const P_ROT: u16 = 32;
+    pub const P_SCALE: u16 = 64;
+    pub const P_THICK: u16 = 128;
+    pub const FOLLOW: u16 = 256;
+    pub const ALL: u16 = 511;
+}
+
+fn all_ch() -> u16 {
+    ch::ALL
+}
+
+/// Copies the values named by `c` from `src` into `dst`.
+fn copy_ch(dst: &mut Key, src: &Key, c: u16) {
+    if c & ch::POS != 0 {
+        dst.center = src.center;
+    }
+    if c & ch::SIZE != 0 {
+        dst.ext = src.ext;
+    }
+    if c & ch::ROT != 0 {
+        dst.rot = src.rot;
+    }
+    if c & ch::OPA != 0 {
+        dst.opacity = src.opacity;
+    }
+    if c & ch::FOLLOW != 0 {
+        dst.follow = src.follow;
+    }
+    if let Some(sp) = src.place {
+        let dp = dst.place.get_or_insert(sp);
+        if c & ch::P_POS != 0 {
+            dp.pos = sp.pos;
+        }
+        if c & ch::P_ROT != 0 {
+            dp.rot = sp.rot;
+        }
+        if c & ch::P_SCALE != 0 {
+            dp.scale = sp.scale;
+        }
+        if c & ch::P_THICK != 0 {
+            dp.thick = sp.thick;
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Key {
     pub t: f64,
@@ -66,6 +118,9 @@ pub struct Key {
     /// Offsets blend between keys on the same layer; switching holds.
     #[serde(default)]
     pub follow: Option<Option<Follow>>,
+    /// Which values this key holds (`ch`); older files hold everything.
+    #[serde(default = "all_ch")]
+    pub ch: u16,
 }
 
 fn lerp(a: f32, b: f32, u: f64) -> f32 {
@@ -102,6 +157,7 @@ impl Key {
                 })),
                 (a, _) => a,
             },
+            ch: self.ch,
         }
     }
 }
@@ -129,10 +185,11 @@ impl Anim {
     }
 
     /// Adds a key, replacing one at (nearly) the same time.
-    pub fn set_key(&mut self, mut k: Key) {
+    /// A key at an existing key's time merges into it (only the values it holds).
+    pub fn set_key(&mut self, k: Key) {
         if let Some(old) = self.keys.iter_mut().find(|o| (o.t - k.t).abs() < 1e-6) {
-            k.ease = old.ease;
-            *old = k;
+            copy_ch(old, &k, k.ch);
+            old.ch |= k.ch;
             return;
         }
         let at = self.keys.partition_point(|o| o.t < k.t);
@@ -155,20 +212,36 @@ impl Anim {
         self.keys.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
     }
 
-    /// State at `t`: held before the first and after the last key.
+    /// State at `t` (held before the first and after the last key), value by
+    /// value: each one from the keys that hold it, `base` for values never keyed.
+    pub fn sample_on(&self, t: f64, base: &Key) -> Option<Key> {
+        if self.keys.is_empty() {
+            return None;
+        }
+        let mut out = Key { t, ..*base };
+        for bit in 0..9 {
+            let c = 1u16 << bit;
+            let ks: Vec<&Key> = self.keys.iter().filter(|k| k.ch & c != 0).collect();
+            let (Some(first), Some(last)) = (ks.first(), ks.last()) else { continue };
+            let v = if t <= first.t {
+                **first
+            } else if t >= last.t {
+                **last
+            } else {
+                let i = ks.partition_point(|k| k.t <= t) - 1;
+                let (a, b) = (ks[i], ks[i + 1]);
+                let u = ((t - a.t) / (b.t - a.t).max(1e-9)).clamp(0.0, 1.0);
+                a.mix(b, a.ease.shape(u), t)
+            };
+            copy_ch(&mut out, &v, c);
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
     pub fn sample(&self, t: f64) -> Option<Key> {
-        let first = self.keys.first()?;
-        if t <= first.t {
-            return Some(Key { t, ..*first });
-        }
-        let last = self.keys.last()?;
-        if t >= last.t {
-            return Some(Key { t, ..*last });
-        }
-        let i = self.keys.partition_point(|k| k.t <= t) - 1;
-        let (a, b) = (&self.keys[i], &self.keys[i + 1]);
-        let u = ((t - a.t) / (b.t - a.t).max(1e-9)).clamp(0.0, 1.0);
-        Some(a.mix(b, a.ease.shape(u), t))
+        let first = *self.keys.first()?;
+        self.sample_on(t, &first)
     }
 }
 
@@ -260,7 +333,7 @@ pub struct Follow {
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow) }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL }
     }
 
     pub fn apply(&mut self, k: &Key) {
@@ -346,6 +419,7 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         place: l.place.as_ref().map(|p| PlaceKey { pos: p.pos, rot: p.rot, scale: p.scale, thick: p.thick }),
         ease: Ease::default(),
         follow: None,
+        ch: ch::ALL,
     }
 }
 
@@ -386,12 +460,14 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
 pub fn evaluate(doc: &mut Document) {
     let t = doc.timeline.time;
     for l in &mut doc.layers {
-        if let Some(k) = l.anim.as_ref().and_then(|a| a.sample(t)) {
+        let base = key_of(l, t);
+        if let Some(k) = l.anim.as_ref().and_then(|a| a.sample_on(t, &base)) {
             apply_key(l, &k);
         }
     }
     for c in &mut doc.cameras {
-        if let Some(k) = c.anim.sample(t) {
+        let base = c.key(t);
+        if let Some(k) = c.anim.sample_on(t, &base) {
             c.apply(&k);
         }
     }
@@ -446,7 +522,7 @@ mod tests {
     use egui::Color32;
 
     fn k(t: f64, x: f32) -> Key {
-        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None }
+        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL }
     }
 
     #[test]
@@ -590,5 +666,39 @@ mod tests {
         cam.apply(&cam.anim.sample(2.5).unwrap());
         assert_eq!(cam.rect.width(), 90.0);
         assert_eq!(cam.follow.map(|f| f.layer), Some(5));
+    }
+
+    #[test]
+    fn values_key_on_their_own() {
+        // opacity keyed at 0 and 2, position only at 1: position holds, opacity blends
+        let mut a = Anim::default();
+        let mut k0 = k(0.0, 0.0);
+        k0.opacity = 0.0;
+        k0.ch = ch::OPA;
+        let mut k2 = k(2.0, 0.0);
+        k2.opacity = 1.0;
+        k2.ch = ch::OPA;
+        let mut k1 = k(1.0, 300.0);
+        k1.ch = ch::POS;
+        a.set_key(k0);
+        a.set_key(k2);
+        a.set_key(k1);
+        let mut base = k(0.0, -5.0);
+        base.opacity = 0.5;
+        let v = a.sample_on(1.0, &base).unwrap();
+        assert_eq!(v.center[0], 300.0);
+        assert!((v.opacity - 0.5).abs() < 1e-6);
+        let v = a.sample_on(0.0, &base).unwrap();
+        assert_eq!(v.center[0], 300.0);
+        assert_eq!(v.opacity, 0.0);
+        // a key at the same time merges, keeping the other values
+        let mut k1b = k(1.0, 0.0);
+        k1b.opacity = 0.25;
+        k1b.ch = ch::OPA;
+        a.set_key(k1b);
+        let m = a.keys.iter().find(|k| k.t == 1.0).unwrap();
+        assert_eq!(m.ch, ch::POS | ch::OPA);
+        assert_eq!(m.center[0], 300.0);
+        assert_eq!(m.opacity, 0.25);
     }
 }

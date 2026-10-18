@@ -2212,24 +2212,26 @@ impl App {
 
     /// Records a layer's current state as a key at the playhead (onto a key
     /// already within half a frame).
-    fn key_layer(&mut self, id: LayerId) {
+    fn key_layer(&mut self, id: LayerId, kc: u16) {
         let t = self.doc.timeline.time;
         let tol = self.doc.timeline.frame_len() * 0.5;
         if let Some(l) = self.doc.get_mut(id) {
             let kt = l.anim.as_ref().and_then(|a| a.keys.iter().map(|k| k.t).find(|kt| (kt - t).abs() <= tol)).unwrap_or(t);
-            let key = crate::anim::key_of(l, kt);
+            let mut key = crate::anim::key_of(l, kt);
+            key.ch = kc;
             l.anim.get_or_insert_with(Default::default).set_key(key);
             self.status = format!("키 · {}", crate::video::timecode(kt));
             self.mark();
         }
     }
 
-    fn key_camera(&mut self, i: usize) {
+    fn key_camera(&mut self, i: usize, kc: u16) {
         let t = self.doc.timeline.time;
         let tol = self.doc.timeline.frame_len() * 0.5;
         if let Some(c) = self.doc.cameras.get_mut(i) {
             let kt = c.anim.keys.iter().map(|k| k.t).find(|kt| (kt - t).abs() <= tol).unwrap_or(t);
-            let k = c.key(kt);
+            let mut k = c.key(kt);
+            k.ch = kc;
             c.anim.set_key(k);
             self.status = format!("{} 키 · {}", c.name, crate::video::timecode(kt));
             self.mark();
@@ -2323,8 +2325,12 @@ impl App {
         let mut ch = false;
         let (mut del, mut to_frame, mut from_frame) = (false, false, false);
         let tl = &self.doc.timeline;
-        let cmark = tl.on.then(|| key_mark(Some(&self.doc.cameras[i].anim), tl.time, tl.frame_len() * 0.5));
-        let mut ckey = false;
+        let (tl_on, tt, tol) = (tl.on, tl.time, tl.frame_len() * 0.5);
+        let can = self.doc.cameras[i].anim.clone();
+        use crate::anim::ch;
+        let cm = |c: u16| tl_on.then(|| key_mark(Some(&can), tt, tol, c));
+        // rect, rotation, follow
+        let mut ck = [false; 3];
         {
             let c = &mut self.doc.cameras[i];
             ui.horizontal(|ui| {
@@ -2332,9 +2338,9 @@ impl App {
                 ch |= ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(ui.available_width())).changed();
             });
             ui.label(format!("키 {}개", c.anim.keys.len()));
-            ch |= rect_fields(ui, &mut c.rect, "cam", cmark, &mut ckey);
+            ch |= rect_fields(ui, &mut c.rect, "cam", cm(ch::POS | ch::SIZE), &mut ck[0]);
             let mut deg = c.rot.to_degrees();
-            if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text("회전 °").default(0.0).key(cmark, &mut ckey)).changed() {
+            if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text("회전 °").default(0.0).key(cm(ch::ROT), &mut ck[1])).changed() {
                 c.rot = deg.to_radians();
                 ch = true;
             }
@@ -2373,8 +2379,8 @@ impl App {
         });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if let Some(m) = cmark {
-                ckey |= crate::dial::key_button(ui, m);
+            if let Some(m) = cm(ch::FOLLOW) {
+                ck[2] |= crate::dial::key_button(ui, m);
             }
             ui.label("따라가기");
             let shown = follow.and_then(|f| targets.iter().find(|t| t.0 == f.layer)).map_or("없음".to_string(), |t| t.1.clone());
@@ -2442,8 +2448,9 @@ impl App {
             self.doc.export_frame = Some(self.doc.cameras[i].rect);
             ch = true;
         }
-        if ckey && !del {
-            self.key_camera(i);
+        let kc = [ch::POS | ch::SIZE, ch::ROT, ch::FOLLOW].iter().zip(ck).filter(|x| x.1).fold(0u16, |a, (c, _)| a | c);
+        if kc != 0 && !del {
+            self.key_camera(i, kc);
         }
         if del {
             self.doc.cameras.remove(i);
@@ -6617,8 +6624,12 @@ impl App {
         let mut vid_act: Option<VidAct> = None;
         let is_playing = self.playing.contains_key(&id);
         let tl = &self.doc.timeline;
-        let kmark = tl.on.then(|| key_mark(self.doc.layers[idx].anim.as_ref(), tl.time, tl.frame_len() * 0.5));
-        let mut key_hit = false;
+        let (tl_on, tt, tol) = (tl.on, tl.time, tl.frame_len() * 0.5);
+        let an = self.doc.layers[idx].anim.clone();
+        let km = |c: u16| tl_on.then(|| key_mark(an.as_ref(), tt, tol, c));
+        use crate::anim::ch;
+        // key buttons pressed, by value bit
+        let mut kh = [false; 9];
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -6628,7 +6639,7 @@ impl App {
                 }
                 want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
             });
-            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(kmark, &mut key_hit)).changed();
+            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3])).changed();
             if l.place.is_none() {
                 // 2D position (the centre); placed layers use the 3D fields below
                 let c0 = crate::anim::key_of(l, 0.0).center;
@@ -6636,7 +6647,7 @@ impl App {
                 let mut mv = false;
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    crate::dial::label_cell(ui, "위치", kmark, &mut key_hit);
+                    crate::dial::label_cell(ui, "위치", km(ch::POS), &mut kh[0]);
                     ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
                     ui.spacing_mut().interact_size.x = 56.0;
                     mv |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
@@ -6703,12 +6714,12 @@ impl App {
                     }
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(kmark, &mut key_hit)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1])).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -6749,7 +6760,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(kmark, &mut key_hit)).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1])).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
@@ -6784,7 +6795,7 @@ impl App {
                             });
                     });
                     let mut deg = t.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
                         t.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -6814,7 +6825,7 @@ impl App {
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         let mut deg = s.rotation.to_degrees();
-                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(kmark, &mut key_hit)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
                             s.rotation = deg.to_radians();
                             changed = true;
                         }
@@ -6888,26 +6899,26 @@ impl App {
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.pos[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(kmark, &mut key_hit)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(km(ch::P_POS), &mut kh[4])).changed() {
                             pl.pos[i] = v as f64;
                             changed = true;
                         }
                     }
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.rot[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(kmark, &mut key_hit)).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(km(ch::P_ROT), &mut kh[5])).changed() {
                             pl.rot[i] = v as f64;
                             changed = true;
                         }
                     }
                     let mut pct = (pl.scale * 100.0) as f32;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(kmark, &mut key_hit)).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(km(ch::P_SCALE), &mut kh[6])).changed() {
                         pl.scale = pct as f64 / 100.0;
                         changed = true;
                     }
                     let mut th = pl.thick as f32;
                     if ui
-                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(kmark, &mut key_hit))
+                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]))
                         .on_hover_text("평면 뒤로 밀어낸 두께")
                         .changed()
                     {
@@ -6943,8 +6954,9 @@ impl App {
         if changed {
             self.mark();
         }
-        if key_hit {
-            self.key_layer(id);
+        let kc = kh.iter().enumerate().filter(|x| *x.1).fold(0u16, |a, (i, _)| a | (1 << i));
+        if kc != 0 {
+            self.key_layer(id, kc);
         }
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
@@ -9195,11 +9207,11 @@ fn guided_filter(i: &[f32], p: &[f32], w: usize, h: usize, r: usize, eps: f32) -
 }
 
 /// Key state of an animation at `t` (a key within `tol` counts as here).
-fn key_mark(a: Option<&crate::anim::Anim>, t: f64, tol: f64) -> crate::dial::KeyMark {
+fn key_mark(a: Option<&crate::anim::Anim>, t: f64, tol: f64, c: u16) -> crate::dial::KeyMark {
     use crate::dial::KeyMark;
     match a {
-        Some(a) if a.keys.iter().any(|k| (k.t - t).abs() <= tol) => KeyMark::Here,
-        Some(a) if !a.keys.is_empty() => KeyMark::Keyed,
+        Some(a) if a.keys.iter().any(|k| k.ch & c != 0 && (k.t - t).abs() <= tol) => KeyMark::Here,
+        Some(a) if a.keys.iter().any(|k| k.ch & c != 0) => KeyMark::Keyed,
         _ => KeyMark::None,
     }
 }
