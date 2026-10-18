@@ -72,7 +72,8 @@ impl TexCache {
         self.masked.retain(|_, v| f - v.2 < 120);
     }
 
-    /// A masked layer as one texture over the visible part of it.
+    /// A masked layer as one texture over the visible part of it (CPU path, unused).
+    #[allow(dead_code)]
     fn masked(&mut self, ctx: &Context, doc: &Document, layer: &Layer, m: &crate::raster::RasterLayer, view_w: Rect, zoom: f32) -> Option<(egui::TextureId, Rect)> {
         let cams = crate::persp::cameras(&doc.spaces);
         let b = layer.shown_bounds(&cams)?;
@@ -466,12 +467,35 @@ pub fn draw_doc(
         }
         let timed = crate::anim::layer_at_time(doc, layer);
         let layer = timed.as_ref().unwrap_or(layer);
-        if let Some(m) = crate::export::mask_for(doc, layer.id) {
-            if let Some((tex, r)) = cache.masked(ctx, doc, layer, m, view_w, xf.zoom) {
-                painter.image(tex, xf.rect_w2s(r), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
-            }
-            continue;
+        let mask = doc.layers.iter().find(|m| m.mask_of == Some(layer.id) && m.visible);
+        let masking = mask.is_some() && crate::glass::gl_ok();
+        if masking {
+            painter.add(crate::glass::mask_begin(painter.clip_rect()));
         }
+        draw_one(painter, ctx, doc, layer, xf, cache, skip_text, view_w, ppp, &cams);
+        if let (true, Some(m)) = (masking, mask) {
+            if let LayerKind::Raster(r) = &m.kind {
+                let mut tiles = Vec::new();
+                for (&key, t) in &r.tiles {
+                    let tr = Rect::from_min_size(pos2((key.0 * TILE) as f32, (key.1 * TILE) as f32), vec2(TILE as f32, TILE as f32)).translate(r.offset);
+                    if !tr.intersects(view_w) {
+                        continue;
+                    }
+                    let sr = xf.rect_w2s(tr);
+                    tiles.push(([sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom()], cache.tile(ctx, m.id, key, t)));
+                }
+                if !tiles.is_empty() {
+                    painter.add(crate::glass::mask_restore(painter.clip_rect(), tiles));
+                }
+            }
+        }
+    }
+}
+
+/// One layer as it shows on the canvas.
+#[allow(clippy::too_many_arguments)]
+fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf: &Xf, cache: &mut TexCache, skip_text: Option<LayerId>, view_w: Rect, ppp: f32, cams: &HashMap<u64, crate::persp::Camera>) {
+    {
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
             if skip_text != Some(layer.id) {
                 let clip = match doc.spaces.iter().find(|s| s.id == pl.space) {
@@ -480,13 +504,13 @@ pub fn draw_doc(
                 };
                 draw_placed(&painter.with_clip_rect(clip), ctx, layer, pl, cam, xf, cache, view_w);
             }
-            continue;
+            return;
         }
         let op = layer.opacity;
         match &layer.kind {
             LayerKind::Image(im) => {
                 if !Rect::from_points(&im.corners()).intersects(view_w) {
-                    continue;
+                    return;
                 }
                 let tex = cache.image(ctx, im);
                 let size = im.src.size();
@@ -502,7 +526,7 @@ pub fn draw_doc(
                         vec2(TILE as f32, TILE as f32),
                     );
                     if !tr.intersects(local) {
-                        continue;
+                        return;
                     }
                     let tex = cache.tile(ctx, layer.id, key, t);
                     let sr = xf.rect_w2s(tr.translate(r.offset));
@@ -523,7 +547,7 @@ pub fn draw_doc(
             }
             LayerKind::Text(t) => {
                 if skip_text == Some(layer.id) {
-                    continue;
+                    return;
                 }
                 let want = (xf.zoom * ppp).max(1.0 / 16.0);
                 let mut scale = 2f32.powf(want.log2().ceil()).clamp(1.0 / 16.0, 16.0);
@@ -533,7 +557,7 @@ pub fn draw_doc(
                 }
                 let r = Rect::from_min_size(t.pos, lay_size);
                 if !r.intersects(view_w) {
-                    continue;
+                    return;
                 }
                 if let Some((tex, size, px, dims, key)) = cache.text(ctx, layer.id, t, scale) {
                     let pm_size = vec2(

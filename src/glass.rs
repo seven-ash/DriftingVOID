@@ -198,6 +198,9 @@ struct Res {
     blur: glow::Program,
     comp: glow::Program,
     blend: glow::Program,
+    mask: glow::Program,
+    /// What was on screen right before a masked layer.
+    mdst: Option<Tex>,
     /// Uploaded text pixmaps for the blend pass, by cache key.
     texts: std::collections::HashMap<u64, glow::Texture>,
     /// What lies under a blended text (kept apart from the glass textures).
@@ -422,6 +425,112 @@ void main() {
 
 /// Draws a text pixmap onto the screen with a blend mode, reading what is
 /// already under it (the egui pipeline only does normal / additive).
+const FS_MASK: &str = r#"
+uniform sampler2D u_m;     // mask tile (alpha = hidden)
+uniform sampler2D u_dst;   // screen before the layer
+uniform vec2 u_dsize;      // allocated size of u_dst
+in vec2 v_uv;
+out vec4 o;
+void main() {
+    float m = texture(u_m, v_uv).a;
+    o = vec4(texture(u_dst, gl_FragCoord.xy / u_dsize).rgb, m);
+}
+"#;
+
+unsafe fn ready(gl: &glow::Context) -> bool {
+    unsafe {
+        if FAILED.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut guard = RES.lock().unwrap();
+        if guard.is_none() {
+            match init(gl) {
+                Some(r) => {
+                    *guard = Some(r);
+                    READY.store(true, Ordering::Relaxed);
+                }
+                None => {
+                    FAILED.store(true, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Before a masked layer: keeps what is on screen under it.
+pub fn mask_begin(screen: Rect) -> Shape {
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe {
+            let gl = painter.gl();
+            if !ready(gl) {
+                return;
+            }
+            let mut guard = RES.lock().unwrap();
+            let Some(res) = guard.as_mut() else { return };
+            let [sw, sh] = info.screen_size_px;
+            let (sw, sh) = (sw as i32, sh as i32);
+            if ensure(gl, &mut res.mdst, sw, sh).is_none() {
+                return;
+            }
+            let t = res.mdst.as_ref().unwrap();
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(t.fbo));
+            gl.blit_framebuffer(0, 0, sw, sh, 0, 0, sw, sh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    });
+    Shape::Callback(egui::PaintCallback { rect: screen, callback: std::sync::Arc::new(cb) })
+}
+
+/// After a masked layer: where the mask is painted, puts back what was there.
+/// `tiles`: mask tile textures with their screen corners (TL TR BR BL, points).
+pub fn mask_restore(screen: Rect, tiles: Vec<([egui::Pos2; 4], egui::TextureId)>) -> Shape {
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe {
+            let gl = painter.gl();
+            let guard = RES.lock().unwrap();
+            let Some(res) = guard.as_ref() else { return };
+            let Some(dst) = res.mdst.as_ref() else { return };
+            let ppp = info.pixels_per_point;
+            let [sw, sh] = info.screen_size_px;
+            let (sw, sh) = (sw as i32, sh as i32);
+            gl.viewport(0, 0, sw, sh);
+            let clip = info.clip_rect_in_pixels();
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(clip.left_px, clip.from_bottom_px, clip.width_px, clip.height_px);
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA, glow::ZERO, glow::ONE);
+            gl.use_program(Some(res.mask));
+            gl.bind_vertex_array(Some(res.vao));
+            let u = |n: &str| gl.get_uniform_location(res.mask, n);
+            gl.uniform_2_f32(u("u_screen").as_ref(), sw as f32, sh as f32);
+            gl.uniform_2_f32(u("u_dsize").as_ref(), dst.w as f32, dst.h as f32);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(dst.tex));
+            gl.uniform_1_i32(u("u_dst").as_ref(), 1);
+            gl.uniform_1_i32(u("u_m").as_ref(), 0);
+            for (corners, id) in &tiles {
+                let Some(t) = painter.texture(*id) else { continue };
+                let flat: Vec<f32> = corners.iter().flat_map(|p| [p.x * ppp, sh as f32 - p.y * ppp]).collect();
+                gl.uniform_2_f32_slice(u("u_p").as_ref(), &flat);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_vertex_array(None);
+            // egui's own blend state
+            gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_ALPHA, glow::ONE_MINUS_DST_ALPHA, glow::ONE);
+        }
+    });
+    Shape::Callback(egui::PaintCallback { rect: screen, callback: std::sync::Arc::new(cb) })
+}
+
 pub fn blend_shape(corners: [egui::Pos2; 4], px: std::sync::Arc<Vec<u8>>, dims: [u32; 2], key: u64, mode: i32, opacity: f32) -> Shape {
     let bbox = Rect::from_points(&corners);
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
@@ -560,8 +669,9 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let blur = compile(gl, &header, VS_FULL, FS_BLUR).map_err(|e| eprintln!("glass blur: {e}")).ok()?;
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
+        let mask = compile(gl, &header, VS_BLEND, FS_MASK).map_err(|e| eprintln!("glass mask: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, mask, mdst: None, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 
