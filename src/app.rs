@@ -1502,7 +1502,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None });
         self.sel = Some(id);
         self.mark();
         id
@@ -2210,6 +2210,7 @@ impl App {
             anim: None,
             mask_of: Some(owner),
             mask_anchor: Some((owner, c)),
+            mask_pose: None,
         };
         // just under its layer, so the list shows it beneath
         self.doc.layers.insert(i, layer);
@@ -7066,6 +7067,7 @@ impl App {
             let c = a.and_then(|a| self.doc.get(a)).map(|l| crate::anim::key_of(l, 0.0).center);
             if let Some(l) = self.doc.get_mut(id) {
                 l.mask_anchor = a.zip(c);
+                l.mask_pose = None;
             }
             self.mark();
         }
@@ -9153,23 +9155,43 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
 /// hourglass on its side) or a square (hold).
 /// Masks move with their anchor layer (translation of its centre, whole pixels;
 /// the remainder carries over).
-fn sync_masks(doc: &mut Document) {
-    let centres: Vec<(LayerId, Pos2)> = doc
+/// Masks move with their anchor layer: its centre live (whole pixels, the
+/// remainder carries over), its rotation and size once a drag ends (each turn or
+/// scale resamples the mask, so not on every frame of a drag).
+fn sync_masks(doc: &mut Document, dragging: bool) {
+    let poses: Vec<(LayerId, Pos2, f32, f32)> = doc
         .layers
         .iter()
         .filter(|l| l.mask_of.is_none())
-        .map(|l| (l.id, crate::anim::key_of(l, 0.0).center))
-        .map(|(id, c)| (id, pos2(c[0], c[1])))
+        .map(|l| (l.id, crate::anim::key_of(l, 0.0)))
+        .map(|(id, k)| (id, pos2(k.center[0], k.center[1]), k.rot, k.ext[0]))
         .collect();
     for l in &mut doc.layers {
         let Some((aid, last)) = l.mask_anchor else { continue };
-        let Some(&(_, c)) = centres.iter().find(|x| x.0 == aid) else { continue };
+        let Some(&(_, c, rot, ext)) = poses.iter().find(|x| x.0 == aid) else { continue };
         let d = vec2((c.x - last[0]).round(), (c.y - last[1]).round());
         if d != Vec2::ZERO {
             if let LayerKind::Raster(r) = &mut l.kind {
                 r.offset += d;
             }
             l.mask_anchor = Some((aid, [last[0] + d.x, last[1] + d.y]));
+        }
+        match l.mask_pose {
+            None => l.mask_pose = Some([rot, ext]),
+            Some([pr, pe]) if !dragging => {
+                let s = if pe.abs() > 1e-6 && ext.abs() > 1e-6 { ext / pe } else { 1.0 };
+                let th = rot - pr;
+                if th.abs() > 1e-4 || (s - 1.0).abs() > 1e-4 {
+                    if let LayerKind::Raster(r) = &mut l.kind {
+                        if r.tiles.is_empty() {
+                        } else if let Some(t) = crate::raster::transformed(r, c, s, th) {
+                            *r = t;
+                        }
+                    }
+                    l.mask_pose = Some([rot, ext]);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -9472,7 +9494,7 @@ impl eframe::App for App {
         self.handle_shortcuts(&ctx);
         crate::persp::follow_photos(&mut self.doc);
         crate::persp::sync_walls(&mut self.doc);
-        sync_masks(&mut self.doc);
+        sync_masks(&mut self.doc, self.drag.is_some() || self.tl_play.is_some());
         crate::anim::apply_constraints(&mut self.doc);
         self.tick_audio();
         self.tick_timeline(&ctx);
