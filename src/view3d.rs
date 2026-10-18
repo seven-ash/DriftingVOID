@@ -349,7 +349,7 @@ fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj:
         Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
     };
     let n = pl.normal();
-    for (off, is_cap) in pl.slices(|w| proj.project(w), |w| proj.to_view(w)[2]) {
+    for (off, is_cap) in pl.slices_over(l.bounds(), |w| proj.project(w), |w| proj.to_view(w)[2]) {
         let color = if is_cap { cap } else { side };
         let t = add(t, scale(n, off));
         let mut mesh = Mesh::with_texture(tex);

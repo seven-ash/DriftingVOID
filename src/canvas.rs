@@ -378,7 +378,7 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
         let v = (255.0 * op * SIDE_SHADE) as u8;
         Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
     };
-    let slices = pl.slices(|w| cam.project(w).map(|p| xf.w2s(p)), |w| cam.to_cam(w)[2]);
+    let slices = pl.slices_over(Some(b), |w| cam.project(w).map(|p| xf.w2s(p)), |w| cam.to_cam(w)[2]);
     // lit: caps by their facing, sides from a texture shaded by edge direction
     let light = light.filter(|_| pl.thick > 0.0);
     let lit_sides = light.and_then(|l| {

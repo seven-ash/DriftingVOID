@@ -1098,17 +1098,36 @@ impl Placement {
 
     /// Extrusion slices as (offset along the normal, is an end cap), far to near.
     /// `project` maps world points to screen pixels; slices are about 0.75 px apart.
+    #[cfg(test)]
     pub fn slices(&self, project: impl Fn(V3) -> Option<Pos2>, view_depth: impl Fn(V3) -> f64) -> Vec<(f64, bool)> {
+        self.slices_over(None, project, view_depth)
+    }
+
+    /// As `slices`, spaced by where the extrusion looks thickest on screen: the
+    /// origin and, with `bounds` (content rect), its four corners.
+    pub fn slices_over(&self, bounds: Option<Rect>, project: impl Fn(V3) -> Option<Pos2>, view_depth: impl Fn(V3) -> f64) -> Vec<(f64, bool)> {
         if self.thick <= 0.0 {
             return vec![(0.0, true)];
         }
-        let (_, t) = self.world_affine();
-        let back = add(t, scale(self.normal(), self.thick));
-        let px = match (project(t), project(back)) {
-            (Some(a), Some(b)) => a.distance(b) as f64,
-            _ => 48.0,
-        };
-        let k = (px / 0.75).ceil().clamp(1.0, 160.0) as usize;
+        let (m, t) = self.world_affine();
+        let n = scale(self.normal(), self.thick);
+        let back = add(t, n);
+        let mut pts = vec![t];
+        if let Some(b) = bounds {
+            for p in [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()] {
+                let d = [(p.x - self.anchor.x) as f64, (p.y - self.anchor.y) as f64, 0.0];
+                pts.push(add(t, mul_mv(&m, d)));
+            }
+        }
+        let px = pts
+            .iter()
+            .filter_map(|&w| match (project(w), project(add(w, n))) {
+                (Some(a), Some(b)) => Some(a.distance(b) as f64),
+                _ => None,
+            })
+            .fold(0.0f64, f64::max);
+        let px = if px > 0.0 { px } else { 48.0 };
+        let k = (px / 0.75).ceil().clamp(1.0, 2000.0) as usize;
         let mut v: Vec<(f64, bool)> = (0..=k).map(|i| (self.thick * i as f64 / k as f64, i == 0 || i == k)).collect();
         if view_depth(t) > view_depth(back) {
             // the back is nearer (seen from behind): draw from the front face on

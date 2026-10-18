@@ -163,7 +163,7 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
                     shade_sides(&src, &edge_normals(&src), u, v, &l)
                 });
                 let n0 = pl.normal();
-                for (off, cap) in pl.slices(to_out, |w| cam.to_cam(w)[2]) {
+                for (off, cap) in pl.slices_over(layer.bounds(), to_out, |w| cam.to_cam(w)[2]) {
                     let hs = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
                     match (&light, &sides) {
                         (Some(l), Some(sd)) => {
