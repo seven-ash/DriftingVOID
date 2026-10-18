@@ -1853,8 +1853,10 @@ impl App {
         self.mark();
     }
 
-    /// Automatic selection: renders what is visible under the masked layer, takes
-    /// the region of similar colour connected to `w`, and hides it (or shows it).
+    /// Automatic selection: renders what lies under the masked layer at full canvas
+    /// resolution (one pixel per mask pixel) around `w`, takes the connected region
+    /// of similar colour, softens its edge with a guided filter (the picture as the
+    /// guide) and hides it (or shows it again).
     fn wand_fill(&mut self, mid: LayerId, w: Pos2, on: bool) {
         let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
         let xf = self.xf();
@@ -1862,22 +1864,23 @@ impl App {
         if !view.contains(w) {
             return;
         }
-        let mut scale = self.zoom.min(1.0);
-        while view.width() * scale > 2048.0 || view.height() * scale > 2048.0 {
-            scale *= 0.5;
-        }
+        // whole canvas pixels, at most 4096 around the click
+        const SIDE: f32 = 4096.0;
+        let lim = Rect::from_center_size(w, vec2(SIDE, SIDE));
+        let reg = view.expand(64.0).intersect(lim);
+        let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let Ok(pm) = crate::export::render(&d, view, scale, Some(Color32::BLACK)) else { return };
+        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as i32, pm.height() as i32);
         let px = pm.data();
-        let at = |x: i32, y: i32| {
+        let rgb = |x: i32, y: i32| {
             let i = ((y * pw + x) * 4) as usize;
             [px[i] as f32, px[i + 1] as f32, px[i + 2] as f32]
         };
-        let sx = (((w.x - view.min.x) * scale) as i32).clamp(0, pw - 1);
-        let sy = (((w.y - view.min.y) * scale) as i32).clamp(0, ph - 1);
-        let seed = at(sx, sy);
+        let sx = ((w.x - reg.min.x) as i32).clamp(0, pw - 1);
+        let sy = ((w.y - reg.min.y) as i32).clamp(0, ph - 1);
+        let seed = rgb(sx, sy);
         let tol = self.s.wand_tol / 100.0 * 255.0 * 1.732;
         let mut hit = vec![false; (pw * ph) as usize];
         let mut stack = vec![(sx, sy)];
@@ -1892,7 +1895,7 @@ impl App {
                 if hit[j] {
                     continue;
                 }
-                let c = at(nx, ny);
+                let c = rgb(nx, ny);
                 let dd = ((c[0] - seed[0]).powi(2) + (c[1] - seed[1]).powi(2) + (c[2] - seed[2]).powi(2)).sqrt();
                 if dd <= tol {
                     hit[j] = true;
@@ -1904,24 +1907,34 @@ impl App {
                 }
             }
         }
-        // back to world pixels
-        let wx0 = (view.min.x + x0 as f32 / scale).floor() as i32;
-        let wy0 = (view.min.y + y0 as f32 / scale).floor() as i32;
-        let wx1 = (view.min.x + (x1 + 1) as f32 / scale).ceil() as i32;
-        let wy1 = (view.min.y + (y1 + 1) as f32 / scale).ceil() as i32;
+        // guided filter over the region's box (plus a margin), guide = luminance
+        let r = 4;
+        let (bx0, by0) = ((x0 - 2 * r).max(0), (y0 - 2 * r).max(0));
+        let (bx1, by1) = ((x1 + 2 * r + 1).min(pw), (y1 + 2 * r + 1).min(ph));
+        let (bw, bh) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
+        let mut gi = vec![0f32; bw * bh];
+        let mut gp = vec![0f32; bw * bh];
+        for y in 0..bh {
+            for x in 0..bw {
+                let (ix, iy) = (bx0 + x as i32, by0 + y as i32);
+                let c = rgb(ix, iy);
+                gi[y * bw + x] = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255.0;
+                gp[y * bw + x] = if hit[(iy * pw + ix) as usize] { 1.0 } else { 0.0 };
+            }
+        }
+        let q = guided_filter(&gi, &gp, bw, bh, r as usize, 1e-3);
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return };
         let mut n = 0usize;
-        for y in wy0..wy1 {
-            let py = (((y as f32 + 0.5) - view.min.y) * scale) as i32;
-            if py < 0 || py >= ph {
-                continue;
-            }
-            for x in wx0..wx1 {
-                let pxx = (((x as f32 + 0.5) - view.min.x) * scale) as i32;
-                if pxx < 0 || pxx >= pw || !hit[(py * pw + pxx) as usize] {
+        for y in 0..bh {
+            for x in 0..bw {
+                let v = q[y * bw + x].clamp(0.0, 1.0);
+                if v < 0.02 {
                     continue;
                 }
-                m.set_world(x, y, on);
+                let (wx, wy) = (reg.min.x as i32 + bx0 + x as i32, reg.min.y as i32 + by0 + y as i32);
+                let old = m.alpha_at_world(pos2(wx as f32 + 0.5, wy as f32 + 0.5)) as f32 / 255.0;
+                let nv = if on { old.max(v) } else { old * (1.0 - v) };
+                m.set_alpha_world(wx, wy, (nv * 255.0).round() as u8);
                 n += 1;
             }
         }
@@ -8851,6 +8864,49 @@ fn sync_masks(doc: &mut Document) {
             l.mask_anchor = Some((aid, [last[0] + d.x, last[1] + d.y]));
         }
     }
+}
+
+/// Box mean with radius `r` (clamped at the borders), via an integral image.
+fn box_mean(v: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let mut ii = vec![0f64; (w + 1) * (h + 1)];
+    for y in 0..h {
+        let mut row = 0f64;
+        for x in 0..w {
+            row += v[y * w + x] as f64;
+            ii[(y + 1) * (w + 1) + x + 1] = ii[y * (w + 1) + x + 1] + row;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        let (ya, yb) = (y.saturating_sub(r), (y + r + 1).min(h));
+        for x in 0..w {
+            let (xa, xb) = (x.saturating_sub(r), (x + r + 1).min(w));
+            let s = ii[yb * (w + 1) + xb] - ii[ya * (w + 1) + xb] - ii[yb * (w + 1) + xa] + ii[ya * (w + 1) + xa];
+            out[y * w + x] = (s / ((yb - ya) * (xb - xa)) as f64) as f32;
+        }
+    }
+    out
+}
+
+/// Guided filter (He et al. 2010): `p` filtered with edges taken from guide `i`.
+fn guided_filter(i: &[f32], p: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
+    let mi = box_mean(i, w, h, r);
+    let mp = box_mean(p, w, h, r);
+    let ii: Vec<f32> = i.iter().map(|v| v * v).collect();
+    let ip: Vec<f32> = i.iter().zip(p).map(|(a, b)| a * b).collect();
+    let mii = box_mean(&ii, w, h, r);
+    let mip = box_mean(&ip, w, h, r);
+    let mut a = vec![0f32; w * h];
+    let mut b = vec![0f32; w * h];
+    for k in 0..w * h {
+        let var = mii[k] - mi[k] * mi[k];
+        let cov = mip[k] - mi[k] * mp[k];
+        a[k] = cov / (var + eps);
+        b[k] = mp[k] - a[k] * mi[k];
+    }
+    let ma = box_mean(&a, w, h, r);
+    let mb = box_mean(&b, w, h, r);
+    (0..w * h).map(|k| ma[k] * i[k] + mb[k]).collect()
 }
 
 /// Key state of an animation at `t` (a key within `tol` counts as here).
