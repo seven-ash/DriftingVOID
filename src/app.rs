@@ -1154,7 +1154,7 @@ impl App {
                 let c = app.doc.get(id).map(|l| crate::anim::key_of(l, 0.0).center).unwrap_or([0.0, 0.0]);
                 app.mask_button(id);
                 if let Some(LayerKind::Raster(r)) = app.sel.and_then(|m| app.doc.get_mut(m)).map(|l| &mut l.kind) {
-                    r.fill_rect(Rect::from_min_max(pos2(c[0] - 4000.0, c[1] - 4000.0), pos2(c[0], c[1] + 4000.0)), true);
+                    r.fill_rect(Rect::from_min_max(pos2(c[0], c[1] - 4000.0), pos2(c[0] + 4000.0, c[1] + 4000.0)), true);
                 }
                 if std::env::var_os("DV_MASK_OWNER").is_some() {
                     app.select_only(Some(id));
@@ -1861,7 +1861,7 @@ impl App {
         if !matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Pen | Tool::Rect) {
             self.set_tool(Tool::Brush);
         }
-        self.status = "마스크 · 브러시/펜: 칠하기 · 지우개: 지우기 · 사각형: 채우기 (Alt: 비우기)".into();
+        self.status = "마스크 · 칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)".into();
         self.mark();
     }
 
@@ -6230,6 +6230,7 @@ impl App {
         let mut changed = false;
         let mut pal_req: PalReq = None;
         let mut start_crop = false;
+        let mut want_mask = false;
         let cams = crate::persp::cameras(&self.doc.spaces);
         let spaces: Vec<(u64, String, bool, Vec<(u64, String)>)> = self
             .doc
@@ -6248,8 +6249,9 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(l.kind_label());
                 if !matches!(l.kind, LayerKind::Text(_)) {
-                    changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width())).changed();
+                    changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width() - 52.0)).changed();
                 }
+                want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
             });
             changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(kmark, &mut key_hit)).changed();
             if l.place.is_none() {
@@ -6601,6 +6603,10 @@ impl App {
             Some(None) => self.take_out_of_space(id),
             None => {}
         }
+        if want_mask {
+            self.mask_button(id);
+            return;
+        }
         if start_crop {
             self.set_tool(Tool::Crop);
         }
@@ -6610,7 +6616,7 @@ impl App {
         let names: Vec<(LayerId, String)> = self.doc.layers.iter().rev().filter(|l| l.mask_of.is_none()).map(|l| (l.id, l.display_name())).collect();
         let owner_name = names.iter().find(|n| n.0 == owner).map_or(String::new(), |n| n.1.clone());
         ui.label(egui::RichText::new(format!("마스크 · {owner_name}")).color(INK_2()));
-        ui.small("브러시·펜: 칠하기 · 지우개: 지우기 · 사각형: 채우기 (Alt: 비우기)");
+        ui.small("칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)");
         let anchor = self.doc.get(id).and_then(|l| l.mask_anchor).map(|a| a.0);
         let mut pick: Option<Option<LayerId>> = None;
         ui.horizontal(|ui| {
@@ -6818,8 +6824,8 @@ impl App {
                 }
             }
             if let Some(mb) = &mask_b {
-                if has_mask || mb.hovered() || resp.hovered() {
-                    let col = if has_mask { INK_2() } else if mb.hovered() { INK() } else { FILL_3() };
+                {
+                    let col = if mb.hovered() { INK() } else if has_mask { ACCENT } else { INK_3() };
                     let c = mask_r.center();
                     p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, col), StrokeKind::Inside);
                     p.circle_filled(c, 4.0, col);

@@ -35,7 +35,7 @@ pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&crate::raste
     })
 }
 
-/// Multiplies a rendered region by a mask's coverage (both in canvas space).
+/// Hides what a mask covers: painted mask pixels are hidden (both in canvas space).
 pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect, scale: f32) {
     let w = pm.width() as usize;
     let data = pm.data_mut();
@@ -44,7 +44,7 @@ pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect,
             continue;
         }
         let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
-        let a = m.alpha_at_world(egui::pos2(region.min.x + x / scale, region.min.y + y / scale)) as u16;
+        let a = 255 - m.alpha_at_world(egui::pos2(region.min.x + x / scale, region.min.y + y / scale)) as u16;
         if a == 255 {
             continue;
         }
