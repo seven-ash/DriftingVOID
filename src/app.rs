@@ -825,6 +825,10 @@ pub struct App {
     mask_rect: Option<(LayerId, bool)>,
     /// Automatic selection armed for this mask: a canvas click picks a region.
     wand: Option<LayerId>,
+    /// 0: automatic selection (click), 1: GrabCut (drag a box).
+    wand_mode: u8,
+    /// The rect drag on a mask runs GrabCut instead of a plain fill.
+    mask_cut: bool,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
@@ -944,6 +948,8 @@ impl App {
             tl_sel: Vec::new(),
             mask_rect: None,
             wand: None,
+            wand_mode: 0,
+            mask_cut: false,
             tl_drag: None,
             cam_sel: None,
             audio_out: None,
@@ -1173,6 +1179,16 @@ impl App {
                         let _ = xf;
                         app.wand_fill(mid, pos2(c[0], c[1]), true);
                         eprintln!("wand: {}", app.status);
+                    }
+                }
+                if std::env::var_os("DV_GRABCUT").is_some() {
+                    if let Some(mid) = app.sel {
+                        if let Some(LayerKind::Raster(r)) = app.doc.get_mut(mid).map(|l| &mut l.kind) {
+                            r.tiles.clear();
+                        }
+                        let t0 = std::time::Instant::now();
+                        app.grabcut_fill(mid, Rect::from_center_size(pos2(c[0] - 640.0, c[1]), vec2(500.0, 500.0)), true);
+                        eprintln!("grabcut: {} in {:?}", app.status, t0.elapsed());
                     }
                 }
                 if std::env::var_os("DV_MASK_OWNER").is_some() {
@@ -1908,7 +1924,7 @@ impl App {
             }
         }
         // guided filter over the region's box (plus a margin), guide = luminance
-        let r = 4;
+        let r = 2;
         let (bx0, by0) = ((x0 - 2 * r).max(0), (y0 - 2 * r).max(0));
         let (bx1, by1) = ((x1 + 2 * r + 1).min(pw), (y1 + 2 * r + 1).min(ph));
         let (bw, bh) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
@@ -1922,23 +1938,98 @@ impl App {
                 gp[y * bw + x] = if hit[(iy * pw + ix) as usize] { 1.0 } else { 0.0 };
             }
         }
-        let q = guided_filter(&gi, &gp, bw, bh, r as usize, 1e-3);
-        let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return };
+        let n = self.mask_soft_write(mid, (reg.min.x as i32 + bx0, reg.min.y as i32 + by0), bw, bh, &gi, &gp, on);
+        self.status = format!("자동 선택 · {n} px {}", if on { "가림" } else { "되살림" });
+        self.mark();
+    }
+
+    /// Writes a hard 0/1 selection into a mask with a soft edge: a guided filter
+    /// (guide = luminance) snaps it to the picture, then the edge band is narrowed
+    /// so it does not spill over the boundary. `origin` is the world pixel of (0,0).
+    #[allow(clippy::too_many_arguments)]
+    fn mask_soft_write(&mut self, mid: LayerId, origin: (i32, i32), bw: usize, bh: usize, gi: &[f32], gp: &[f32], on: bool) -> usize {
+        let q = guided_filter(gi, gp, bw, bh, 2, 1e-3);
+        let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return 0 };
         let mut n = 0usize;
         for y in 0..bh {
             for x in 0..bw {
-                let v = q[y * bw + x].clamp(0.0, 1.0);
+                let v = ((q[y * bw + x] - 0.5) * 2.5 + 0.5).clamp(0.0, 1.0);
                 if v < 0.02 {
                     continue;
                 }
-                let (wx, wy) = (reg.min.x as i32 + bx0 + x as i32, reg.min.y as i32 + by0 + y as i32);
+                let (wx, wy) = (origin.0 + x as i32, origin.1 + y as i32);
                 let old = m.alpha_at_world(pos2(wx as f32 + 0.5, wy as f32 + 0.5)) as f32 / 255.0;
                 let nv = if on { old.max(v) } else { old * (1.0 - v) };
                 m.set_alpha_world(wx, wy, (nv * 255.0).round() as u8);
                 n += 1;
             }
         }
-        self.status = format!("자동 선택 · {n} px {}", if on { "가림" } else { "되살림" });
+        n
+    }
+
+    /// GrabCut over a dragged box: what is inside the box and stands apart from its
+    /// surroundings (colour models + edges) is hidden (or shown again). Coverage
+    /// already painted in the box counts as certain.
+    fn grabcut_fill(&mut self, mid: LayerId, rect: Rect, on: bool) {
+        use crate::segment::{BG, FG, PR_FG};
+        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        let rect = Rect::from_min_max(rect.min.floor(), rect.max.ceil());
+        if rect.width() < 4.0 || rect.height() < 4.0 {
+            return;
+        }
+        let margin = (rect.size().max_elem() * 0.1).max(12.0).round();
+        let reg = rect.expand(margin);
+        if reg.width() > 6000.0 || reg.height() > 6000.0 {
+            self.status = "영역이 너무 큼".into();
+            return;
+        }
+        let mut d = self.doc.clone();
+        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
+        let (pw, ph) = (pm.width() as usize, pm.height() as usize);
+        let px = pm.data();
+        // the cut runs on a copy of at most ~90k pixels
+        let step = (((pw * ph) as f64 / 90_000.0).sqrt().ceil() as usize).max(1);
+        let (gw, gh) = (pw.div_ceil(step), ph.div_ceil(step));
+        let hint = match self.doc.get(mid).map(|l| &l.kind) {
+            Some(LayerKind::Raster(m)) => Some(m.clone()),
+            _ => None,
+        };
+        let mut img = vec![[0f64; 3]; gw * gh];
+        let mut labels = vec![BG; gw * gh];
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let (mut acc, mut cnt) = ([0f64; 3], 0.0);
+                for y in gy * step..((gy + 1) * step).min(ph) {
+                    for x in gx * step..((gx + 1) * step).min(pw) {
+                        let i = (y * pw + x) * 4;
+                        acc[0] += px[i] as f64;
+                        acc[1] += px[i + 1] as f64;
+                        acc[2] += px[i + 2] as f64;
+                        cnt += 1.0;
+                    }
+                }
+                img[gy * gw + gx] = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt];
+                let wp = pos2(reg.min.x + ((gx * step) as f32 + step as f32 * 0.5), reg.min.y + ((gy * step) as f32 + step as f32 * 0.5));
+                if rect.contains(wp) {
+                    let painted = on && hint.as_ref().is_some_and(|m| m.alpha_at_world(wp) > 127);
+                    labels[gy * gw + gx] = if painted { FG } else { PR_FG };
+                }
+            }
+        }
+        crate::segment::grabcut(&img, gw, gh, &mut labels, 4);
+        let mut gi = vec![0f32; pw * ph];
+        let mut gp = vec![0f32; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw {
+                let i = (y * pw + x) * 4;
+                gi[y * pw + x] = (0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32) / 255.0;
+                let l = labels[(y / step) * gw + x / step];
+                gp[y * pw + x] = if l == FG || l == PR_FG { 1.0 } else { 0.0 };
+            }
+        }
+        let n = self.mask_soft_write(mid, (reg.min.x as i32, reg.min.y as i32), pw, ph, &gi, &gp, on);
+        self.status = format!("그랩컷 · {n} px {}", if on { "가림" } else { "되살림" });
         self.mark();
     }
 
@@ -3708,7 +3799,16 @@ impl App {
         let w = xf.s2w(sp);
         if let Some(mid) = self.wand.filter(|_| !space) {
             if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
-                self.wand_fill(mid, w, !mods.alt);
+                if self.wand_mode == 1 {
+                    // GrabCut: drag a box (a temporary outline, run on release)
+                    let s = ShapeLayer { kind: ShapeKind::Rect, a: w, b: w, color: ACCENT, width: 1.5 / self.zoom, fill: None, rotation: 0.0 };
+                    let id = self.doc.insert("영역".into(), LayerKind::Shape(s), None);
+                    self.drag = Some(Drag::NewShape { id, start: w });
+                    self.mask_rect = Some((mid, !mods.alt));
+                    self.mask_cut = true;
+                } else {
+                    self.wand_fill(mid, w, !mods.alt);
+                }
                 return;
             }
             self.wand = None;
@@ -5260,7 +5360,11 @@ impl App {
                 if let Some(i) = self.doc.index_of(id) {
                     self.doc.layers.remove(i);
                 }
-                if let (Some(rect), Some(LayerKind::Raster(m))) = (rect, self.doc.get_mut(mid).map(|l| &mut l.kind)) {
+                if std::mem::take(&mut self.mask_cut) {
+                    if let Some(rect) = rect {
+                        self.grabcut_fill(mid, rect, on);
+                    }
+                } else if let (Some(rect), Some(LayerKind::Raster(m))) = (rect, self.doc.get_mut(mid).map(|l| &mut l.kind)) {
                     m.fill_rect(rect, on);
                 }
                 self.sel = Some(mid);
@@ -6758,10 +6862,24 @@ impl App {
         let mut clear = false;
         let armed = self.wand == Some(id);
         let mut toggle = false;
+        let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
-            toggle = ui.selectable_label(armed, "자동 선택").on_hover_text("클릭한 면을 가림 · Alt+클릭: 되살리기 · Esc: 끝").clicked();
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기")] {
+                if ui.selectable_label(armed && self.wand_mode == m, label).on_hover_text(tip).clicked() {
+                    pick_mode = Some(m);
+                }
+            }
             clear = ui.button("비우기").clicked();
         });
+        if let Some(m) = pick_mode {
+            if armed && self.wand_mode == m {
+                toggle = true;
+            } else {
+                self.wand_mode = m;
+                self.wand = Some(id);
+            }
+        }
         ui.add(crate::dial::Dial::new(&mut self.s.wand_tol, 0.0..=100.0).step(1.0).integer().text("허용 오차").default(24.0));
         if toggle {
             self.wand = if armed { None } else { Some(id) };

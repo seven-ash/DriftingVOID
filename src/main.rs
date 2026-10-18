@@ -16,6 +16,7 @@ mod persp;
 mod theme;
 mod io;
 mod raster;
+mod segment;
 mod selftest;
 mod text;
 mod vector;
