@@ -305,7 +305,8 @@ impl Widget for Dial<'_> {
                 let mut dv = egui::DragValue::new(value)
                     .range(lo..=hi)
                     .speed(dt as f64 * 0.5)
-                    .fixed_decimals(decimals)
+                    .min_decimals(if integer { 0 } else { decimals })
+                    .max_decimals(if integer { 0 } else { 2 })
                     .custom_parser(crate::calc::parse);
                 if !suffix.is_empty() {
                     dv = dv.suffix(suffix.clone());
@@ -445,7 +446,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             }
             // number and label
-            let mut dv = egui::DragValue::new(value).range(lo..=hi).speed(dt as f64 * 0.5).fixed_decimals(decimals).custom_parser(crate::calc::parse);
+            let mut dv = egui::DragValue::new(value).range(lo..=hi).speed(dt as f64 * 0.5).min_decimals(if integer { 0 } else { decimals }).max_decimals(if integer { 0 } else { 2 }).custom_parser(crate::calc::parse);
             if !suffix.is_empty() {
                 dv = dv.suffix(suffix.clone());
             }

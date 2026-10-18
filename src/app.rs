@@ -6180,10 +6180,10 @@ impl App {
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     crate::dial::label_cell(ui, "위치", kmark, &mut key_hit);
-                    ui.label(egui::RichText::new("X").color(INK_3()));
+                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
                     ui.spacing_mut().interact_size.x = 56.0;
                     mv |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
-                    ui.label(egui::RichText::new("Y").color(INK_3()));
+                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("Y").color(INK_3())));
                     mv |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(1)).changed();
                 });
                 if mv {
