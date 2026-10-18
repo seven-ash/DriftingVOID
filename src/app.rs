@@ -96,6 +96,9 @@ pub struct Settings {
     pub folded: [bool; 3],
     /// Colour tolerance of the mask's automatic selection (0..100).
     pub wand_tol: f32,
+    /// Mask edge: guided-filter radius (0 = hard edge) and grow (+) / shrink (-) in px.
+    pub mask_refine: f32,
+    pub mask_grow: f32,
 }
 
 impl Default for Settings {
@@ -126,6 +129,8 @@ impl Default for Settings {
             peek_delay: 0.2,
             folded: [false; 3],
             wand_tol: 24.0,
+            mask_refine: 2.0,
+            mask_grow: 1.0,
         }
     }
 }
@@ -1924,7 +1929,7 @@ impl App {
             }
         }
         // guided filter over the region's box (plus a margin), guide = luminance
-        let r = 2;
+        let r = (self.s.mask_refine.round() as i32 + self.s.mask_grow.abs().round() as i32).max(1);
         let (bx0, by0) = ((x0 - 2 * r).max(0), (y0 - 2 * r).max(0));
         let (bx1, by1) = ((x1 + 2 * r + 1).min(pw), (y1 + 2 * r + 1).min(ph));
         let (bw, bh) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
@@ -1948,12 +1953,37 @@ impl App {
     /// so it does not spill over the boundary. `origin` is the world pixel of (0,0).
     #[allow(clippy::too_many_arguments)]
     fn mask_soft_write(&mut self, mid: LayerId, origin: (i32, i32), bw: usize, bh: usize, gi: &[f32], gp: &[f32], on: bool) -> usize {
-        let q = guided_filter(gi, gp, bw, bh, 2, 1e-3);
+        // grow or shrink the hard selection first (closes hairline gaps along edges)
+        let g = self.s.mask_grow.round() as i32;
+        let mut hard = gp.to_vec();
+        if g != 0 {
+            let grow = g > 0;
+            for _ in 0..g.abs() {
+                let src = hard.clone();
+                for y in 0..bh {
+                    for x in 0..bw {
+                        let mut v = src[y * bw + x];
+                        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                            if nx < 0 || ny < 0 || nx >= bw as i32 || ny >= bh as i32 {
+                                continue;
+                            }
+                            let n = src[ny as usize * bw + nx as usize];
+                            v = if grow { v.max(n) } else { v.min(n) };
+                        }
+                        hard[y * bw + x] = v;
+                    }
+                }
+            }
+        }
+        let rad = self.s.mask_refine.round() as usize;
+        let q = if rad == 0 { hard } else { guided_filter(gi, &hard, bw, bh, rad, 1e-3) };
+        let sharpen = rad > 0;
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return 0 };
         let mut n = 0usize;
         for y in 0..bh {
             for x in 0..bw {
-                let v = ((q[y * bw + x] - 0.5) * 2.5 + 0.5).clamp(0.0, 1.0);
+                let v = if sharpen { ((q[y * bw + x] - 0.5) * 2.5 + 0.5).clamp(0.0, 1.0) } else { q[y * bw + x] };
                 if v < 0.02 {
                     continue;
                 }
@@ -6881,6 +6911,10 @@ impl App {
             }
         }
         ui.add(crate::dial::Dial::new(&mut self.s.wand_tol, 0.0..=100.0).step(1.0).integer().text("허용 오차").default(24.0));
+        ui.add(crate::dial::Dial::new(&mut self.s.mask_refine, 0.0..=8.0).step(1.0).integer().suffix(" px").text("다듬기").default(2.0))
+            .on_hover_text("경계를 그림에 맞춰 부드럽게 · 0: 딱 떨어지는 경계");
+        ui.add(crate::dial::Dial::new(&mut self.s.mask_grow, -4.0..=4.0).step(1.0).integer().suffix(" px").text("경계 이동").default(1.0))
+            .on_hover_text("+: 가리는 영역 넓힘 (틈 메우기) · -: 좁힘");
         if toggle {
             self.wand = if armed { None } else { Some(id) };
         }
