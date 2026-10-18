@@ -377,6 +377,56 @@ pub struct Space {
     /// axis directions are told apart relative to it, so turning keeps them.
     #[serde(default)]
     pub roll: f32,
+    /// Directional light for layers with thickness (shading only, no shadows).
+    #[serde(default)]
+    pub light: Option<Light>,
+}
+
+/// A directional light: turned by `rot` (degrees, X then Y then Z) from shining
+/// along +Z; `ambient` is the brightness of faces turned away.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Light {
+    pub rot: V3,
+    pub ambient: f32,
+}
+
+impl Default for Light {
+    fn default() -> Self {
+        Self { rot: [-45.0, 30.0, 0.0], ambient: 0.35 }
+    }
+}
+
+impl Light {
+    /// Light from over the camera's upper left shoulder (fronts lit, tops brighter).
+    pub fn facing(cam: &Camera) -> Self {
+        let row = |i: usize| [cam.r[i][0], cam.r[i][1], cam.r[i][2]];
+        let (right, down, fwd) = (row(0), row(1), row(2));
+        let d = normalize(add(add(fwd, scale(down, 0.8)), scale(right, 0.6)));
+        // the X/Y angles whose rotation sends +Z closest to d (whole degrees)
+        let mut best = ([0.0, 0.0, 0.0], f64::MAX);
+        for a in -180..180 {
+            for b in -90..=90 {
+                let r = [a as f64, b as f64, 0.0];
+                let e = sub(mul_mv(&euler_xyz(r), [0.0, 0.0, 1.0]), d);
+                let e = dot(e, e);
+                if e < best.1 {
+                    best = (r, e);
+                }
+            }
+        }
+        Self { rot: best.0, ambient: 0.35 }
+    }
+
+    /// Direction the light travels, in world space.
+    pub fn dir(&self) -> V3 {
+        normalize(mul_mv(&euler_xyz(self.rot), [0.0, 0.0, 1.0]))
+    }
+
+    /// Brightness (ambient..1) of a face with outward normal `n`.
+    pub fn shade(&self, n: V3) -> f32 {
+        let l = (-dot(normalize(n), self.dir())).max(0.0) as f32;
+        self.ambient + (1.0 - self.ambient) * l
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -437,7 +487,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0 }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None }
     }
 
     /// The canvas area the space shows in.
@@ -992,6 +1042,12 @@ impl Placement {
             [lin[2][0] * k, lin[2][1] * k, lin[2][2] * k],
         ];
         (lin, add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k)))
+    }
+
+    /// The plane's unit axes in world space (content +x, content +y).
+    pub fn axes(&self) -> (V3, V3) {
+        let (m, _) = self.world_affine();
+        (normalize([m[0][0], m[1][0], m[2][0]]), normalize([m[0][1], m[1][1], m[2][1]]))
     }
 
     /// Unit normal of the plane in world space.

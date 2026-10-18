@@ -54,6 +54,18 @@ pub struct TexCache {
     videos: HashMap<u64, ((u64, u64), TextureHandle, u64)>,
     /// Masked layers rendered on the CPU: (key, texture, last frame, region).
     masked: HashMap<LayerId, (u64, TextureHandle, u64, Rect)>,
+    /// Lit extrusion sides: (content key, flattened pixmap, edge normals, light key,
+    /// texture, last frame).
+    sides: HashMap<LayerId, SideTex>,
+}
+
+struct SideTex {
+    key: u64,
+    pm: tiny_skia::Pixmap,
+    normals: Vec<[f32; 2]>,
+    lkey: u64,
+    tex: Option<TextureHandle>,
+    frame: u64,
 }
 
 impl TexCache {
@@ -70,6 +82,40 @@ impl TexCache {
         self.placed.retain(|_, v| f - v.2 < 120);
         self.videos.retain(|_, v| f - v.2 < 120);
         self.masked.retain(|_, v| f - v.2 < 120);
+        self.sides.retain(|_, v| f - v.frame < 120);
+    }
+
+    /// The sides texture of a lit extrusion (same layout as `placed`).
+    fn sides(&mut self, ctx: &Context, layer: &Layer, res: f32, u: crate::persp::V3, v: crate::persp::V3, light: &crate::persp::Light) -> Option<egui::TextureId> {
+        let key = content_key(layer) ^ (res.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let lkey = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for x in u.iter().chain(v.iter()).chain(light.rot.iter()) {
+                ((x * 1000.0).round() as i64).hash(&mut h);
+            }
+            light.ambient.to_bits().hash(&mut h);
+            h.finish()
+        };
+        let frame = self.frame;
+        let fresh = self.sides.get(&layer.id).is_none_or(|e| e.key != key);
+        if fresh {
+            let (pm, _, _) = crate::export::flatten_layer(layer, res)?;
+            let normals = crate::export::edge_normals(&pm);
+            self.sides.insert(layer.id, SideTex { key, pm, normals, lkey: lkey ^ 1, tex: None, frame });
+        }
+        let e = self.sides.get_mut(&layer.id)?;
+        e.frame = frame;
+        if e.lkey != lkey || e.tex.is_none() {
+            let lit = crate::export::shade_sides(&e.pm, &e.normals, u, v, light);
+            let ci = ColorImage::from_rgba_premultiplied([lit.width() as usize, lit.height() as usize], lit.data());
+            let opts = TextureOptions { mipmap_mode: None, ..TEX_OPTS };
+            match &mut e.tex {
+                Some(t) => t.set(ci, opts),
+                None => e.tex = Some(ctx.load_texture(format!("sides{}", layer.id), ci, opts)),
+            }
+            e.lkey = lkey;
+        }
+        e.tex.as_ref().map(|t| t.id())
     }
 
     /// A masked layer as one texture over the visible part of it (CPU path, unused).
@@ -313,7 +359,7 @@ pub const SIDE_SHADE: f32 = 0.55;
 /// through the space camera's homography; with thickness, as stacked slices along
 /// the plane normal (darker in between, far to near).
 #[allow(clippy::too_many_arguments)]
-fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::persp::Placement, cam: &crate::persp::Camera, xf: &Xf, cache: &mut TexCache, view_w: Rect) {
+fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::persp::Placement, cam: &crate::persp::Camera, xf: &Xf, cache: &mut TexCache, view_w: Rect, light: Option<crate::persp::Light>) {
     use crate::persp::apply_h;
     let h = pl.homography(cam);
     let Some(b) = layer.bounds() else { return };
@@ -333,11 +379,30 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
         Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
     };
     let slices = pl.slices(|w| cam.project(w).map(|p| xf.w2s(p)), |w| cam.to_cam(w)[2]);
+    // lit: caps by their facing, sides from a texture shaded by edge direction
+    let light = light.filter(|_| pl.thick > 0.0);
+    let lit_sides = light.and_then(|l| {
+        let (u, v) = pl.axes();
+        cache.sides(ctx, layer, res, u, v, &l)
+    });
+    let n0 = pl.normal();
     const N: usize = 12;
     for (off, is_cap) in slices {
         let h = if off == 0.0 { h } else { pl.homography_at(cam, off) };
-        let color = if is_cap { cap } else { side };
-        let mut m = Mesh::with_texture(tex);
+        let (color, slice_tex) = match (light, lit_sides) {
+            (Some(l), Some(st)) => {
+                if is_cap {
+                    let n = if off == 0.0 { crate::persp::scale(n0, -1.0) } else { n0 };
+                    let s = l.shade(n);
+                    let v = (255.0 * op * s) as u8;
+                    (Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8), tex)
+                } else {
+                    (cap, st)
+                }
+            }
+            _ => (if is_cap { cap } else { side }, tex),
+        };
+        let mut m = Mesh::with_texture(slice_tex);
         let mut ok = true;
         for j in 0..=N {
             for i in 0..=N {
@@ -502,7 +567,8 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
                     Some(sp) => painter.clip_rect().intersect(xf.rect_w2s(sp.clip())),
                     None => painter.clip_rect(),
                 };
-                draw_placed(&painter.with_clip_rect(clip), ctx, layer, pl, cam, xf, cache, view_w);
+                let light = doc.spaces.iter().find(|s| s.id == pl.space).and_then(|s| s.light);
+                draw_placed(&painter.with_clip_rect(clip), ctx, layer, pl, cam, xf, cache, view_w, light);
             }
             return;
         }

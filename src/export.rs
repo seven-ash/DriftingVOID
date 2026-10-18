@@ -27,6 +27,64 @@ pub fn output_size(region: Rect, scale: f32) -> (u32, u32) {
     )
 }
 
+/// Outward edge directions per texel in content space (unit, or zero away from
+/// edges): from the alpha, softened so the direction reaches a few texels in.
+pub fn edge_normals(pm: &Pixmap) -> Vec<[f32; 2]> {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let mut a: Vec<f32> = pm.data().chunks_exact(4).map(|p| p[3] as f32 / 255.0).collect();
+    // two separable box blurs, radius 3
+    for _ in 0..2 {
+        let mut t = vec![0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (x0, x1) = (x.saturating_sub(3), (x + 4).min(w));
+                t[y * w + x] = a[y * w + x0..y * w + x1].iter().sum::<f32>() / (x1 - x0) as f32;
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let (y0, y1) = (y.saturating_sub(3), (y + 4).min(h));
+                a[y * w + x] = (y0..y1).map(|yy| t[yy * w + x]).sum::<f32>() / (y1 - y0) as f32;
+            }
+        }
+    }
+    let at = |x: isize, y: isize| a[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
+    let mut out = vec![[0f32; 2]; w * h];
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            let gx = at(x + 1, y) - at(x - 1, y);
+            let gy = at(x, y + 1) - at(x, y - 1);
+            let m = (gx * gx + gy * gy).sqrt();
+            if m > 1e-3 {
+                out[y as usize * w + x as usize] = [-gx / m, -gy / m];
+            }
+        }
+    }
+    out
+}
+
+/// The sides of an extrusion lit by `light`: each texel darkened by how its edge
+/// (world normal from `u`/`v` and the edge direction) faces the light.
+pub fn shade_sides(pm: &Pixmap, normals: &[[f32; 2]], u: crate::persp::V3, v: crate::persp::V3, light: &crate::persp::Light) -> Pixmap {
+    let mut out = pm.clone();
+    let mid = light.ambient + (1.0 - light.ambient) * 0.5;
+    for (px, n) in out.data_mut().chunks_exact_mut(4).zip(normals) {
+        if px[3] == 0 {
+            continue;
+        }
+        let s = if n[0] == 0.0 && n[1] == 0.0 {
+            mid
+        } else {
+            let (nx, ny) = (n[0] as f64, n[1] as f64);
+            light.shade([u[0] * nx + v[0] * ny, u[1] * nx + v[1] * ny, u[2] * nx + v[2] * ny])
+        };
+        for c in &mut px[..3] {
+            *c = (*c as f32 * s).round() as u8;
+        }
+    }
+    out
+}
+
 /// The visible mask of a layer, if it has one.
 pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&crate::raster::RasterLayer> {
     doc.layers.iter().find(|m| m.mask_of == Some(id) && m.visible).and_then(|m| match &m.kind {
@@ -99,10 +157,29 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
             });
             if let Some((src, rect, res)) = flatten_layer(layer, res) {
                 let to_out = |w: crate::persp::V3| cam.project(w).map(|p| ((p - region.min) * scale).to_pos2());
+                let light = doc.spaces.iter().find(|s| s.id == pl.space).and_then(|s| s.light).filter(|_| pl.thick > 0.0);
+                let sides = light.map(|l| {
+                    let (u, v) = pl.axes();
+                    shade_sides(&src, &edge_normals(&src), u, v, &l)
+                });
+                let n0 = pl.normal();
                 for (off, cap) in pl.slices(to_out, |w| cam.to_cam(w)[2]) {
                     let hs = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
-                    let shade = if cap { 1.0 } else { crate::canvas::SIDE_SHADE };
-                    warp_onto(&mut out, &src, rect, res, &hs, layer.opacity, clip, shade);
+                    match (&light, &sides) {
+                        (Some(l), Some(sd)) => {
+                            if cap {
+                                // front face looks against the extrusion, the back along it
+                                let n = if off == 0.0 { crate::persp::scale(n0, -1.0) } else { n0 };
+                                warp_onto(&mut out, &src, rect, res, &hs, layer.opacity, clip, l.shade(n));
+                            } else {
+                                warp_onto(&mut out, sd, rect, res, &hs, layer.opacity, clip, 1.0);
+                            }
+                        }
+                        _ => {
+                            let shade = if cap { 1.0 } else { crate::canvas::SIDE_SHADE };
+                            warp_onto(&mut out, &src, rect, res, &hs, layer.opacity, clip, shade);
+                        }
+                    }
                 }
             }
             continue;

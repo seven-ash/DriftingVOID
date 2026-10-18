@@ -1094,6 +1094,11 @@ impl App {
                             }
                         }
                     }
+                    if std::env::var_os("DV_LIGHT").is_some() {
+                        let cams = crate::persp::cameras(&app.doc.spaces);
+                        let l = cams.get(&id).map(crate::persp::Light::facing).unwrap_or_default();
+                        app.doc.spaces.last_mut().unwrap().light = Some(l);
+                    }
                     crate::persp::sync_walls(&mut app.doc);
                     if mode == "select" {
                         app.tool = Tool::Select;
@@ -2191,8 +2196,7 @@ impl App {
             for x in 0..pw {
                 let i = (y * pw + x) * 4;
                 gi[y * pw + x] = (0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32) / 255.0;
-                let l = labels[(y / step).min(gh - 1) * gw + (x / step).min(gw - 1)];
-                gp[y * pw + x] = if l == FG || l == PR_FG { 1.0 } else { 0.0 };
+                gp[y * pw + x] = upsample_fg(&labels, gw, gh, step, x, y);
             }
         }
         let n = self.mask_soft_write(mid, (reg.min.x as i32, reg.min.y as i32), pw, ph, &gi, &gp, on);
@@ -2257,8 +2261,7 @@ impl App {
             for x in 0..pw {
                 let i = (y * pw + x) * 4;
                 gi[y * pw + x] = (0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32) / 255.0;
-                let l = labels[(y / step) * gw + x / step];
-                gp[y * pw + x] = if l == FG || l == PR_FG { 1.0 } else { 0.0 };
+                gp[y * pw + x] = upsample_fg(&labels, gw, gh, step, x, y);
             }
         }
         let n = self.mask_soft_write(mid, (reg.min.x as i32, reg.min.y as i32), pw, ph, &gi, &gp, on);
@@ -8305,6 +8308,22 @@ impl App {
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
         let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
         let mut ch = ui.checkbox(&mut grid, "격자").changed();
+        let mut light = sp.light;
+        let mut lon = light.is_some();
+        let mut lch = ui.checkbox(&mut lon, "조명").on_hover_text("두께 있는 객체에 방향광 음영").changed();
+        if lon {
+            let l = light.get_or_insert_with(Default::default);
+            for (k, ax) in ["X", "Y", "Z"].iter().enumerate() {
+                let mut d = l.rot[k] as f32;
+                if ui.add(crate::dial::Dial::new(&mut d, -180.0..=180.0).step(1.0).text(format!("빛 {ax} °")).default(crate::persp::Light::default().rot[k] as f32)).changed() {
+                    l.rot[k] = d as f64;
+                    lch = true;
+                }
+            }
+            lch |= ui.add(crate::dial::Dial::new(&mut l.ambient, 0.0..=1.0).text("어두운 면").default(0.35)).changed();
+        } else {
+            light = None;
+        }
         ch |= ui.add_enabled(all3, egui::Checkbox::new(&mut fpp, "주점도 추정 (세 축 모두 2개 이상)")).changed();
         let img_b = self.sel.and_then(|id| self.doc.get(id)).filter(|l| matches!(l.kind, LayerKind::Image(_))).and_then(|l| l.bounds());
         let img_follow = self.sel.and_then(|id| self.doc.get(id)).and_then(|l| match &l.kind {
@@ -8378,6 +8397,7 @@ impl App {
                 self.status = "캔버스에서 끌어 마스크 지정".into();
             }
         }
+        let facing = crate::persp::cameras(&self.doc.spaces).get(&self.doc.spaces[i].id).map(crate::persp::Light::facing);
         let s = &mut self.doc.spaces[i];
         if mask_clear {
             s.mask = None;
@@ -8386,6 +8406,16 @@ impl App {
         if ch {
             s.grid = grid;
             s.free_pp = fpp;
+        }
+        if lch {
+            let fresh = s.light.is_none() && light.is_some();
+            s.light = light;
+            if fresh {
+                if let Some(l) = facing {
+                    s.light = Some(l);
+                }
+            }
+            ch = true;
         }
         if clear && !s.lines.is_empty() {
             s.lines.clear();
@@ -9273,6 +9303,27 @@ fn sync_masks(doc: &mut Document, dragging: bool) {
             _ => {}
         }
     }
+}
+
+/// A low-res GrabCut result read back at full resolution: bilinear between cell
+/// centres (so the edge is a smooth line, not cell steps).
+fn upsample_fg(labels: &[u8], gw: usize, gh: usize, step: usize, x: usize, y: usize) -> f32 {
+    use crate::segment::{FG, PR_FG};
+    let fg = |gx: usize, gy: usize| {
+        let l = labels[gy.min(gh - 1) * gw + gx.min(gw - 1)];
+        if l == FG || l == PR_FG { 1.0 } else { 0.0 }
+    };
+    if step == 1 {
+        return fg(x, y);
+    }
+    let fx = ((x as f32 + 0.5) / step as f32 - 0.5).max(0.0);
+    let fy = ((y as f32 + 0.5) / step as f32 - 0.5).max(0.0);
+    let (x0, y0) = (fx as usize, fy as usize);
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let top = fg(x0, y0) * (1.0 - tx) + fg(x0 + 1, y0) * tx;
+    let bot = fg(x0, y0 + 1) * (1.0 - tx) + fg(x0 + 1, y0 + 1) * tx;
+    // back to a crisp 0/1 along the smooth iso-line; the guided filter softens it
+    if top * (1.0 - ty) + bot * ty >= 0.5 { 1.0 } else { 0.0 }
 }
 
 /// Box mean with radius `r` (clamped at the borders), via an integral image.
