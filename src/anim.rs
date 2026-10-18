@@ -64,6 +64,44 @@ pub mod ch {
     pub const ALL: u16 = 511;
 }
 
+/// The values that differ between two states (for auto-key).
+pub fn diff_ch(a: &Key, b: &Key) -> u16 {
+    let ne = |x: f32, y: f32| (x - y).abs() > 1e-4;
+    let mut c = 0;
+    if ne(a.center[0], b.center[0]) || ne(a.center[1], b.center[1]) {
+        c |= ch::POS;
+    }
+    if ne(a.ext[0], b.ext[0]) || ne(a.ext[1], b.ext[1]) {
+        c |= ch::SIZE;
+    }
+    if ne(a.rot, b.rot) {
+        c |= ch::ROT;
+    }
+    if ne(a.opacity, b.opacity) {
+        c |= ch::OPA;
+    }
+    if a.follow != b.follow {
+        c |= ch::FOLLOW;
+    }
+    if let (Some(p), Some(q)) = (a.place, b.place) {
+        if p.pos != q.pos {
+            c |= ch::P_POS;
+        }
+        if p.rot != q.rot {
+            c |= ch::P_ROT;
+        }
+        if p.scale != q.scale {
+            c |= ch::P_SCALE;
+        }
+        if p.thick != q.thick {
+            c |= ch::P_THICK;
+        }
+    } else if a.place.is_some() != b.place.is_some() {
+        c |= ch::P_POS | ch::P_ROT | ch::P_SCALE | ch::P_THICK;
+    }
+    c
+}
+
 fn all_ch() -> u16 {
     ch::ALL
 }

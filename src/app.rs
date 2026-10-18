@@ -1264,16 +1264,27 @@ impl App {
     fn commit_if_idle(&mut self, typing: bool) {
         if self.changed && self.drag.is_none() && !typing && self.doc.timeline.on && self.doc.timeline.autokey && self.tl_play.is_none() {
             let t = self.doc.timeline.time;
+            // only the values that changed since the last commit get keyed
             if self.tool == Tool::Frame {
-                if let Some(c) = self.cam_sel.and_then(|id| self.doc.cameras.iter_mut().find(|c| c.id == id)) {
-                    let k = c.key(t);
-                    c.anim.set_key(k);
+                if let Some(id) = self.cam_sel {
+                    let prev = self.committed.cameras.iter().find(|c| c.id == id).map(|c| c.key(t));
+                    if let Some(c) = self.doc.cameras.iter_mut().find(|c| c.id == id) {
+                        let mut k = c.key(t);
+                        k.ch = prev.map_or(crate::anim::ch::ALL, |p| crate::anim::diff_ch(&p, &k));
+                        if k.ch != 0 {
+                            c.anim.set_key(k);
+                        }
+                    }
                 }
             }
             for id in self.selected_ids() {
+                let prev = self.committed.get(id).map(|l| crate::anim::key_of(l, t));
                 if let Some(l) = self.doc.get_mut(id) {
-                    let key = crate::anim::key_of(l, t);
-                    l.anim.get_or_insert_with(Default::default).set_key(key);
+                    let mut key = crate::anim::key_of(l, t);
+                    key.ch = prev.map_or(crate::anim::ch::ALL, |p| crate::anim::diff_ch(&p, &key));
+                    if key.ch != 0 {
+                        l.anim.get_or_insert_with(Default::default).set_key(key);
+                    }
                 }
             }
         }
