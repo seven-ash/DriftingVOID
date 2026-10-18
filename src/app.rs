@@ -6181,9 +6181,10 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     crate::dial::label_cell(ui, "위치", kmark, &mut key_hit);
                     ui.label(egui::RichText::new("X").color(INK_3()));
-                    mv |= ui.add_sized([56.0, 20.0], crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
+                    ui.spacing_mut().interact_size.x = 56.0;
+                    mv |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
                     ui.label(egui::RichText::new("Y").color(INK_3()));
-                    mv |= ui.add_sized([56.0, 20.0], crate::calc::drag(&mut y).speed(1.0).max_decimals(1)).changed();
+                    mv |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(1)).changed();
                 });
                 if mv {
                     l.translate(vec2(x - c0[0], y - c0[1]));
@@ -7010,9 +7011,6 @@ impl App {
 
     /// A section title that folds its section; true while open.
     fn fold_section(ui: &mut egui::Ui, title: &str, folded: &mut bool) -> bool {
-        if !*folded {
-            ui.add_space(SPACE_SM);
-        }
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
         let col = if resp.hovered() { INK_2() } else { INK_3() };
         let c = pos2(r.left() + 4.0, r.center().y);
@@ -7066,7 +7064,8 @@ impl App {
             .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
             .show(ctx, |ui| {
                 let all_folded = self.s.folded[0] && self.s.folded[1];
-                let m = if all_folded { egui::Margin::symmetric(pad as i8, (pad * 0.5) as i8) } else { egui::Margin::same(pad as i8) };
+                // the top stays at the folded spacing, so the title never moves
+                let m = egui::Margin { top: (pad * 0.5) as i8, bottom: if all_folded { (pad * 0.5) as i8 } else { pad as i8 }, ..egui::Margin::same(pad as i8) };
                 theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
                     ui.set_width(main_w);
                     // floating areas size from the previous frame: ask for last frame's content height
@@ -7090,7 +7089,7 @@ impl App {
                 .order(egui::Order::Middle)
                 .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
                 .show(ctx, |ui| {
-                    let m = if self.s.folded[2] { egui::Margin::symmetric(pad as i8, (pad * 0.5) as i8) } else { egui::Margin::same(pad as i8) };
+                    let m = egui::Margin { top: (pad * 0.5) as i8, bottom: if self.s.folded[2] { (pad * 0.5) as i8 } else { pad as i8 }, ..egui::Margin::same(pad as i8) };
                     theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
                         ui.set_width(side_w);
                         let want = self.col_h[1].min(max_h);

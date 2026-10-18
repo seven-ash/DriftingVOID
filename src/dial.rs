@@ -203,7 +203,8 @@ impl Widget for Dial<'_> {
 
         let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
         let width = ui.available_width();
-        let row_h = 24.0;
+        // the row is as tall as a number box, so ring, label and box share one centre
+        let row_h = ui.spacing().interact_size.y.max(24.0);
         let mut out = ui
             .allocate_ui_with_layout(vec2(width, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // a fixed-height row, so every item centres on the same line
@@ -309,7 +310,8 @@ impl Widget for Dial<'_> {
                 if !suffix.is_empty() {
                     dv = dv.suffix(suffix.clone());
                 }
-                let vr = ui.add_sized(vec2(value_w, row_h - 4.0), dv);
+                ui.spacing_mut().interact_size.x = value_w;
+                let vr = ui.add(dv);
 
                 // ---- reset pin
                 if let Some(d) = default {
