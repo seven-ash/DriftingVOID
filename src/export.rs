@@ -204,6 +204,48 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     Ok(out)
 }
 
+/// `render_rotated` drawn `k` times larger and box-filtered back down (k = 1..4,
+/// lowered when the large image would not fit). Smooths edges and the slice
+/// lines of thick 3D layers.
+pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8) -> Result<Pixmap, String> {
+    let mut k = k.clamp(1, 4) as u32;
+    while k > 1 {
+        let (w, h) = ((size.x * scale * k as f32).ceil() as u64, (size.y * scale * k as f32).ceil() as u64);
+        if w <= MAX_SIDE as u64 && h <= MAX_SIDE as u64 && w * h <= MAX_PIXELS / 2 {
+            break;
+        }
+        k -= 1;
+    }
+    let big = render_rotated(doc, center, size, rot, scale * k as f32, bg)?;
+    if k == 1 {
+        return Ok(big);
+    }
+    let (w, h) = (big.width() / k, big.height() / k);
+    let mut out = Pixmap::new(w.max(1), h.max(1)).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let (bw, src) = (big.width() as usize, big.data());
+    let n = (k * k) as u32;
+    let dst = out.data_mut();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let mut acc = [0u32; 4];
+            for dy in 0..k as usize {
+                let row = (y * k as usize + dy) * bw;
+                for dx in 0..k as usize {
+                    let i = (row + x * k as usize + dx) * 4;
+                    for c in 0..4 {
+                        acc[c] += src[i + c] as u32;
+                    }
+                }
+            }
+            let o = (y * w as usize + x) * 4;
+            for c in 0..4 {
+                dst[o + c] = ((acc[c] + n / 2) / n) as u8;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// A rotated region (centre, size in world pixels, rotation clockwise) at `scale`:
 /// its bounding box is rendered, then turned back into an upright image.
 pub fn render_rotated(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>) -> Result<Pixmap, String> {
@@ -590,5 +632,23 @@ mod tests {
         let bottom = pm.pixel(50, 50).unwrap().demultiply();
         assert!(top.red() > 200 && top.green() < 60, "top {top:?}");
         assert!(bottom.green() > 200, "bottom {bottom:?}");
+    }
+}
+
+#[cfg(test)]
+mod ss_tests {
+    use super::*;
+
+    #[test]
+    fn supersampling_keeps_the_size() {
+        let mut doc = Document::default();
+        let s = crate::doc::ShapeLayer { kind: crate::doc::ShapeKind::Rect, a: egui::pos2(10.0, 10.0), b: egui::pos2(90.0, 60.0), color: Color32::RED, width: 3.0, fill: Some(Color32::BLUE), rotation: 0.3 };
+        doc.insert("r".into(), LayerKind::Shape(s), None);
+        let one = render_ss(&doc, egui::pos2(50.0, 40.0), egui::vec2(100.0, 80.0), 0.0, 1.0, Some(Color32::WHITE), 1).unwrap();
+        let three = render_ss(&doc, egui::pos2(50.0, 40.0), egui::vec2(100.0, 80.0), 0.0, 1.0, Some(Color32::WHITE), 3).unwrap();
+        assert_eq!((one.width(), one.height()), (three.width(), three.height()));
+        // the fill shows in both
+        let px = |p: &Pixmap| p.pixel(50, 40).unwrap();
+        assert!(px(&three).blue() > 200 && px(&one).blue() > 200);
     }
 }

@@ -708,6 +708,13 @@ struct ExportDlg {
     bg: ExportBg,
     bg_color: Color32,
     jpeg_quality: u8,
+    /// Supersampling: render this many times larger, then scale down.
+    #[serde(default = "one_u8")]
+    ss: u8,
+}
+
+fn one_u8() -> u8 {
+    1
 }
 
 /// Video export settings (one window for every region source, like image export).
@@ -731,6 +738,7 @@ struct VideoExportDlg {
     bg: ExportBg,
     bg_color: Color32,
     audio: bool,
+    ss: u8,
 }
 
 pub struct App {
@@ -3216,6 +3224,7 @@ impl App {
             bg: ExportBg::White,
             bg_color: Color32::BLACK,
             audio: true,
+            ss: 1,
         });
         // a camera if there is one, else the export frame
         let region_ok = match d.region {
@@ -3386,6 +3395,15 @@ impl App {
                         ui.checkbox(&mut d.gpu, "GPU 인코딩 (NVIDIA NVENC)").on_hover_text("NVIDIA 그래픽카드 필요");
                     }
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label("슈퍼샘플링").on_hover_text("크게 그린 뒤 줄여서 저장 · 경계와 두께 줄무늬가 부드러워짐");
+                        for k in 1..=4u8 {
+                            if ui.selectable_label(d.ss == k, format!("{k}×")).clicked() {
+                                d.ss = k;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
                         ui.label("배경");
                         if d.codec.alpha() {
                             ui.radio_value(&mut d.bg, ExportBg::Transparent, "투명");
@@ -3461,6 +3479,7 @@ impl App {
             gpu: d.gpu && d.codec.has_gpu(),
             bg,
             audio,
+            ss: d.ss,
             out,
         };
         self.vjob = Some(crate::vexport::start(job));
@@ -6257,6 +6276,7 @@ impl App {
                 bg: ExportBg::White,
                 bg_color: Color32::from_rgb(250, 247, 240),
                 jpeg_quality: 92,
+                ss: 1,
             });
             if self.doc.export_frame.is_some() && self.last_export.is_none() {
                 d.region = ExportRegion::Frame;
@@ -6384,6 +6404,15 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label("슈퍼샘플링").on_hover_text("크게 그린 뒤 줄여서 저장 · 경계와 두께 줄무늬가 부드러워짐");
+                for k in 1..=4u8 {
+                    if ui.selectable_label(d.ss == k, format!("{k}×")).clicked() {
+                        d.ss = k;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
                 ui.label("JPG 품질");
                 crate::dial::dial_u8(ui, &mut d.jpeg_quality, 50..=100, "");
             });
@@ -6428,7 +6457,7 @@ impl App {
                         ExportRegion::Camera(id) => self.doc.cameras.iter().find(|c| c.id == id).map_or(0.0, |c| c.rot),
                         _ => 0.0,
                     };
-                    self.status = match crate::export::render_rotated(&self.export_doc(), r.center(), r.size(), rot, d.scale, bg)
+                    self.status = match crate::export::render_ss(&self.export_doc(), r.center(), r.size(), rot, d.scale, bg, d.ss)
                         .and_then(|pm| crate::export::save(&pm, &path, d.jpeg_quality).map(|_| (pm.width(), pm.height())))
                     {
                         Ok((w, h)) => format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")),

@@ -128,6 +128,8 @@ pub struct Job {
     /// None: transparent (alpha codecs) or black.
     pub bg: Option<Color32>,
     pub audio: Vec<crate::audio::Voice>,
+    /// Supersampling factor (1..4).
+    pub ss: u8,
     /// A file, or for PNG sequences the first file's path (`name_00001.png` …).
     pub out: PathBuf,
 }
@@ -329,7 +331,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let scale = w as f32 / r.width();
         let size = vec2(w as f32 / scale, h as f32 / scale);
         let bg = if job.codec.alpha() { job.bg } else { Some(job.bg.unwrap_or(Color32::BLACK)) };
-        let pm = match crate::export::render_rotated(&d, r.center(), size, rot, scale, bg) {
+        let pm = match crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss) {
             Ok(pm) => pm,
             Err(e) => return fail(&mut child, e),
         };
@@ -419,6 +421,7 @@ mod tests {
             gpu: false,
             bg: Some(Color32::WHITE),
             audio: vec![voice],
+            ss: 1,
             out: out.clone(),
         };
         let p = start(job);
@@ -466,6 +469,7 @@ mod tests {
             gpu: false,
             bg: None,
             audio: Vec::new(),
+            ss: 1,
             out: dir.join("out.png"),
         };
         let p = start(job);
@@ -510,7 +514,7 @@ mod tests {
         let dir = std::env::temp_dir().join("dv_follow");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let job = Job { doc, region: Region::Camera(7), size: (100, 100), fps: 10.0, t0: 0.0, t1: 1.0, codec: Codec::Png, quality: 0, mbps: None, gpu: false, bg: Some(Color32::WHITE), audio: Vec::new(), out: dir.join("f.png") };
+        let job = Job { ss: 1, doc, region: Region::Camera(7), size: (100, 100), fps: 10.0, t0: 0.0, t1: 1.0, codec: Codec::Png, quality: 0, mbps: None, gpu: false, bg: Some(Color32::WHITE), audio: Vec::new(), out: dir.join("f.png") };
         let p = start(job);
         while p.result.lock().unwrap().is_none() {
             std::thread::sleep(std::time::Duration::from_millis(10));
