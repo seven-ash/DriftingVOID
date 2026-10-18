@@ -73,6 +73,10 @@ struct FileLayer {
     place: Option<crate::persp::Placement>,
     #[serde(default)]
     anim: Option<crate::anim::Anim>,
+    #[serde(default)]
+    mask_of: Option<LayerId>,
+    #[serde(default)]
+    mask_anchor: Option<(LayerId, [f32; 2])>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -242,7 +246,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
                 }
             };
-            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone() });
+            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor });
         }
         let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: doc.audio.clone() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
@@ -328,7 +332,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
             }
         };
         doc.next_id = doc.next_id.max(fl.id);
-        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim });
+        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor });
     }
     Ok(doc)
 }

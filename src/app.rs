@@ -818,6 +818,8 @@ pub struct App {
     tl_key: Option<(TlRow, f64)>,
     /// Keys picked on the timeline (click, Shift-drag box).
     tl_sel: Vec<(TlRow, f64)>,
+    /// A rect tool drag that fills (or with Alt clears) this mask.
+    mask_rect: Option<(LayerId, bool)>,
     tl_drag: Option<TlDrag>,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
@@ -935,6 +937,7 @@ impl App {
             tl_play: None,
             tl_key: None,
             tl_sel: Vec::new(),
+            mask_rect: None,
             tl_drag: None,
             cam_sel: None,
             audio_out: None,
@@ -1144,6 +1147,19 @@ impl App {
             app.doc.cameras.push(cam);
             app.cam_sel = Some(cid);
             app.set_time(1.0);
+        }
+        if std::env::var_os("DV_MASK_DEMO").is_some() {
+            // the selected layer masked to its left half, the mask selected (screenshots)
+            if let Some(id) = app.sel {
+                let c = app.doc.get(id).map(|l| crate::anim::key_of(l, 0.0).center).unwrap_or([0.0, 0.0]);
+                app.mask_button(id);
+                if let Some(LayerKind::Raster(r)) = app.sel.and_then(|m| app.doc.get_mut(m)).map(|l| &mut l.kind) {
+                    r.fill_rect(Rect::from_min_max(pos2(c[0] - 4000.0, c[1] - 4000.0), pos2(c[0], c[1] + 4000.0)), true);
+                }
+                if std::env::var_os("DV_MASK_OWNER").is_some() {
+                    app.select_only(Some(id));
+                }
+            }
         }
         if std::env::var_os("DV_SHOW_UNSAVED").is_some() {
             app.pending = Some(Pending::New);
@@ -1407,7 +1423,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None });
         self.sel = Some(id);
         self.mark();
         id
@@ -1813,6 +1829,39 @@ impl App {
             }
         }
         self.status = format!("키 {}개 · {}", ids.len(), crate::video::timecode(t));
+        self.mark();
+    }
+
+    /// The mask button of a layer row: selects its mask, or makes one (anchored to
+    /// the layer) and picks the brush.
+    fn mask_button(&mut self, owner: LayerId) {
+        if let Some(mid) = self.doc.layers.iter().find(|m| m.mask_of == Some(owner)).map(|m| m.id) {
+            self.select_only(Some(mid));
+            return;
+        }
+        let Some(i) = self.doc.index_of(owner) else { return };
+        let name = format!("{} 마스크", self.doc.layers[i].display_name());
+        let c = crate::anim::key_of(&self.doc.layers[i], 0.0).center;
+        let id = self.doc.new_id();
+        let layer = Layer {
+            id,
+            name,
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            kind: LayerKind::Raster(Default::default()),
+            place: None,
+            anim: None,
+            mask_of: Some(owner),
+            mask_anchor: Some((owner, c)),
+        };
+        // just under its layer, so the list shows it beneath
+        self.doc.layers.insert(i, layer);
+        self.select_only(Some(id));
+        if !matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Pen | Tool::Rect) {
+            self.set_tool(Tool::Brush);
+        }
+        self.status = "마스크 · 브러시/펜: 칠하기 · 지우개: 지우기 · 사각형: 채우기 (Alt: 비우기)".into();
         self.mark();
     }
 
@@ -3239,6 +3288,7 @@ impl App {
         let usable = |l: &Layer| {
             l.visible
                 && !l.locked
+                && l.mask_of.is_none()
                 && l.place.is_none()
                 && match l.kind {
                     LayerKind::Vector(_) => vector,
@@ -3247,7 +3297,7 @@ impl App {
                 }
         };
         if let Some(l) = self.sel_layer() {
-            if usable(l) {
+            if usable(l) || (l.mask_of.is_some() && !vector && !l.locked) {
                 return l.id;
             }
         }
@@ -3575,7 +3625,10 @@ impl App {
             }
             return;
         }
-        match self.tool {
+        // on a mask the pen paints coverage like the brush
+        let on_mask = self.sel_layer().is_some_and(|l| l.mask_of.is_some());
+        let tool_now = if on_mask && self.tool == Tool::Pen { Tool::Brush } else { self.tool };
+        match tool_now {
             Tool::Select => {
                 for (h, hp) in self.group_handles() {
                     if hp.distance(sp) <= 9.0 {
@@ -3658,8 +3711,9 @@ impl App {
                         } else {
                             (self.s.brush_size, self.s.brush_pressure_size)
                         };
+                        let is_mask = layer.mask_of.is_some();
                         let p = BrushParams {
-                            color: self.s.color,
+                            color: if is_mask { Color32::WHITE } else { self.s.color },
                             radius: size * 0.5,
                             opacity: if erase { 1.0 } else { self.s.brush_opacity },
                             hardness: if erase { 0.9 } else { self.s.brush_hardness },
@@ -3748,6 +3802,12 @@ impl App {
                 }
             }
             Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => {
+                if self.tool == Tool::Rect {
+                    if let Some(mid) = self.sel_layer().filter(|l| l.mask_of.is_some()).map(|l| l.id) {
+                        let clear = mods.alt;
+                        self.mask_rect = Some((mid, !clear));
+                    }
+                }
                 let kind = match self.tool {
                     Tool::Line => ShapeKind::Line,
                     Tool::Arrow => ShapeKind::Arrow,
@@ -5074,6 +5134,22 @@ impl App {
                     self.modified = true;
                 }
             }
+            Drag::NewShape { id, .. } if self.mask_rect.is_some() => {
+                let (mid, on) = self.mask_rect.take().unwrap();
+                let rect = match self.doc.get(id).map(|l| &l.kind) {
+                    Some(LayerKind::Shape(s)) => Some(Rect::from_two_pos(s.a, s.b)),
+                    _ => None,
+                };
+                if let Some(i) = self.doc.index_of(id) {
+                    self.doc.layers.remove(i);
+                }
+                if let (Some(rect), Some(LayerKind::Raster(m))) = (rect, self.doc.get_mut(mid).map(|l| &mut l.kind)) {
+                    m.fill_rect(rect, on);
+                }
+                self.sel = Some(mid);
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::NewShape { id, .. } => {
                 let tiny = matches!(self.doc.get(id).map(|l| &l.kind), Some(LayerKind::Shape(s)) if (s.b - s.a).length() * self.zoom < 3.0);
                 if tiny {
@@ -6144,6 +6220,10 @@ impl App {
         if !self.extra_sel.is_empty() {
             ui.label(egui::RichText::new(format!("{}개 선택 · 아래는 첫 번째 항목", self.extra_sel.len() + 1)).color(INK_3()));
         }
+        if let Some(owner) = self.doc.get(id).and_then(|l| l.mask_of) {
+            self.mask_props(ui, id, owner);
+            return;
+        }
         let Some(idx) = self.doc.index_of(id) else { return };
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
@@ -6526,6 +6606,48 @@ impl App {
         }
     }
 
+    fn mask_props(&mut self, ui: &mut egui::Ui, id: LayerId, owner: LayerId) {
+        let names: Vec<(LayerId, String)> = self.doc.layers.iter().rev().filter(|l| l.mask_of.is_none()).map(|l| (l.id, l.display_name())).collect();
+        let owner_name = names.iter().find(|n| n.0 == owner).map_or(String::new(), |n| n.1.clone());
+        ui.label(egui::RichText::new(format!("마스크 · {owner_name}")).color(INK_2()));
+        ui.small("브러시·펜: 칠하기 · 지우개: 지우기 · 사각형: 채우기 (Alt: 비우기)");
+        let anchor = self.doc.get(id).and_then(|l| l.mask_anchor).map(|a| a.0);
+        let mut pick: Option<Option<LayerId>> = None;
+        ui.horizontal(|ui| {
+            ui.label("따라가기");
+            let shown = anchor.and_then(|a| names.iter().find(|n| n.0 == a)).map_or("없음".to_string(), |n| n.1.clone());
+            egui::ComboBox::from_id_salt(("mask_anchor", id)).truncate().selected_text(shown).width(ui.available_width() - 24.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| {
+                theme::glass_popup(ui, |ui| {
+                    if ui.selectable_label(anchor.is_none(), "없음").clicked() {
+                        pick = Some(None);
+                    }
+                    for (lid, n) in &names {
+                        if ui.selectable_label(anchor == Some(*lid), n.as_str()).clicked() {
+                            pick = Some(Some(*lid));
+                        }
+                    }
+                })
+            });
+        });
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            clear = ui.button("비우기").clicked();
+        });
+        if let Some(a) = pick {
+            let c = a.and_then(|a| self.doc.get(a)).map(|l| crate::anim::key_of(l, 0.0).center);
+            if let Some(l) = self.doc.get_mut(id) {
+                l.mask_anchor = a.zip(c);
+            }
+            self.mark();
+        }
+        if clear {
+            if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                r.tiles.clear();
+            }
+            self.mark();
+        }
+    }
+
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let sel = self.sel.is_some();
@@ -6598,6 +6720,8 @@ impl App {
             }
         }
         let mut rows: Vec<(usize, Rect)> = Vec::with_capacity(n);
+        let masked_ids: Vec<LayerId> = self.doc.layers.iter().filter_map(|m| m.mask_of).collect();
+        let mut mask_click: Option<LayerId> = None;
         let renaming = self.renaming;
         let mut rename_done = false;
         for di in 0..n {
@@ -6644,13 +6768,17 @@ impl App {
                 Some((_, Some(_))) => 28.0,
                 Some(_) => 14.0,
                 None => 0.0,
-            };
+            } + if l.mask_of.is_some() { 18.0 } else { 0.0 };
             let r = Rect::from_min_max(r.min + vec2(indent, 0.0), r.max);
             let eye_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(26.0, 26.0));
             let lock_r = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(26.0, 26.0));
             let thumb_r = Rect::from_center_size(pos2(r.left() + 44.0, r.center().y), vec2(24.0, 24.0));
             let eye = ui.interact(eye_r, ui.id().with(("eye", l.id)), Sense::click());
             let lock = ui.interact(lock_r, ui.id().with(("lock", l.id)), Sense::click());
+            // mask button (not on masks themselves)
+            let mask_r = Rect::from_center_size(pos2(r.right() - 42.0, r.center().y), vec2(24.0, 26.0));
+            let has_mask = l.mask_of.is_none() && masked_ids.contains(&l.id);
+            let mask_b = (l.mask_of.is_none()).then(|| ui.interact(mask_r, ui.id().with(("mask", l.id)), Sense::click()));
             let p = ui.painter().clone();
             let dragging_this = self.layer_drag == Some(l.id);
             if selected || dragging_this {
@@ -6689,7 +6817,25 @@ impl App {
                     theme::tool_icon(&p, glyph, thumb_r.shrink(5.0), INK_3().gamma_multiply(dim));
                 }
             }
-            let name_r = Rect::from_min_max(pos2(r.left() + 62.0, r.top() + 3.0), pos2(r.right() - 32.0, r.bottom() - 3.0));
+            if let Some(mb) = &mask_b {
+                if has_mask || mb.hovered() || resp.hovered() {
+                    let col = if has_mask { INK_2() } else if mb.hovered() { INK() } else { FILL_3() };
+                    let c = mask_r.center();
+                    p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, col), StrokeKind::Inside);
+                    p.circle_filled(c, 4.0, col);
+                }
+                if mb.clicked() {
+                    mask_click = Some(l.id);
+                }
+                mb.clone().on_hover_text(if has_mask { "마스크 선택" } else { "마스크 추가" });
+            }
+            if l.mask_of.is_some() {
+                let c = thumb_r.center();
+                p.rect_filled(thumb_r, 5.0, FILL_2());
+                p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, INK_2()), StrokeKind::Inside);
+                p.circle_filled(c, 4.0, INK_2());
+            }
+            let name_r = Rect::from_min_max(pos2(r.left() + 62.0, r.top() + 3.0), pos2(r.right() - 58.0, r.bottom() - 3.0));
             if renaming == Some(l.id) {
                 let te = ui.put(name_r, egui::TextEdit::singleline(&mut self.rename_buf).desired_width(name_r.width()));
                 if self.rename_focus {
@@ -6732,6 +6878,10 @@ impl App {
         }
         if rename_done {
             self.renaming = None;
+        }
+        if let Some(owner) = mask_click {
+            self.mask_button(owner);
+            return;
         }
 
         // drag to reorder: insertion line between rows, drop on release
@@ -7417,6 +7567,20 @@ impl App {
         // constraints again after this frame's input, so a following camera never trails
         crate::anim::apply_constraints(&mut self.doc);
         canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None);
+        // the mask being edited shows as a red veil
+        if let Some(l) = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_some() && l.visible) {
+            if let LayerKind::Raster(r) = &l.kind {
+                let view_w = Rect::from_min_max(xf.s2w(painter.clip_rect().min), xf.s2w(painter.clip_rect().max));
+                for (&key, t) in &r.tiles {
+                    let tr = Rect::from_min_size(pos2((key.0 * crate::raster::TILE) as f32, (key.1 * crate::raster::TILE) as f32), vec2(crate::raster::TILE as f32, crate::raster::TILE as f32)).translate(r.offset);
+                    if !tr.intersects(view_w) {
+                        continue;
+                    }
+                    let tex = self.tex.tile(&ctx, l.id, key, t);
+                    painter.image(tex, xf.rect_w2s(tr), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::from_rgba_unmultiplied(255, 60, 60, 110));
+                }
+            }
+        }
 
         // in-progress vector stroke
         if let Some(Drag::Vector { id, pts, color, .. }) = &self.drag {
@@ -8546,6 +8710,29 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
 
 /// Keyframe mark by easing: a diamond (linear), a bow tie (smooth in/out, like an
 /// hourglass on its side) or a square (hold).
+/// Masks move with their anchor layer (translation of its centre, whole pixels;
+/// the remainder carries over).
+fn sync_masks(doc: &mut Document) {
+    let centres: Vec<(LayerId, Pos2)> = doc
+        .layers
+        .iter()
+        .filter(|l| l.mask_of.is_none())
+        .map(|l| (l.id, crate::anim::key_of(l, 0.0).center))
+        .map(|(id, c)| (id, pos2(c[0], c[1])))
+        .collect();
+    for l in &mut doc.layers {
+        let Some((aid, last)) = l.mask_anchor else { continue };
+        let Some(&(_, c)) = centres.iter().find(|x| x.0 == aid) else { continue };
+        let d = vec2((c.x - last[0]).round(), (c.y - last[1]).round());
+        if d != Vec2::ZERO {
+            if let LayerKind::Raster(r) = &mut l.kind {
+                r.offset += d;
+            }
+            l.mask_anchor = Some((aid, [last[0] + d.x, last[1] + d.y]));
+        }
+    }
+}
+
 /// Key state of an animation at `t` (a key within `tol` counts as here).
 fn key_mark(a: Option<&crate::anim::Anim>, t: f64, tol: f64) -> crate::dial::KeyMark {
     use crate::dial::KeyMark;
@@ -8801,6 +8988,7 @@ impl eframe::App for App {
         self.handle_shortcuts(&ctx);
         crate::persp::follow_photos(&mut self.doc);
         crate::persp::sync_walls(&mut self.doc);
+        sync_masks(&mut self.doc);
         crate::anim::apply_constraints(&mut self.doc);
         self.tick_audio();
         self.tick_timeline(&ctx);

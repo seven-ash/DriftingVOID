@@ -113,6 +113,33 @@ pub fn tile_of(x: i32, y: i32) -> ((i32, i32), usize) {
 }
 
 impl RasterLayer {
+    /// Sets (white, opaque) or clears every pixel of a world-space rect.
+    pub fn fill_rect(&mut self, r: Rect, on: bool) {
+        let x0 = (r.min.x - self.offset.x).floor() as i32;
+        let y0 = (r.min.y - self.offset.y).floor() as i32;
+        let x1 = (r.max.x - self.offset.x).ceil() as i32;
+        let y1 = (r.max.y - self.offset.y).ceil() as i32;
+        let v: [u8; 4] = if on { [255; 4] } else { [0; 4] };
+        for ty in y0.div_euclid(TILE)..=(y1 - 1).div_euclid(TILE) {
+            for tx in x0.div_euclid(TILE)..=(x1 - 1).div_euclid(TILE) {
+                let key = (tx, ty);
+                if !on && !self.tiles.contains_key(&key) {
+                    continue;
+                }
+                let t = self.tiles.entry(key).or_insert_with(|| Arc::new(Tile::empty()));
+                let t = Arc::make_mut(t);
+                t.rev = next_rev();
+                let (bx, by) = (tx * TILE, ty * TILE);
+                for y in y0.max(by)..y1.min(by + TILE) {
+                    for x in x0.max(bx)..x1.min(bx + TILE) {
+                        let i = (((y - by) * TILE + (x - bx)) * 4) as usize;
+                        t.px[i..i + 4].copy_from_slice(&v);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
         let (k, i) = tile_of(x, y);
         match self.tiles.get(&k) {

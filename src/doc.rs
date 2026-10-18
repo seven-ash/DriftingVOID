@@ -338,6 +338,11 @@ pub struct Layer {
     pub place: Option<crate::persp::Placement>,
     /// Keyframes and time span on the timeline.
     pub anim: Option<crate::anim::Anim>,
+    /// This (raster) layer is the mask of that layer: its alpha is the coverage,
+    /// in 2D canvas space. It is not drawn itself.
+    pub mask_of: Option<LayerId>,
+    /// A mask moves with this layer: (layer, its centre when the mask was last moved).
+    pub mask_anchor: Option<(LayerId, [f32; 2])>,
 }
 
 impl Layer {
@@ -480,7 +485,7 @@ impl Document {
     /// Inserts above `above` (or at the top) and returns the new id.
     pub fn insert(&mut self, name: String, kind: LayerKind, above: Option<LayerId>) -> LayerId {
         let id = self.new_id();
-        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None };
+        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None };
         let idx = above.and_then(|a| self.index_of(a)).map(|i| i + 1).unwrap_or(self.layers.len());
         self.layers.insert(idx, layer);
         id
@@ -521,7 +526,7 @@ impl Document {
     pub fn content_bounds(&self) -> Option<Rect> {
         let cams = crate::persp::cameras(&self.spaces);
         let mut acc: Option<Rect> = None;
-        for l in self.layers.iter().filter(|l| l.visible) {
+        for l in self.layers.iter().filter(|l| l.visible && l.mask_of.is_none()) {
             // layers in a space only show inside its mask
             let clip = l.place.as_ref().and_then(|pl| self.spaces.iter().find(|s| s.id == pl.space)).map(|s| s.clip());
             if let Some(b) = l.shown_bounds(&cams).map(|b| clip.map_or(b, |c| b.intersect(c))).filter(|b| b.is_positive()) {

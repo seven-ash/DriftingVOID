@@ -52,6 +52,8 @@ pub struct TexCache {
     placed: HashMap<LayerId, (u64, TextureHandle, u64, Rect, Vec2)>,
     /// Video layers: (frame source id + adjust key, texture, last frame), by slot.
     videos: HashMap<u64, ((u64, u64), TextureHandle, u64)>,
+    /// Masked layers rendered on the CPU: (key, texture, last frame, region).
+    masked: HashMap<LayerId, (u64, TextureHandle, u64, Rect)>,
 }
 
 impl TexCache {
@@ -67,6 +69,61 @@ impl TexCache {
         self.texts.retain(|_, v| f - v.2 < 120);
         self.placed.retain(|_, v| f - v.2 < 120);
         self.videos.retain(|_, v| f - v.2 < 120);
+        self.masked.retain(|_, v| f - v.2 < 120);
+    }
+
+    /// A masked layer as one texture over the visible part of it.
+    fn masked(&mut self, ctx: &Context, doc: &Document, layer: &Layer, m: &crate::raster::RasterLayer, view_w: Rect, zoom: f32) -> Option<(egui::TextureId, Rect)> {
+        let cams = crate::persp::cameras(&doc.spaces);
+        let b = layer.shown_bounds(&cams)?;
+        // power-of-two scale and a coarse grid, so small pans and zooms reuse it
+        let mut scale = 2f32.powf((zoom * ctx.pixels_per_point()).max(1.0 / 16.0).log2().ceil()).min(4.0);
+        let grid = 128.0 / scale;
+        let r = b.intersect(view_w.expand2(view_w.size() * 0.25));
+        if !r.is_positive() {
+            return None;
+        }
+        let r = Rect::from_min_max(
+            pos2((r.min.x / grid).floor() * grid, (r.min.y / grid).floor() * grid),
+            pos2((r.max.x / grid).ceil() * grid, (r.max.y / grid).ceil() * grid),
+        );
+        while r.width() * scale > 4096.0 || r.height() * scale > 4096.0 {
+            scale *= 0.5;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content_key(layer).hash(&mut h);
+        for (k, t) in &m.tiles {
+            (k, t.rev).hash(&mut h);
+        }
+        [m.offset.x, m.offset.y, r.min.x, r.min.y, r.max.x, r.max.y, scale, layer.opacity].map(f32::to_bits).hash(&mut h);
+        doc.timeline.time.to_bits().hash(&mut h);
+        if let Some(pl) = &layer.place {
+            serde_json::to_string(pl).unwrap_or_default().hash(&mut h);
+            serde_json::to_string(&doc.spaces.iter().find(|s| s.id == pl.space).map(|s| (s.frame, &s.lines, s.origin))).unwrap_or_default().hash(&mut h);
+        }
+        let key = h.finish();
+        let frame = self.frame;
+        if let Some(e) = self.masked.get_mut(&layer.id) {
+            if e.0 == key {
+                e.2 = frame;
+                return Some((e.1.id(), e.3));
+            }
+        }
+        let pm = crate::export::render_masked(doc, layer, m, r, scale).ok()?;
+        let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+        let opts = TextureOptions { mipmap_mode: None, ..TEX_OPTS };
+        match self.masked.get_mut(&layer.id) {
+            Some(e) => {
+                e.1.set(img, opts);
+                *e = (key, e.1.clone(), frame, r);
+            }
+            None => {
+                let t = ctx.load_texture(format!("masked{}", layer.id), img, opts);
+                self.masked.insert(layer.id, (key, t, frame, r));
+            }
+        }
+        self.masked.get(&layer.id).map(|e| (e.1.id(), e.3))
     }
 
     /// Texture of a layer's 2D content at `res` texels per canvas pixel.
@@ -149,7 +206,7 @@ impl TexCache {
         }
     }
 
-    fn tile(&mut self, ctx: &Context, layer: LayerId, key: (i32, i32), t: &crate::raster::Tile) -> egui::TextureId {
+    pub fn tile(&mut self, ctx: &Context, layer: LayerId, key: (i32, i32), t: &crate::raster::Tile) -> egui::TextureId {
         let frame = self.frame;
         let k = (layer, key);
         if let Some(e) = self.tiles.get_mut(&k) {
@@ -404,8 +461,17 @@ pub fn draw_doc(
         if !layer.visible || layer.opacity <= 0.0 {
             continue;
         }
+        if layer.mask_of.is_some() {
+            continue;
+        }
         let timed = crate::anim::layer_at_time(doc, layer);
         let layer = timed.as_ref().unwrap_or(layer);
+        if let Some(m) = crate::export::mask_for(doc, layer.id) {
+            if let Some((tex, r)) = cache.masked(ctx, doc, layer, m, view_w, xf.zoom) {
+                painter.image(tex, xf.rect_w2s(r), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            continue;
+        }
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
             if skip_text != Some(layer.id) {
                 let clip = match doc.spaces.iter().find(|s| s.id == pl.space) {

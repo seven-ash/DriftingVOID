@@ -27,6 +27,43 @@ pub fn output_size(region: Rect, scale: f32) -> (u32, u32) {
     )
 }
 
+/// The visible mask of a layer, if it has one.
+pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&crate::raster::RasterLayer> {
+    doc.layers.iter().find(|m| m.mask_of == Some(id) && m.visible).and_then(|m| match &m.kind {
+        LayerKind::Raster(r) => Some(r),
+        _ => None,
+    })
+}
+
+/// Multiplies a rendered region by a mask's coverage (both in canvas space).
+pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect, scale: f32) {
+    let w = pm.width() as usize;
+    let data = pm.data_mut();
+    for (i, px) in data.chunks_exact_mut(4).enumerate() {
+        if px[3] == 0 {
+            continue;
+        }
+        let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+        let a = m.alpha_at_world(egui::pos2(region.min.x + x / scale, region.min.y + y / scale)) as u16;
+        if a == 255 {
+            continue;
+        }
+        for c in px.iter_mut() {
+            *c = ((*c as u16 * a + 127) / 255) as u8;
+        }
+    }
+}
+
+/// One layer alone, rendered and masked (opacity included).
+pub fn render_masked(doc: &Document, layer: &Layer, m: &crate::raster::RasterLayer, region: Rect, scale: f32) -> Result<Pixmap, String> {
+    let mut one = layer.clone();
+    one.mask_of = None;
+    let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
+    let mut pm = render(&mini, region, scale, None)?;
+    apply_mask(&mut pm, m, region, scale);
+    Ok(pm)
+}
+
 pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> Result<Pixmap, String> {
     let (w, h) = output_size(region, scale);
     if w > MAX_SIDE || h > MAX_SIDE || w as u64 * h as u64 > MAX_PIXELS {
@@ -42,7 +79,12 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
         let timed = crate::anim::layer_at_time(doc, layer);
         let layer = timed.as_ref().unwrap_or(layer);
-        if !layer.shown_bounds(&cams).is_some_and(|b| b.intersects(region)) {
+        if layer.mask_of.is_some() || !layer.shown_bounds(&cams).is_some_and(|b| b.intersects(region)) {
+            continue;
+        }
+        if let Some(m) = mask_for(doc, layer.id) {
+            let pm = render_masked(doc, layer, m, region, scale)?;
+            out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             continue;
         }
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
