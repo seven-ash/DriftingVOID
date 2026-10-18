@@ -1216,9 +1216,9 @@ impl App {
                         let t0 = std::time::Instant::now();
                         let o = pos2(c[0] - 640.0, c[1]);
                         for d in [vec2(-200.0, -200.0), vec2(200.0, -200.0), vec2(200.0, 200.0), vec2(-200.0, 200.0)] {
-                            app.scissor_click(mid, o + d, true);
+                            app.scissor_click(mid, o + d, true, false);
                         }
-                        app.scissor_close();
+                        app.scissor_close(std::env::var_os("DV_SCISSOR_CUT").is_some());
                         eprintln!("scissor: {} in {:?}", app.status, t0.elapsed());
                     }
                 }
@@ -2057,10 +2057,10 @@ impl App {
         }
     }
 
-    fn scissor_click(&mut self, mid: LayerId, w: Pos2, on: bool) {
+    fn scissor_click(&mut self, mid: LayerId, w: Pos2, on: bool, refine: bool) {
         let near_first = self.scissor.as_ref().is_some_and(|sc| sc.pts.len() > 2 && (sc.pts[0] - w).length() * self.zoom < 10.0);
         if near_first {
-            self.scissor_close();
+            self.scissor_close(refine);
             return;
         }
         match self.scissor.take() {
@@ -2079,7 +2079,9 @@ impl App {
     }
 
     /// Closes the outline and fills it into the mask (anti-aliased).
-    fn scissor_close(&mut self) {
+    /// `refine`: the outline seeds GrabCut (deep inside: certain, a band along the
+    /// outline: undecided, outside: background) instead of filling as drawn.
+    fn scissor_close(&mut self, refine: bool) {
         let Some(sc) = self.scissor.take() else { return };
         if sc.pts.len() < 3 {
             return;
@@ -2102,6 +2104,10 @@ impl App {
         paint.set_color_rgba8(255, 255, 255, 255);
         paint.anti_alias = true;
         pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+        if refine {
+            self.scissor_refine(sc.mid, b, &pm, sc.on);
+            return;
+        }
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(sc.mid).map(|l| &mut l.kind) else { return };
         let data = pm.data();
         let mut n = 0;
@@ -2119,6 +2125,78 @@ impl App {
             }
         }
         self.status = format!("가위 · {n} px {}", if sc.on { "가림" } else { "되살림" });
+        self.mark();
+    }
+
+    fn scissor_refine(&mut self, mid: LayerId, b: Rect, poly: &tiny_skia::Pixmap, on: bool) {
+        use crate::segment::{BG, FG, PR_BG, PR_FG};
+        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        const PAD: i32 = 16;
+        const BAND: usize = 6;
+        let reg = Rect::from_min_max(b.min - vec2(PAD as f32, PAD as f32), b.max + vec2(PAD as f32, PAD as f32));
+        let mut d = self.doc.clone();
+        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
+        let (pw, ph) = (pm.width() as usize, pm.height() as usize);
+        let px = pm.data();
+        let (qw, qh) = (poly.width() as i32, poly.height() as i32);
+        let pd = poly.data();
+        let mut inside = vec![false; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw {
+                let (qx, qy) = (x as i32 - PAD, y as i32 - PAD);
+                if qx >= 0 && qy >= 0 && qx < qw && qy < qh {
+                    inside[y * pw + x] = pd[((qy * qw + qx) * 4 + 3) as usize] > 127;
+                }
+            }
+        }
+        // erode / dilate by BAND for the certain core and the outer limit
+        let morph = |src: &Vec<bool>, grow: bool| {
+            let mut cur = src.clone();
+            for _ in 0..BAND {
+                let prev = cur.clone();
+                for y in 0..ph {
+                    for x in 0..pw {
+                        let mut v = prev[y * pw + x];
+                        for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                            let n = nx >= 0 && ny >= 0 && (nx as usize) < pw && (ny as usize) < ph && prev[ny as usize * pw + nx as usize];
+                            v = if grow { v || n } else { v && n };
+                        }
+                        cur[y * pw + x] = v;
+                    }
+                }
+            }
+            cur
+        };
+        let core = morph(&inside, false);
+        let outer = morph(&inside, true);
+        let step = (((pw * ph) as f64 / 90_000.0).sqrt().ceil() as usize).max(1);
+        let (gw, gh) = (pw.div_ceil(step), ph.div_ceil(step));
+        let mut img = vec![[0f64; 3]; gw * gh];
+        let mut labels = vec![BG; gw * gh];
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let (cx, cy) = ((gx * step + step / 2).min(pw - 1), (gy * step + step / 2).min(ph - 1));
+                let i = (cy * pw + cx) * 4;
+                img[gy * gw + gx] = [px[i] as f64, px[i + 1] as f64, px[i + 2] as f64];
+                let j = cy * pw + cx;
+                labels[gy * gw + gx] = if core[j] { FG } else if inside[j] { PR_FG } else if outer[j] { PR_BG } else { BG };
+            }
+        }
+        crate::segment::grabcut(&img, gw, gh, &mut labels, 4);
+        let mut gi = vec![0f32; pw * ph];
+        let mut gp = vec![0f32; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw {
+                let i = (y * pw + x) * 4;
+                gi[y * pw + x] = (0.299 * px[i] as f32 + 0.587 * px[i + 1] as f32 + 0.114 * px[i + 2] as f32) / 255.0;
+                let l = labels[(y / step).min(gh - 1) * gw + (x / step).min(gw - 1)];
+                gp[y * pw + x] = if l == FG || l == PR_FG { 1.0 } else { 0.0 };
+            }
+        }
+        let n = self.mask_soft_write(mid, (reg.min.x as i32, reg.min.y as i32), pw, ph, &gi, &gp, on);
+        self.status = format!("가위+그랩컷 · {n} px {}", if on { "가림" } else { "되살림" });
         self.mark();
     }
 
@@ -3963,7 +4041,7 @@ impl App {
         if let Some(mid) = self.wand.filter(|_| !space) {
             if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
                 if self.wand_mode == 2 {
-                    self.scissor_click(mid, w, !mods.alt);
+                    self.scissor_click(mid, w, !mods.alt, mods.shift);
                 } else if self.wand_mode == 1 {
                     // GrabCut: drag a box (a temporary outline, run on release)
                     let s = ShapeLayer { kind: ShapeKind::Rect, a: w, b: w, color: ACCENT, width: 1.5 / self.zoom, fill: None, rotation: 0.0 };
@@ -5944,8 +6022,9 @@ impl App {
         } else if self.wand.is_some() && k(Modifiers::NONE, Key::Escape) {
             self.wand = None;
         }
-        if self.scissor.is_some() && k(Modifiers::NONE, Key::Enter) {
-            self.scissor_close();
+        if self.scissor.is_some() && (k(Modifiers::NONE, Key::Enter) || k(Modifiers::SHIFT, Key::Enter)) {
+            let refine = k(Modifiers::SHIFT, Key::Enter);
+            self.scissor_close(refine);
         }
         if self.doc.timeline.on && !self.tl_sel.is_empty() && (k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace)) {
             self.delete_selected_keys();
@@ -7040,7 +7119,7 @@ impl App {
         let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "경계를 따라 클릭 · 첫 점 클릭/Enter: 닫기 · Esc: 취소 · Alt: 되살리기")] {
+            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "경계를 따라 클릭 · 첫 점 클릭/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
                 if ui.selectable_label(armed && self.wand_mode == m, label).on_hover_text(tip).clicked() {
                     pick_mode = Some(m);
                 }
