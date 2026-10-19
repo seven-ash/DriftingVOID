@@ -85,6 +85,8 @@ pub struct Settings {
     pub text_size: f32,
     pub text_family: String,
     pub text_style: String,
+    #[serde(default)]
+    pub text_align: crate::doc::TextAlign,
     pub text_bg: bool,
     pub text_bg_color: Color32,
     pub touch_draw: bool,
@@ -122,6 +124,7 @@ impl Default for Settings {
             text_size: 40.0,
             text_family: String::new(),
             text_style: "Regular".into(),
+            text_align: Default::default(),
             text_bg: false,
             text_bg_color: Color32::from_rgba_unmultiplied(255, 255, 255, 220),
             touch_draw: false,
@@ -1041,7 +1044,16 @@ impl App {
             app.s.text_family = fam;
             app.s.text_style = "Regular".into();
             app.tool = Tool::Text;
-            let id = app.new_text_layer(pos2(0.0, 0.0), "테스트 Test".into());
+            // DV_TEST_TEXT_ALIGN=0/1/2: three lines of different length, aligned
+            let al = std::env::var("DV_TEST_TEXT_ALIGN").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| crate::doc::TextAlign::ALL.get(i).copied());
+            let body = if al.is_some() { "가운데 정렬 Test
+짧은 줄
+조금 더 긴 줄입니다" } else { "테스트 Test" };
+            if let Some(a) = al {
+                app.s.text_align = a;
+                app.s.color = Color32::from_rgb(255, 225, 90);
+            }
+            let id = app.new_text_layer(pos2(0.0, 0.0), body.into());
             if let Some(deg) = std::env::var("DV_TEST_TEXT_ROT").ok().and_then(|v| v.parse::<f32>().ok()) {
                 if let Some(LayerKind::Text(t)) = app.doc.get_mut(id).map(|l| &mut l.kind) {
                     t.rotation = deg.to_radians();
@@ -3713,6 +3725,7 @@ impl App {
             wrap: 0.0,
             rotation: 0.0,
             blend: Blend::Normal,
+            align: self.s.text_align,
         };
         self.doc.insert("글".into(), LayerKind::Text(t), self.sel)
     }
@@ -6835,6 +6848,7 @@ impl App {
                     let s0 = crate::text::layout(t).size;
                     layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
+                    layer_changed |= align_row(ui, &mut t.align);
                     ui.horizontal(|ui| {
                         let mut has = t.bg.is_some();
                         if ui.checkbox(&mut has, "배경 상자").changed() {
@@ -6852,6 +6866,7 @@ impl App {
                     s.text_size = t.size;
                     s.text_family = t.family.clone();
                     s.text_style = t.style.clone();
+                    s.text_align = t.align;
                     s.text_bg = t.bg.is_some();
                     if let Some(c) = t.bg {
                         s.text_bg_color = c;
@@ -6860,6 +6875,7 @@ impl App {
                 } else {
                     ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).step(2.0).text("크기"));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
+                    align_row(ui, &mut s.text_align);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut s.text_bg, "배경 상자");
                         color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
@@ -7207,6 +7223,7 @@ impl App {
                     if tool != Tool::Text {
                         changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
+                        changed |= align_row(ui, &mut t.align);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
                             if ui.checkbox(&mut has, "배경 상자").changed() {
@@ -8729,6 +8746,8 @@ impl App {
         if let Some(ax) = axis_pick {
             self.set_space_axis(ax);
         }
+        let mut height_req: Option<f64> = None;
+        let mut metre_req: Option<f64> = None;
         let sp = &self.doc.spaces[i];
         match crate::persp::solve(sp) {
             Ok(cam) => {
@@ -8739,6 +8758,27 @@ impl App {
                     cam.fov_deg()
                 ));
                 ui.small(format!("35 mm 환산 · 선 오차 {:.2}° (RMS)", cam.rms_deg));
+                // camera height (⨀ point): world units, with a rough metre value
+                let h0 = crate::persp::cam_height(&cam) as f32;
+                let mut h = h0;
+                ui.horizontal(|ui| {
+                    let r = ui.add(crate::dial::Dial::new(&mut h, 0.0..=(h0.abs() * 4.0).max(1000.0)).text("카메라 높이"));
+                    if r.changed() && (h - h0).abs() > 1e-3 {
+                        height_req = Some(h as f64);
+                    }
+                });
+                // metres: from a real height typed in once (a photo alone has no scale)
+                ui.horizontal(|ui| {
+                    let mut no = false;
+                    crate::dial::label_cell(ui, "실제 높이", None, &mut no);
+                    let um = self.doc.spaces[i].unit_m;
+                    let mut m = um.map_or(0.0, |k| h0 as f64 * k);
+                    let r = ui.add(crate::calc::drag(&mut m).range(0.0..=1000.0).speed(0.01).max_decimals(2).suffix(" m").custom_formatter(move |v, _| if um.is_none() { crate::dial::MIXED.into() } else { format!("{v:.2}") }));
+                    if r.changed() && m > 0.0 && h0.abs() > 1e-6 {
+                        metre_req = Some(m / h0 as f64);
+                    }
+                    r.on_hover_text("카메라의 실제 높이 · 미터 환산 기준");
+                });
             }
             Err(e) => {
                 ui.small(egui::RichText::new(e).color(INK_2()));
@@ -8838,6 +8878,14 @@ impl App {
         }
         let facing = crate::persp::cameras(&self.doc.spaces).get(&self.doc.spaces[i].id).map(crate::persp::Light::facing);
         let s = &mut self.doc.spaces[i];
+        if let Some(o) = height_req.and_then(|h| crate::persp::origin_for_height(s, h)) {
+            s.origin = o;
+            ch = true;
+        }
+        if let Some(k) = metre_req {
+            s.unit_m = Some(k);
+            ch = true;
+        }
         if mask_clear {
             s.mask = None;
             ch = true;
@@ -9247,7 +9295,21 @@ impl App {
         // renderer and editor both treat the size as the em in pixels
         let font = FontId::new((t.size * xf.zoom).max(2.0), fam);
         let pad = lay.pad * xf.zoom;
-        let width = if t.wrap > 0.0 { (t.wrap - lay.pad * 2.0) * xf.zoom } else { (lay.size.x - lay.pad * 2.0) * xf.zoom + t.size * xf.zoom * 2.0 };
+        // centred / right text: the editor lays its rows out across the same width
+        let aligned = t.align != crate::doc::TextAlign::Left;
+        let content_px = (lay.size.x - lay.pad * 2.0) * xf.zoom;
+        let width = if t.wrap > 0.0 {
+            (t.wrap - lay.pad * 2.0) * xf.zoom
+        } else if aligned {
+            content_px + 0.5
+        } else {
+            content_px + t.size * xf.zoom * 2.0
+        };
+        let halign = match t.align {
+            crate::doc::TextAlign::Left => egui::Align::LEFT,
+            crate::doc::TextAlign::Center => egui::Align::Center,
+            crate::doc::TextAlign::Right => egui::Align::RIGHT,
+        };
         let mut text = t.text.clone();
         let mut lost = false;
         egui::Area::new(egui::Id::new("text_edit_area"))
@@ -9259,7 +9321,7 @@ impl App {
                 self.drop_stale_ime(ui.ctx());
                 // Without a wrap width the box grows sideways while typing: lay the text
                 // out unwrapped instead of wrapping at last frame's width.
-                let wrap_px = if t.wrap > 0.0 { width.max(10.0) } else { f32::INFINITY };
+                let wrap_px = if t.wrap > 0.0 || aligned { width.max(10.0) } else { f32::INFINITY };
                 let lcol = if !rendered {
                     t.color
                 } else if std::env::var_os("DV_EDIT_DEBUG").is_some() {
@@ -9268,8 +9330,14 @@ impl App {
                     Color32::TRANSPARENT
                 };
                 let lfont = font.clone();
+        let line_px = lay.line_h * xf.zoom;
                 let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
-                    let job = egui::text::LayoutJob::simple(buf.as_str().to_owned(), lfont.clone(), lcol, wrap_px);
+                    let mut job = egui::text::LayoutJob::simple(buf.as_str().to_owned(), lfont.clone(), lcol, wrap_px);
+                    job.halign = halign;
+                    // the renderer's line spacing, so rows (and clicks on them) line up
+                    for sec in &mut job.sections {
+                        sec.format.line_height = Some(line_px);
+                    }
                     ui.ctx().fonts_mut(|f| f.layout_job(job))
                 };
                 let te = egui::TextEdit::multiline(&mut text)
@@ -9292,10 +9360,28 @@ impl App {
                     self.edit_focus = false;
                 }
                 lost = resp.lost_focus();
+                if std::env::var_os("DV_EDIT_DEBUG").is_some() {
+                    if std::env::var_os("DV_EDIT_ROWS").is_some() {
+                        let ours: Vec<f32> = (0..out.galley.rows.len()).map(|i| r.min.y + (lay.pad + i as f32 * lay.line_h) * xf.zoom).collect();
+                        let theirs: Vec<f32> = out.galley.rows.iter().map(|row| out.galley_pos.y + row.pos.y).collect();
+                        eprintln!("rows ours {ours:?} editor {theirs:?} line_h {}", lay.line_h * xf.zoom);
+                    }
+                    // every caret spot as a tick (alignment checks without focus)
+                    for &(cx, cy) in &lay.carets {
+                        let p0 = r.min + vec2(lay.pad + cx, lay.pad + cy) * xf.zoom;
+                        let p1 = p0 + vec2(0.0, lay.line_h * xf.zoom);
+                        ui.painter().line_segment([crate::doc::rot_about(p0, c, rot), crate::doc::rot_about(p1, c, rot)], Stroke::new(1.0, Color32::from_rgb(255, 60, 200)));
+                    }
+                }
                 if resp.has_focus() {
                     if let Some(cr) = out.cursor_range {
                         let map = |p: Pos2| crate::doc::rot_about(p, c, rot);
-                        let at = |i: usize| out.galley.pos_from_cursor(egui::text::CCursor::new(i)).translate(out.galley_pos.to_vec2());
+                        // caret spots from the renderer's own layout, so caret and selection
+                        // sit exactly on the drawn text (egui rounds its rows to pixels)
+                        let at = |i: usize| {
+                            let (cx, cy) = lay.carets.get(i).or(lay.carets.last()).copied().unwrap_or((0.0, 0.0));
+                            Rect::from_min_size(r.min + vec2(lay.pad + cx, lay.pad + cy) * xf.zoom, vec2(0.0, lay.line_h * xf.zoom))
+                        };
                         // selection: one quad per character span on the same row
                         let (pi, si) = (cr.primary.index.0, cr.secondary.index.0);
                         let (a, b) = (pi.min(si), pi.max(si));
@@ -9418,7 +9504,7 @@ fn font_preview(ctx: &egui::Context, name: &str, style: &str) -> Option<(egui::T
     if !name.chars().all(|c| c == ' ' || face.font.glyph_id(c).0 != 0) {
         return None;
     }
-    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK(), family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal };
+    let t = TextLayer { pos: Pos2::ZERO, text: name.to_string(), size: 16.0, color: INK(), family: name.to_string(), style: style.to_string(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: Default::default() };
     let ppp = ctx.pixels_per_point();
     let lay = crate::text::layout(&t);
     let pm = crate::text::render(&t, &lay, ppp, Vec2::ZERO)?;
@@ -10192,6 +10278,38 @@ fn vol_keys_hash(a: &crate::anim::Anim, h: &mut impl std::hash::Hasher) {
     }
 }
 
+/// Left / centre / right buttons for text alignment, drawn as line icons.
+fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let mut no = false;
+        crate::dial::label_cell(ui, "정렬", None, &mut no);
+        for al in crate::doc::TextAlign::ALL {
+            let on = *a == al;
+            let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+            let p = ui.painter();
+            if on || resp.hovered() {
+                p.rect_filled(r, 5.0, if on { ACCENT.gamma_multiply(0.25) } else { FILL_1() });
+            }
+            let col = if on { ACCENT } else { INK_2() };
+            // four lines, long and short, flush to the side
+            let (x0, x1) = (r.left() + 6.0, r.right() - 6.0);
+            for (i, long) in [true, false, true, false].into_iter().enumerate() {
+                let w = if long { x1 - x0 } else { (x1 - x0) * 0.6 };
+                let y = r.top() + 6.0 + i as f32 * 3.4;
+                let left = x0 + (x1 - x0 - w) * al.factor();
+                p.line_segment([pos2(left, y), pos2(left + w, y)], Stroke::new(1.4, col));
+            }
+            if resp.on_hover_text(al.label()).clicked() && !on {
+                *a = al;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 /// A position number box ("—" when the selection's positions differ).
 fn pos_box(v: &mut f32, mixed: bool) -> egui::DragValue<'_> {
     let d = crate::calc::drag(v).speed(1.0).max_decimals(1);
@@ -10259,6 +10377,7 @@ fn copy_style(b: &LayerKind, a: &LayerKind, l: &mut LayerKind) {
             pass!(b.bg, a.bg, l.bg);
             pass!(b.wrap, a.wrap, l.wrap);
             pass!(b.blend, a.blend, l.blend);
+            pass!(b.align, a.align, l.align);
         }
         (LayerKind::Shape(b), LayerKind::Shape(a), LayerKind::Shape(l)) => {
             pass!(b.color, a.color, l.color);
@@ -10286,7 +10405,7 @@ mod tests {
 
     fn text(x: f32, size: f32) -> Layer {
         let mut d = Document::default();
-        let t = TextLayer { pos: pos2(x, 0.0), text: "ab".into(), size, color: Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal };
+        let t = TextLayer { pos: pos2(x, 0.0), text: "ab".into(), size, color: Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: Default::default() };
         let id = d.insert("t".into(), LayerKind::Text(t), None);
         d.get(id).unwrap().clone()
     }

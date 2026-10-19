@@ -380,6 +380,9 @@ pub struct Space {
     /// Directional light for layers with thickness (shading only, no shadows).
     #[serde(default)]
     pub light: Option<Light>,
+    /// Metres per world unit, from a real camera height typed in (None: unknown).
+    #[serde(default)]
+    pub unit_m: Option<f64>,
 }
 
 /// A directional light: turned by `rot` (degrees, X then Y then Z) from shining
@@ -509,7 +512,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, unit_m: None }
     }
 
     /// The canvas area the space shows in.
@@ -631,6 +634,57 @@ const DEFAULT_F_35: f64 = 50.0;
 const HUBER: f64 = 0.0087; // ≈ 0.5°
 /// Tukey cut-off: lines further off than this stop counting.
 const TUKEY: f64 = 0.035; // ≈ 2°
+
+/// The camera's height above the floor (world Z of its centre, world units).
+pub fn cam_height(cam: &Camera) -> f64 {
+    cam.center[2]
+}
+
+/// Where to put the space origin (⨀) so the camera ends up `h` above the
+/// floor: the origin slides along the picture's vertical (towards the Z
+/// vanishing point), which is what dragging it up or down does by hand.
+pub fn origin_for_height(space: &Space, h: f64) -> Option<Pos2> {
+    let cam = solve(space).ok()?;
+    let o = space.origin;
+    let up = cam.project([0.0, 0.0, cam.origin_depth().max(1.0) * 0.05])?;
+    let u = (up - o).normalized();
+    if !u.x.is_finite() || !u.y.is_finite() {
+        return None;
+    }
+    let height_at = |t: f32| {
+        let mut sp = space.clone();
+        sp.origin = o + u * t;
+        solve(&sp).ok().map(|c| cam_height(&c) - h)
+    };
+    // bracket the target near the current origin, then bisect
+    let span = space.frame.height().max(space.frame.width()) * 1.5;
+    let n = 120;
+    let ts: Vec<f32> = (0..=n).map(|i| -span + 2.0 * span * i as f32 / n as f32).collect();
+    let vals: Vec<Option<f64>> = ts.iter().map(|&t| height_at(t)).collect();
+    let mut best: Option<(f32, f32)> = None;
+    for i in 0..n {
+        if let (Some(a), Some(b)) = (vals[i], vals[i + 1]) {
+            if a == 0.0 || a.signum() != b.signum() {
+                let (lo, hi) = (ts[i], ts[i + 1]);
+                if best.is_none_or(|(l, _)| lo.abs().min(hi.abs()) < l.abs()) {
+                    best = Some((lo, hi));
+                }
+            }
+        }
+    }
+    let (mut lo, mut hi) = best?;
+    let flo = height_at(lo)?;
+    for _ in 0..40 {
+        let mid = (lo + hi) * 0.5;
+        let fm = height_at(mid)?;
+        if fm.signum() == flo.signum() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(o + u * ((lo + hi) * 0.5))
+}
 
 pub fn solve(space: &Space) -> Result<Camera, String> {
     let fr = space.frame;
@@ -1274,6 +1328,22 @@ mod tests {
         for w in [[100.0, 50.0, 0.0], [-80.0, 30.0, 120.0]] {
             let (pa, pb) = (cam.project(scale(w, s)).unwrap(), t.project(w).unwrap());
             assert!(pa.distance(pb) < 3.0 * (noise.max(0.1)), "{pa:?} vs {pb:?}");
+        }
+    }
+
+    #[test]
+    fn camera_height_dial_moves_the_origin() {
+        let t = truth();
+        let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.lines = lines_for(&t, &[0, 1, 2], 0.0);
+        sp.origin = t.project([0.0; 3]).unwrap();
+        let h0 = cam_height(&solve(&sp).unwrap());
+        for want in [h0 * 0.6, h0 * 1.5] {
+            let o = origin_for_height(&sp, want).expect("reachable");
+            let mut s2 = sp.clone();
+            s2.origin = o;
+            let h = cam_height(&solve(&s2).unwrap());
+            assert!((h - want).abs() < want.abs() * 1e-3, "{h} vs {want} (from {h0})");
         }
     }
 

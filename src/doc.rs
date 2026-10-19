@@ -261,22 +261,52 @@ pub struct TextLayer {
     /// Radians, about the box centre.
     pub rotation: f32,
     pub blend: Blend,
+    pub align: TextAlign,
+}
+
+/// Where the lines of a text box sit across it.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug, Serialize, Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    pub const ALL: [TextAlign; 3] = [TextAlign::Left, TextAlign::Center, TextAlign::Right];
+
+    /// 0 left, 0.5 centre, 1 right.
+    pub fn factor(self) -> f32 {
+        match self {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => 0.5,
+            TextAlign::Right => 1.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextAlign::Left => "왼쪽 정렬",
+            TextAlign::Center => "가운데 정렬",
+            TextAlign::Right => "오른쪽 정렬",
+        }
+    }
 }
 
 impl TextLayer {
-    /// After the box changed size (typing, font, size...), keeps the rotated
-    /// top-left corner — where the first character sits — where it was, so the
-    /// text grows away from it along its own axes instead of around the centre.
+    /// After the box changed size (typing, font, size...), keeps its anchor —
+    /// the top of the side the lines align to (left, middle or right) — where
+    /// it was, turned with the box, so the text grows away from it.
     pub fn keep_corner(&mut self, old_size: Vec2) {
-        if self.rotation == 0.0 {
-            return;
-        }
         let new_size = crate::text::layout(self).size;
-        let d = (old_size - new_size) * 0.5;
-        // corner = pos + (I - R)·size/2, so shift pos by (I - R)·(old - new)/2
+        let f = self.align.factor();
+        // anchor = pos + size/2 + R·(L - size/2) with L = (f·w, 0)
         let (s, c) = self.rotation.sin_cos();
-        let rd = vec2(d.x * c - d.y * s, d.x * s + d.y * c);
-        self.pos += d - rd;
+        let r = |v: Vec2| vec2(v.x * c - v.y * s, v.x * s + v.y * c);
+        let at = |pos: Pos2, size: Vec2| pos + size * 0.5 + r(vec2(f * size.x, 0.0) - size * 0.5);
+        let want = at(self.pos, old_size);
+        self.pos += want - at(self.pos, new_size);
     }
 }
 
@@ -696,6 +726,25 @@ mod tests {
     }
 
     #[test]
+    fn centred_text_grows_both_ways() {
+        let mut t = TextLayer { pos: pos2(100.0, 50.0), text: "ab".into(), size: 40.0, color: Color32::WHITE, family: String::new(), style: "Regular".into(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: TextAlign::Center };
+        let mid = |t: &TextLayer| t.pos.x + crate::text::layout(t).size.x * 0.5;
+        let before = mid(&t);
+        let s0 = crate::text::layout(&t).size;
+        t.text = "abcdef".into();
+        t.keep_corner(s0);
+        assert!((mid(&t) - before).abs() < 1e-3);
+        // right: the right edge stays
+        t.align = TextAlign::Right;
+        let right = |t: &TextLayer| t.pos.x + crate::text::layout(t).size.x;
+        let r0 = right(&t);
+        let s0 = crate::text::layout(&t).size;
+        t.text = "a".into();
+        t.keep_corner(s0);
+        assert!((right(&t) - r0).abs() < 1e-3);
+    }
+
+    #[test]
     fn rotated_text_grows_from_its_first_corner() {
         let mut t = TextLayer {
             pos: pos2(100.0, 50.0),
@@ -708,6 +757,7 @@ mod tests {
             wrap: 0.0,
             rotation: 0.6,
             blend: Blend::Normal,
+            align: TextAlign::Left,
         };
         let corner = |t: &TextLayer| {
             let s = crate::text::layout(t).size;

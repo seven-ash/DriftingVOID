@@ -44,6 +44,10 @@ pub struct TextLayout {
     pub glyphs: Vec<(GlyphId, f32, f32)>,
     pub size: Vec2,
     pub pad: f32,
+    /// Caret spot before each character (and after the last), as the top of its
+    /// line (x, y relative to the content origin, before padding).
+    pub carets: Vec<(f32, f32)>,
+    pub line_h: f32,
 }
 
 impl TextLayout {
@@ -97,36 +101,53 @@ pub fn layout(t: &TextLayer) -> TextLayout {
         x
     };
 
-    let mut lines: Vec<Vec<char>> = Vec::new();
+    // lines of (char, its index in the text), each with the index it starts at
+    let mut lines: Vec<(usize, Vec<(char, usize)>)> = Vec::new();
+    let mut idx = 0;
     for para in t.text.split('\n') {
-        let mut cur: Vec<char> = Vec::new();
+        let mut start = idx;
+        let mut cur: Vec<(char, usize)> = Vec::new();
         for ch in para.chars() {
-            cur.push(ch);
-            if maxw > 0.0 && cur.len() > 1 && width_of(&cur) > maxw {
-                let space = cur[..cur.len() - 1].iter().rposition(|c| *c == ' ').filter(|&i| i > 0);
+            cur.push((ch, idx));
+            idx += 1;
+            let chars: Vec<char> = cur.iter().map(|x| x.0).collect();
+            if maxw > 0.0 && cur.len() > 1 && width_of(&chars) > maxw {
+                let space = chars[..cur.len() - 1].iter().rposition(|c| *c == ' ').filter(|&i| i > 0);
                 if let Some(sp) = space {
                     let rest = cur.split_off(sp + 1);
                     cur.pop();
-                    lines.push(std::mem::replace(&mut cur, rest));
+                    let next = rest.first().map_or(idx, |x| x.1);
+                    lines.push((start, std::mem::replace(&mut cur, rest)));
+                    start = next;
                 } else {
                     let last = cur.pop().unwrap();
-                    lines.push(std::mem::replace(&mut cur, vec![last]));
+                    lines.push((start, std::mem::replace(&mut cur, vec![last])));
+                    start = last.1;
                 }
             }
         }
-        lines.push(cur);
+        lines.push((start, cur));
+        idx += 1; // the line break
     }
+    let n_chars = t.text.chars().count();
+    let mut carets: Vec<Option<(f32, usize)>> = vec![None; n_chars + 1];
 
     let mut glyphs = Vec::new();
     let mut w: f32 = 0.0;
-    for (i, line) in lines.iter().enumerate() {
+    // (first glyph, line width) per line, for alignment
+    let mut spans: Vec<(usize, f32)> = Vec::new();
+    for (i, (start, line)) in lines.iter().enumerate() {
+        let first = glyphs.len();
         let y = ascent + i as f32 * line_h;
         let mut x = 0.0;
         let mut prev: Option<GlyphId> = None;
-        for &c in line {
+        for &(c, ci) in line {
             let g = font.glyph_id(c);
             if let Some(p) = prev {
                 x += sf.kern(p, g);
+            }
+            if let Some(slot) = carets.get_mut(ci) {
+                *slot = Some((x, i));
             }
             if !c.is_whitespace() {
                 glyphs.push((g, x, y));
@@ -134,9 +155,27 @@ pub fn layout(t: &TextLayer) -> TextLayout {
             x += sf.h_advance(g);
             prev = Some(g);
         }
+        // after the last character (or at the start of an empty line)
+        let end = line.last().map_or(*start, |l| l.1 + 1);
+        if let Some(slot) = carets.get_mut(end).filter(|s| s.is_none()) {
+            *slot = Some((x, i));
+        }
+        // trailing spaces don't count towards a line's width
+        let trail: f32 = line.iter().rev().take_while(|c| c.0.is_whitespace()).map(|c| sf.h_advance(font.glyph_id(c.0))).sum();
+        spans.push((first, x - trail));
         w = w.max(x);
     }
     let content_w = if maxw > 0.0 { maxw } else { w.max(t.size * 0.5) };
+    let f = t.align.factor();
+    let line_dx: Vec<f32> = spans.iter().map(|&(_, lw)| (content_w - lw) * f).collect();
+    if f > 0.0 {
+        for (i, &(first, _)) in spans.iter().enumerate() {
+            let end = spans.get(i + 1).map_or(glyphs.len(), |s| s.0);
+            for g in &mut glyphs[first..end] {
+                g.1 += line_dx[i];
+            }
+        }
+    }
     let mut h = lines.len().max(1) as f32 * line_h;
     // some fonts draw past their own ascent/descent (a "g" below the line):
     // grow the box to the ink so nothing is cut off
@@ -151,14 +190,19 @@ pub fn layout(t: &TextLayer) -> TextLayout {
             bottom = bottom.max(y - lo * sy);
         }
     }
+    let shift = (-top).max(0.0);
     if top < 0.0 {
         for g in &mut glyphs {
             g.2 -= top;
         }
         h -= top;
     }
+    let carets = carets
+        .into_iter()
+        .map(|c| c.map_or((0.0, shift), |(x, li)| (x + line_dx.get(li).copied().unwrap_or(0.0), shift + li as f32 * line_h)))
+        .collect();
     h += bottom - (lines.len().max(1) as f32 * line_h);
-    TextLayout { glyphs, size: vec2(content_w + pad * 2.0, h + pad * 2.0), pad }
+    TextLayout { glyphs, size: vec2(content_w + pad * 2.0, h + pad * 2.0), pad, carets, line_h }
 }
 
 pub fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
@@ -247,12 +291,32 @@ mod tests {
     #[test]
     fn box_holds_every_glyph() {
         // whatever the font's ascent/descent say, the rendered ink stays inside
-        let t = TextLayer { pos: Pos2::ZERO, text: "gjpqy ÅÉ Drifting".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default() };
+        let t = TextLayer { pos: Pos2::ZERO, text: "gjpqy ÅÉ Drifting".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
         let lay = layout(&t);
         let pm = render(&t, &lay, 1.0, Vec2::ZERO).unwrap();
         let (w, h) = (pm.width() as usize, pm.height() as usize);
         let row = |y: usize| (0..w).any(|x| pm.data()[(y * w + x) * 4 + 3] > 0);
         // the box edges (last row is the +1 margin) carry no ink
         assert!(!row(0) && !row(h - 1), "ink touches the box edge");
+    }
+}
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+
+    #[test]
+    fn carets_follow_lines_and_alignment() {
+        let mut t = TextLayer { pos: Pos2::ZERO, text: "ab\nc".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+        let lay = layout(&t);
+        assert_eq!(lay.carets.len(), 5);
+        assert_eq!(lay.carets[0].0, 0.0);
+        assert!(lay.carets[2].0 > lay.carets[1].0, "after b");
+        assert_eq!(lay.carets[3], (0.0, lay.carets[0].1 + lay.line_h), "c starts line 2");
+        // centred: the short second line moves right by half the difference
+        t.align = crate::doc::TextAlign::Center;
+        let c = layout(&t);
+        assert!(c.carets[3].0 > 0.0);
+        assert!((c.carets[0].0).abs() < 1e-3, "the longest line stays put");
     }
 }

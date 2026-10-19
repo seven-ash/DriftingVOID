@@ -49,6 +49,7 @@ fn build_and_export(out: &Path, photo: Option<PathBuf>) -> Result<String, String
             wrap: 0.0,
             rotation: 0.0,
             blend: std::env::var("SB_BLEND").ok().and_then(|b| Blend::ALL.into_iter().find(|x| format!("{x:?}") == b)).unwrap_or_default(),
+            align: Default::default(),
         }),
         None,
     );
