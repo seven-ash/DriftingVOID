@@ -137,7 +137,26 @@ pub fn layout(t: &TextLayer) -> TextLayout {
         w = w.max(x);
     }
     let content_w = if maxw > 0.0 { maxw } else { w.max(t.size * 0.5) };
-    let h = lines.len().max(1) as f32 * line_h;
+    let mut h = lines.len().max(1) as f32 * line_h;
+    // some fonts draw past their own ascent/descent (a "g" below the line):
+    // grow the box to the ink so nothing is cut off
+    let sy = sf.v_scale_factor();
+    let mut ink: std::collections::HashMap<GlyphId, Option<ab_glyph::Rect>> = Default::default();
+    let (mut top, mut bottom) = (0.0f32, h);
+    for &(g, _, y) in &glyphs {
+        if let Some(b) = *ink.entry(g).or_insert_with(|| font.outline(g).map(|o| o.bounds)) {
+            // outline bounds are font units, y up
+            top = top.min(y - b.max.y * sy);
+            bottom = bottom.max(y - b.min.y * sy);
+        }
+    }
+    if top < 0.0 {
+        for g in &mut glyphs {
+            g.2 -= top;
+        }
+        h -= top;
+    }
+    h += bottom - (lines.len().max(1) as f32 * line_h);
     TextLayout { glyphs, size: vec2(content_w + pad * 2.0, h + pad * 2.0), pad }
 }
 
@@ -162,6 +181,18 @@ pub fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia:
 pub fn render(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2) -> Option<Pixmap> {
     let w = ((lay.size.x * scale + frac.x).ceil() as u32 + 1).min(16384);
     let h = ((lay.size.y * scale + frac.y).ceil() as u32 + 1).min(16384);
+    render_into(t, lay, scale, frac, w, h)
+}
+
+/// Renders only `win` (box-local units, from the box's top-left) of the text
+/// box at `scale`: long boxes stay sharp without one huge texture.
+pub fn render_window(t: &TextLayer, lay: &TextLayout, scale: f32, win: Rect) -> Option<Pixmap> {
+    let w = (win.width() * scale).ceil() as u32 + 1;
+    let h = (win.height() * scale).ceil() as u32 + 1;
+    render_into(t, lay, scale, -win.min.to_vec2() * scale, w, h)
+}
+
+fn render_into(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2, w: u32, h: u32) -> Option<Pixmap> {
     let mut pm = Pixmap::new(w, h)?;
     if let Some(bg) = t.bg {
         if let Some(path) = rounded_rect(frac.x, frac.y, lay.size.x * scale, lay.size.y * scale, t.size * 0.3 * scale) {
@@ -179,8 +210,13 @@ pub fn render(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2) -> Option
     let col = [cr as f32, cg as f32, cb as f32];
     let (pw, ph) = (w as i32, h as i32);
     let data = pm.data_mut();
+    // glyphs well outside the pixmap are skipped (windows of long boxes)
+    let reach = t.size * 2.0 * scale;
     for &(gid, x, y) in &lay.glyphs {
         let pos = point(frac.x + (lay.pad + x) * scale, frac.y + (lay.pad + y) * scale);
+        if pos.x < -reach || pos.x > w as f32 + reach || pos.y < -reach || pos.y > h as f32 + reach {
+            continue;
+        }
         let Some(og) = font.outline_glyph(gid.with_scale_and_position(px, pos)) else { continue };
         let b = og.px_bounds();
         og.draw(|gx, gy, cov| {

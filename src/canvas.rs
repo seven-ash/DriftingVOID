@@ -189,7 +189,8 @@ impl TexCache {
         id
     }
 
-    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32) -> Option<(egui::TextureId, Vec2, std::sync::Arc<Vec<u8>>, [u32; 2], u64)> {
+    /// Text texture at `scale`: the whole box, or only `win` of it (box-local).
+    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32, win: Option<Rect>) -> Option<(egui::TextureId, Vec2, std::sync::Arc<Vec<u8>>, [u32; 2], u64)> {
         let lay = crate::text::layout(t);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         t.text.hash(&mut h);
@@ -201,6 +202,7 @@ impl TexCache {
         t.bg.hash(&mut h);
         t.wrap.to_bits().hash(&mut h);
         scale.to_bits().hash(&mut h);
+        win.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits)).hash(&mut h);
         let key = h.finish();
         let frame = self.frame;
         if let Some(e) = self.texts.get_mut(&id) {
@@ -209,7 +211,10 @@ impl TexCache {
                 return Some((e.1.id(), lay.size, e.3.clone(), e.4, key));
             }
         }
-        let pm = crate::text::render(t, &lay, scale, Vec2::ZERO)?;
+        let pm = match win {
+            Some(r) => crate::text::render_window(t, &lay, scale, r)?,
+            None => crate::text::render(t, &lay, scale, Vec2::ZERO)?,
+        };
         let ci = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
         let tex = ctx.load_texture(format!("text{id}"), ci, TEX_OPTS);
         let tid = tex.id();
@@ -595,21 +600,38 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
                     return;
                 }
                 let want = (xf.zoom * ppp).max(1.0 / 16.0);
-                let mut scale = 2f32.powf(want.log2().ceil()).clamp(1.0 / 16.0, 16.0);
+                let scale = 2f32.powf(want.log2().ceil()).clamp(1.0 / 16.0, 16.0);
                 let lay_size = crate::text::layout(t).size;
-                while lay_size.max_elem() * scale > MAX_TEX as f32 && scale > 1.0 / 16.0 {
-                    scale *= 0.5;
-                }
                 let r = Rect::from_min_size(t.pos, lay_size);
-                if !r.intersects(view_w) {
+                if !r.intersects(view_w) && t.rotation == 0.0 {
                     return;
                 }
-                if let Some((tex, size, px, dims, key)) = cache.text(ctx, layer.id, t, scale) {
-                    let pm_size = vec2(
-                        (size.x * scale).ceil() + 1.0,
-                        (size.y * scale).ceil() + 1.0,
-                    );
-                    let sr = Rect::from_min_size(xf.w2s(t.pos), pm_size / scale * xf.zoom);
+                // too big for one texture at this scale: only the part in view, on
+                // a grid of 512 texels so panning re-renders now and then
+                let win = (lay_size.max_elem() * scale > MAX_TEX as f32).then(|| {
+                    let c = r.center();
+                    let local = [view_w.left_top(), view_w.right_top(), view_w.right_bottom(), view_w.left_bottom()]
+                        .map(|p| crate::doc::rot_about(p, c, -t.rotation) - t.pos.to_vec2());
+                    let cell = 512.0 / scale;
+                    let v = Rect::from_points(&local);
+                    let snap = |a: f32, up: bool| if up { (a / cell).ceil() * cell } else { (a / cell).floor() * cell };
+                    let w = Rect::from_min_max(pos2(snap(v.min.x, false) - cell, snap(v.min.y, false) - cell), pos2(snap(v.max.x, true) + cell, snap(v.max.y, true) + cell));
+                    w.intersect(Rect::from_min_size(Pos2::ZERO, lay_size))
+                });
+                if win.is_some_and(|w| !w.is_positive()) {
+                    return;
+                }
+                // a window that is itself too big (huge view): fall back to a coarser scale
+                let mut scale = scale;
+                let size_of = |s: f32| win.map_or(lay_size, |w| w.size()).max_elem() * s;
+                while size_of(scale) > MAX_TEX as f32 && scale > 1.0 / 16.0 {
+                    scale *= 0.5;
+                }
+                if let Some((tex, size, px, dims, key)) = cache.text(ctx, layer.id, t, scale, win) {
+                    let shown = win.map_or(size, |w| w.size());
+                    let pm_size = vec2((shown.x * scale).ceil() + 1.0, (shown.y * scale).ceil() + 1.0);
+                    let origin = t.pos + win.map_or(Vec2::ZERO, |w| w.min.to_vec2());
+                    let sr = Rect::from_min_size(xf.w2s(origin), pm_size / scale * xf.zoom);
                     let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
                     if t.blend != crate::doc::Blend::Normal && crate::glass::gl_ok() {
                         let c = xf.w2s(Rect::from_min_size(t.pos, size).center());

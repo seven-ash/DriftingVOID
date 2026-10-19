@@ -1063,6 +1063,14 @@ impl App {
             let txt = "가나다라마바사아자차카타파하 ABCDEFGHIJ abcdefghij 0123456789 ".repeat(reps);
             let id = app.new_text_layer(pos2(-600.0, 0.0), txt);
             app.sel = Some(id);
+            // third value: a zoom on the box's middle
+            if let Some(z) = it.next().flatten() {
+                app.zoom = z;
+                app.view_init = true;
+                if let Some(b) = app.doc.get(id).and_then(|l| l.bounds()) {
+                    app.pan = vec2(700.0, 450.0) - b.center().to_vec2() * z;
+                }
+            }
             if v.ends_with(",edit") {
                 app.editing = Some(id);
                 app.edit_focus = true;
