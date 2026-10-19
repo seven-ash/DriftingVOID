@@ -403,6 +403,9 @@ pub struct Space {
     /// worlds and are converted on load (`to_eye_level`).
     #[serde(default)]
     pub eye: bool,
+    /// A tape measure drawn on the picture (its `metres` is unused).
+    #[serde(default)]
+    pub tape: Option<RefLine>,
 }
 
 /// Floor depth below the camera when nothing measured it (cm): eye height.
@@ -612,9 +615,17 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 }
 
 impl Space {
+    /// The tape measure's length in metres: measured on the same kind of plane
+    /// as the reference (it starts on the reference's plane), so it needs a
+    /// reference length. None without one or when either is above the horizon.
+    pub fn tape_metres(&self, cam: &Camera) -> Option<f64> {
+        let h = self.ref_line?.camera_height_m(cam)?;
+        Some(self.tape?.rel_len(cam)? * h)
+    }
+
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, ref_line: None, floor: DEFAULT_FLOOR, eye: true }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, ref_line: None, floor: DEFAULT_FLOOR, eye: true, tape: None }
     }
 
     /// The canvas area the space shows in.
@@ -1588,6 +1599,20 @@ mod tests {
             let hit = f.hit(&t, t.project(p3).unwrap()).unwrap();
             assert!(norm(sub(hit, p3)) < 0.5, "{hit:?} vs {p3:?}");
         }
+    }
+
+    #[test]
+    fn tape_measures_against_the_reference() {
+        let t = truth();
+        let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.eye = false;
+        // 1 unit = 1 cm: a 90 cm post as the reference, a tape 250 cm along Y
+        sp.ref_line = Some(RefLine { a: t.project([50.0, 40.0, 0.0]).unwrap(), b: t.project([50.0, 40.0, 90.0]).unwrap(), axis: 2, metres: 0.9 });
+        sp.tape = Some(RefLine { a: t.project([-30.0, 100.0, 0.0]).unwrap(), b: t.project([-30.0, 350.0, 0.0]).unwrap(), axis: 1, metres: 0.0 });
+        let m = sp.tape_metres(&t).unwrap();
+        assert!((m - 2.5).abs() < 1e-3, "{m}");
+        sp.ref_line = None;
+        assert!(sp.tape_metres(&t).is_none());
     }
 
     #[test]

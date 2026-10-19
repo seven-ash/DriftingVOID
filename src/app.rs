@@ -175,6 +175,7 @@ enum Drag {
     SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
     SpaceMask { id: u64, start: Pos2 },
     SpaceRef { id: u64 },
+    SpaceTape { id: u64 },
     WallRect { sid: u64, wid: u64, start: Pos2 },
     /// A wall standing on a base line drawn on the floor.
     WallBase { sid: u64, wid: u64, start: Pos2 },
@@ -853,6 +854,8 @@ pub struct App {
     space_place: Option<LayerId>,
     /// The next drag on the floor draws a wall's base line.
     wall_base_new: bool,
+    /// The next drag in the space tool draws the tape measure.
+    space_tape_draw: bool,
     /// Selected wall of the active space, and whether the next drag draws a new one.
     wall_sel: Option<u64>,
     wall_new: bool,
@@ -997,6 +1000,7 @@ impl App {
             space_ref_draw: false,
             space_place: None,
             wall_base_new: false,
+            space_tape_draw: false,
             wall_sel: None,
             wall_new: false,
             grs2d: None,
@@ -1155,6 +1159,18 @@ impl App {
                     let n: Vec<f32> = o.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if n.len() == 2 {
                         sp.origin = im.src_to_world(pos2(n[0], n[1]));
+                    }
+                }
+                // DV_SPACE_TAPE="x1,y1,x2,y2" (photo pixels): a tape measure
+                if let Ok(v) = std::env::var("DV_SPACE_TAPE") {
+                    let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 4 {
+                        let (a, b) = (im.src_to_world(pos2(n[0], n[1])), im.src_to_world(pos2(n[2], n[3])));
+                        let mut r = crate::persp::RefLine { a, b, axis: 0, metres: 0.0 };
+                        if let Some(ax) = crate::persp::solve(&sp).ok().and_then(|c| r.infer_axis(&c)) {
+                            r.axis = ax;
+                        }
+                        sp.tape = Some(r);
                     }
                 }
                 // DV_SPACE_REF="x1,y1,x2,y2,axis,metres" (photo pixels): a reference length
@@ -5347,6 +5363,15 @@ impl App {
                 return;
             }
         }
+        if self.space_tape_draw {
+            if let Some(i) = self.space_idx() {
+                let id = self.doc.spaces[i].id;
+                self.doc.spaces[i].tape = Some(crate::persp::RefLine { a: w, b: w, axis: 0, metres: 0.0 });
+                self.drag = Some(Drag::SpaceTape { id });
+                self.mark();
+                return;
+            }
+        }
         if self.space_ref_draw {
             if let Some(i) = self.space_idx() {
                 let id = self.doc.spaces[i].id;
@@ -5724,6 +5749,20 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::SpaceTape { id } => {
+                let id = *id;
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    let cam = crate::persp::solve(sp).ok();
+                    if let Some(r) = sp.tape.as_mut() {
+                        r.b = w;
+                        if let Some(ax) = cam.as_ref().and_then(|c| r.infer_axis(c)) {
+                            r.axis = ax;
+                        }
+                    }
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::SpaceRef { id } => {
                 let id = *id;
                 if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
@@ -6039,6 +6078,15 @@ impl App {
                     if tiny {
                         sp.walls.retain(|x| x.id != wid);
                         self.wall_sel = None;
+                    }
+                }
+            }
+            Drag::SpaceTape { id } => {
+                self.space_tape_draw = false;
+                let zoom = self.zoom;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    if s.tape.is_some_and(|r| r.a.distance(r.b) * zoom < 6.0) {
+                        s.tape = None;
                     }
                 }
             }
@@ -8888,6 +8936,7 @@ impl App {
         }
         let mut floor_req: Option<f64> = None;
         let mut place_toggle: Option<LayerId> = None;
+        let (mut tape_toggle, mut tape_clear) = (false, false);
         let (mut ref_toggle, mut ref_clear) = (false, false);
         let mut ref_metres: Option<f64> = None;
         let sp = &self.doc.spaces[i];
@@ -8946,6 +8995,24 @@ impl App {
                     None => {}
                 }
                 // AR-style placing: the selected layer stands where the floor is clicked
+                // tape measure: metres against the reference length
+                let tape = self.doc.spaces[i].tape;
+                let tape_m = self.doc.spaces[i].tape_metres(&cam);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.selectable_label(self.space_tape_draw, "줄자").on_hover_text("기준면 위 점에서 끌기 · 수평: 거리, 수직: 높이").clicked() {
+                        tape_toggle = true;
+                    }
+                    if tape.is_some() {
+                        match tape_m {
+                            Some(m) => ui.label(format!("{m:.2} m")),
+                            None => ui.label(egui::RichText::new("기준 길이 필요").color(INK_3())),
+                        };
+                        if ui.small_button("지우기").clicked() {
+                            tape_clear = true;
+                        }
+                    }
+                });
                 let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked).map(|l| l.id);
                 if let Some(lid) = placeable {
                     let armed = self.space_place == Some(lid);
@@ -9059,6 +9126,17 @@ impl App {
         if let Some(f) = floor_req {
             s.floor = f.max(1.0);
             ch = true;
+        }
+        if tape_clear {
+            s.tape = None;
+            ch = true;
+        }
+        if tape_toggle {
+            self.space_tape_draw = !self.space_tape_draw;
+            if self.space_tape_draw {
+                self.space_ref_draw = false;
+                self.status = "기준면 위 점에서 끌어 재기".into();
+            }
         }
         if let Some(lid) = place_toggle {
             self.space_place = if self.space_place == Some(lid) { None } else { Some(lid) };
@@ -9247,6 +9325,17 @@ impl App {
                     painter.line_segment([p - n, p + n], Stroke::new(2.0, col));
                 }
                 painter.text(a.lerp(b, 0.5) + n * 1.6, Align2::CENTER_CENTER, format!("{} m", trim_num(r.metres)), FontId::proportional(12.0), col);
+            }
+            if let Some(r) = s.tape {
+                let (a, b) = (xf.w2s(r.a), xf.w2s(r.b));
+                let col = Color32::from_rgb(255, 214, 90);
+                painter.extend(Shape::dashed_line(&[a, b], Stroke::new(2.0, col), 6.0, 4.0));
+                let n = (b - a).normalized().rot90() * 5.0;
+                for p in [a, b] {
+                    painter.line_segment([p - n, p + n], Stroke::new(2.0, col));
+                }
+                let label = cam.as_ref().and_then(|c| s.tape_metres(c)).map_or("?".to_string(), |m| format!("{m:.2} m"));
+                painter.text(a.lerp(b, 0.5) + n * 2.0, Align2::CENTER_CENTER, label, FontId::proportional(12.0), col);
             }
             for (i, l) in s.lines.iter().enumerate() {
                 let c = AXIS_COLORS[(l.axis as usize).min(2)];
