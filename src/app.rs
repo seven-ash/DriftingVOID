@@ -175,6 +175,7 @@ enum Drag {
     SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
     SpaceOrigin { id: u64 },
     SpaceMask { id: u64, start: Pos2 },
+    SpaceRef { id: u64 },
     WallRect { sid: u64, wid: u64, start: Pos2 },
     /// Canvas camera rectangle (handles as `rect_handles`, 8 = move).
     Cam { id: u64, handle: u8, start: Pos2, orig: Rect },
@@ -845,6 +846,8 @@ pub struct App {
     tab_raw: Vec<(bool, bool)>,
     /// The next drag in the space tool draws the active space's mask.
     space_mask_draw: bool,
+    /// The next drag in the space tool draws the reference length.
+    space_ref_draw: bool,
     /// Selected wall of the active space, and whether the next drag draws a new one.
     wall_sel: Option<u64>,
     wall_new: bool,
@@ -986,6 +989,7 @@ impl App {
             peek: false,
             tab_raw: Vec::new(),
             space_mask_draw: false,
+            space_ref_draw: false,
             wall_sel: None,
             wall_new: false,
             grs2d: None,
@@ -1144,6 +1148,15 @@ impl App {
                     let n: Vec<f32> = o.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if n.len() == 2 {
                         sp.origin = im.src_to_world(pos2(n[0], n[1]));
+                    }
+                }
+                // DV_SPACE_REF="x1,y1,x2,y2,axis,metres" (photo pixels): a reference length
+                if let Ok(v) = std::env::var("DV_SPACE_REF") {
+                    let n: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 6 {
+                        let a = im.src_to_world(pos2(n[0] as f32, n[1] as f32));
+                        let b = im.src_to_world(pos2(n[2] as f32, n[3] as f32));
+                        sp.ref_line = Some(crate::persp::RefLine { a, b, axis: n[4] as u8, metres: n[5] });
                     }
                 }
                 app.doc.spaces.push(sp);
@@ -5254,6 +5267,17 @@ impl App {
                 return;
             }
         }
+        if self.space_ref_draw {
+            if let Some(i) = self.space_idx() {
+                let id = self.doc.spaces[i].id;
+                let axis = self.space_axis;
+                let metres = self.doc.spaces[i].ref_line.map_or(1.0, |r| r.metres);
+                self.doc.spaces[i].ref_line = Some(crate::persp::RefLine { a: w, b: w, axis, metres });
+                self.drag = Some(Drag::SpaceRef { id });
+                self.mark();
+                return;
+            }
+        }
         if self.space_mask_draw {
             if let Some(i) = self.space_idx() {
                 let id = self.doc.spaces[i].id;
@@ -5620,6 +5644,14 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::SpaceRef { id } => {
+                let id = *id;
+                if let Some(r) = self.doc.spaces.iter_mut().find(|s| s.id == id).and_then(|s| s.ref_line.as_mut()) {
+                    r.b = w;
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::SpaceMask { id, start } => {
                 let (id, start) = (*id, *start);
                 if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
@@ -5909,6 +5941,15 @@ impl App {
                     if tiny {
                         sp.walls.retain(|x| x.id != wid);
                         self.wall_sel = None;
+                    }
+                }
+            }
+            Drag::SpaceRef { id } => {
+                self.space_ref_draw = false;
+                let zoom = self.zoom;
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    if s.ref_line.is_some_and(|r| r.a.distance(r.b) * zoom < 6.0) {
+                        s.ref_line = None;
                     }
                 }
             }
@@ -8747,8 +8788,8 @@ impl App {
             self.set_space_axis(ax);
         }
         let mut height_req: Option<f64> = None;
-        let mut metre_req: Option<f64> = None;
-        let mut guess_req: Option<f64> = None;
+        let (mut ref_toggle, mut ref_clear) = (false, false);
+        let mut ref_metres: Option<f64> = None;
         let sp = &self.doc.spaces[i];
         match crate::persp::solve(sp) {
             Ok(cam) => {
@@ -8768,22 +8809,28 @@ impl App {
                         height_req = Some(h as f64);
                     }
                 });
-                // metres: a real height typed in, else a guess that the camera was at
-                // eye height when the space was first solved
-                let (um, guess) = (self.doc.spaces[i].unit_m, self.doc.spaces[i].unit_guess);
-                if um.is_none() && h0.abs() > 1e-6 {
-                    guess_req = Some(crate::persp::EYE_HEIGHT_M / h0.abs() as f64);
-                }
+                // metres only with a reference length (a photo alone has no scale)
+                let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
-                    let mut no = false;
-                    crate::dial::label_cell(ui, if guess || um.is_none() { "추정 높이" } else { "실제 높이" }, None, &mut no);
-                    let mut m = um.map_or(crate::persp::EYE_HEIGHT_M, |k| h0.abs() as f64 * k);
-                    let r = ui.add(crate::calc::drag(&mut m).range(0.0..=1000.0).speed(0.01).max_decimals(2).suffix(" m"));
-                    if r.changed() && m > 0.0 && h0.abs() > 1e-6 {
-                        metre_req = Some(m / h0.abs() as f64);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.selectable_label(self.space_ref_draw, "기준 길이").on_hover_text("바닥에 닿은 점에서 시작해 축 방향으로 긋기 · Z: 수직 높이").clicked() {
+                        ref_toggle = true;
                     }
-                    r.on_hover_text(if guess || um.is_none() { "눈높이 1.6 m 가정 · 실제 높이 입력 시 기준" } else { "카메라의 실제 높이 · 미터 환산 기준" });
+                    if let Some(mut r) = rl {
+                        let before = r.metres;
+                        ui.spacing_mut().interact_size.x = 56.0;
+                        ui.add(crate::calc::drag(&mut r.metres).range(0.001..=100000.0).speed(0.01).max_decimals(3).suffix(" m"));
+                        if r.metres != before {
+                            ref_metres = Some(r.metres);
+                        }
+                        if ui.small_button("지우기").clicked() {
+                            ref_clear = true;
+                        }
+                    }
                 });
+                if let Some(k) = rl.and_then(|r| r.unit_m(&cam)) {
+                    ui.small(format!("카메라 높이 ≈ {:.2} m", h0.abs() as f64 * k));
+                }
             }
             Err(e) => {
                 ui.small(egui::RichText::new(e).color(INK_2()));
@@ -8887,14 +8934,20 @@ impl App {
             s.origin = o;
             ch = true;
         }
-        if let Some(k) = metre_req {
-            s.unit_m = Some(k);
-            s.unit_guess = false;
+        if let (Some(m), Some(r)) = (ref_metres, s.ref_line.as_mut()) {
+            r.metres = m;
             ch = true;
-        } else if let Some(k) = guess_req {
-            // not an edit: the guess is just remembered with the space
-            s.unit_m = Some(k);
-            s.unit_guess = true;
+        }
+        if ref_clear {
+            s.ref_line = None;
+            ch = true;
+        }
+        if ref_toggle {
+            self.space_ref_draw = !self.space_ref_draw;
+            if self.space_ref_draw {
+                self.space_mask_draw = false;
+                self.status = "바닥 점에서 축 방향으로 끌어 기준 길이".into();
+            }
         }
         if mask_clear {
             s.mask = None;
@@ -9041,6 +9094,18 @@ impl App {
                 let pts = vec![mr.left_top(), mr.right_top(), mr.right_bottom(), mr.left_bottom(), mr.left_top()];
                 painter.extend(Shape::dashed_line(&pts, Stroke::new(1.4, ACCENT), 4.0, 4.0));
                 painter.text(mr.left_bottom() + vec2(0.0, 4.0), Align2::LEFT_TOP, "마스크", FontId::proportional(11.0), ACCENT);
+            }
+            if let Some(r) = s.ref_line {
+                let (a, b) = (xf.w2s(r.a), xf.w2s(r.b));
+                let col = Color32::WHITE;
+                painter.line_segment([a, b], Stroke::new(4.0, Color32::from_black_alpha(140)));
+                painter.line_segment([a, b], Stroke::new(2.0, col));
+                // end ticks across the line
+                let n = (b - a).normalized().rot90() * 6.0;
+                for p in [a, b] {
+                    painter.line_segment([p - n, p + n], Stroke::new(2.0, col));
+                }
+                painter.text(a.lerp(b, 0.5) + n * 1.6, Align2::CENTER_CENTER, format!("{} m", trim_num(r.metres)), FontId::proportional(12.0), col);
             }
             for (i, l) in s.lines.iter().enumerate() {
                 let c = AXIS_COLORS[(l.axis as usize).min(2)];
@@ -10318,6 +10383,12 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign) -> bool {
         }
     });
     changed
+}
+
+/// A number without trailing zeros (up to 3 decimals).
+fn trim_num(v: f64) -> String {
+    let t = format!("{v:.3}");
+    t.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// A position number box ("—" when the selection's positions differ).

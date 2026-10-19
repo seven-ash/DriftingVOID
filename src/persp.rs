@@ -380,16 +380,49 @@ pub struct Space {
     /// Directional light for layers with thickness (shading only, no shadows).
     #[serde(default)]
     pub light: Option<Light>,
-    /// Metres per world unit: from a real camera height typed in, or a guess.
+    /// A length of known size in the picture: the metre scale.
     #[serde(default)]
-    pub unit_m: Option<f64>,
-    /// `unit_m` is the eye-height guess (camera at 1.6 m when first solved).
-    #[serde(default)]
-    pub unit_guess: bool,
+    pub ref_line: Option<RefLine>,
 }
 
-/// Assumed camera height (metres) when nothing else gives the scale.
-pub const EYE_HEIGHT_M: f64 = 1.6;
+/// A reference length drawn on the picture (canvas points). It starts on the
+/// floor at `a`; along X or Y it runs on the floor to `b`, along Z it rises
+/// straight up to the height of `b`. `metres` is its real length.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct RefLine {
+    pub a: Pos2,
+    pub b: Pos2,
+    pub axis: u8,
+    pub metres: f64,
+}
+
+impl RefLine {
+    /// Its length in world units for this camera (None when a point misses
+    /// the floor, e.g. above the horizon).
+    pub fn world_len(&self, cam: &Camera) -> Option<f64> {
+        let a = cam.unproject_plane(self.a, 2)?;
+        if self.axis < 2 {
+            let b = cam.unproject_plane(self.b, 2)?;
+            return Some(norm(sub(b, a)));
+        }
+        // the vertical through `a` against the ray through `b`: closest approach
+        let d = cam.ray(self.b);
+        let e = [0.0, 0.0, 1.0];
+        let w = sub(a, cam.center);
+        let (ee, ed, dd) = (dot(e, e), dot(e, d), dot(d, d));
+        let den = ee * dd - ed * ed;
+        if den.abs() < 1e-12 {
+            return None;
+        }
+        let t = (ed * dot(d, w) - dd * dot(e, w)) / den;
+        Some(t.abs())
+    }
+
+    /// Metres per world unit, when the line can be measured.
+    pub fn unit_m(&self, cam: &Camera) -> Option<f64> {
+        self.world_len(cam).filter(|l| *l > 1e-9).map(|l| self.metres / l)
+    }
+}
 
 /// A directional light: turned by `rot` (degrees, X then Y then Z) from shining
 /// along +Z; `ambient` is the brightness of faces turned away.
@@ -518,7 +551,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, unit_m: None, unit_guess: false }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, ref_line: None }
     }
 
     /// The canvas area the space shows in.
@@ -1335,6 +1368,17 @@ mod tests {
             let (pa, pb) = (cam.project(scale(w, s)).unwrap(), t.project(w).unwrap());
             assert!(pa.distance(pb) < 3.0 * (noise.max(0.1)), "{pa:?} vs {pb:?}");
         }
+    }
+
+    #[test]
+    fn reference_lengths_measure_the_world() {
+        let t = truth();
+        // a 120-unit floor edge along X and a 90-unit post at (50, 40)
+        let x = RefLine { a: t.project([0.0, 0.0, 0.0]).unwrap(), b: t.project([120.0, 0.0, 0.0]).unwrap(), axis: 0, metres: 1.2 };
+        assert!((x.world_len(&t).unwrap() - 120.0).abs() < 1e-3);
+        assert!((x.unit_m(&t).unwrap() - 0.01).abs() < 1e-6);
+        let z = RefLine { a: t.project([50.0, 40.0, 0.0]).unwrap(), b: t.project([50.0, 40.0, 90.0]).unwrap(), axis: 2, metres: 0.9 };
+        assert!((z.world_len(&t).unwrap() - 90.0).abs() < 1e-2, "{:?}", z.world_len(&t));
     }
 
     #[test]
