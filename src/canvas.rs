@@ -386,7 +386,20 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
         cache.sides(ctx, layer, res, u, v, &l)
     });
     let n0 = pl.normal();
-    const N: usize = 12;
+    // grid cells of about 24 screen px: each cell is mapped affinely, so long
+    // boxes seen in depth (long text) need many columns, not a fixed 12×12
+    let px_len = |a: Pos2, b: Pos2| (b - a).length() * xf.zoom * ppp;
+    let along = px_len(corners[0], corners[1]).max(px_len(corners[3], corners[2]));
+    let across = px_len(corners[0], corners[3]).max(px_len(corners[1], corners[2]));
+    let grid = |cells: f32| {
+        let (mut nx, mut ny) = ((along / 24.0).ceil().max(2.0), (across / 24.0).ceil().max(2.0));
+        let k = (cells / (nx * ny)).sqrt().min(1.0);
+        nx = (nx * k).ceil().clamp(2.0, 512.0);
+        ny = (ny * k).ceil().clamp(2.0, 512.0);
+        (nx as usize, ny as usize)
+    };
+    // caps get the fine grid; the many side slices a coarser one
+    let (cap_grid, side_grid) = (grid(4096.0), grid(256.0));
     for (off, is_cap) in slices {
         let h = if off == 0.0 { h } else { pl.homography_at(cam, off) };
         let (color, slice_tex) = match (light, lit_sides) {
@@ -402,11 +415,12 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
             }
             _ => (if is_cap { cap } else { side }, tex),
         };
+        let (nx, ny) = if is_cap { cap_grid } else { side_grid };
         let mut m = Mesh::with_texture(slice_tex);
         let mut ok = true;
-        for j in 0..=N {
-            for i in 0..=N {
-                let t = vec2(i as f32 / N as f32, j as f32 / N as f32);
+        for j in 0..=ny {
+            for i in 0..=nx {
+                let t = vec2(i as f32 / nx as f32, j as f32 / ny as f32);
                 let p = rect.min + rect.size() * t;
                 let Some(s) = apply_h(&h, p) else {
                     ok = false;
@@ -419,10 +433,10 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
         if !ok {
             continue;
         }
-        for j in 0..N as u32 {
-            for i in 0..N as u32 {
-                let a = j * (N as u32 + 1) + i;
-                let c = a + N as u32 + 1;
+        for j in 0..ny as u32 {
+            for i in 0..nx as u32 {
+                let a = j * (nx as u32 + 1) + i;
+                let c = a + nx as u32 + 1;
                 m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
             }
         }

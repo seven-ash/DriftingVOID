@@ -1051,6 +1051,26 @@ impl App {
             app.editing = Some(id);
             app.edit_focus = true;
         }
+        if std::env::var_os("DV_TEST_TEXT_LONG").is_some() {
+            // a long one-line text box (layout/texture checks)
+            app.tool = Tool::Text;
+            // "size,repeats"
+            let v = std::env::var("DV_TEST_TEXT_LONG").unwrap_or_default();
+            let mut it = v.split(',').map(|x| x.parse::<f32>().ok());
+            let size = it.next().flatten().unwrap_or(40.0);
+            let reps = it.next().flatten().unwrap_or(8.0) as usize;
+            app.s.text_size = size;
+            let txt = "가나다라마바사아자차카타파하 ABCDEFGHIJ abcdefghij 0123456789 ".repeat(reps);
+            let id = app.new_text_layer(pos2(-600.0, 0.0), txt);
+            app.sel = Some(id);
+            if v.ends_with(",edit") {
+                app.editing = Some(id);
+                app.edit_focus = true;
+            } else {
+                app.editing = None;
+                app.tool = Tool::Select;
+            }
+        }
         if std::env::var_os("DV_SELECT_PHOTO").is_some() {
             // selects the first photo (for screenshots of its properties)
             app.sel = app.doc.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))).map(|l| l.id);
@@ -1101,7 +1121,8 @@ impl App {
                     // the space axes; "select" leaves the first selected in the select tool
                     let o = app.doc.spaces.last().unwrap().origin;
                     let t1 = app.new_text_layer(o - vec2(160.0, 120.0), "Drifting VOID".into());
-                    let t2 = app.new_text_layer(o + vec2(-140.0, -40.0), "벽에 붙인 글자".into());
+                    let t2_text = std::env::var("DV_SPACE_TEXT").unwrap_or_else(|_| "벽에 붙인 글자".into());
+                    let t2 = app.new_text_layer(o + vec2(-140.0, -40.0), t2_text);
                     app.put_in_space(t1, id);
                     app.put_in_space(t2, id);
                     if let Some(pl) = app.doc.get_mut(t2).and_then(|l| l.place.as_mut()) {
