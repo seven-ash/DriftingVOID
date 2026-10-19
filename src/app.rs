@@ -5646,8 +5646,15 @@ impl App {
             }
             Drag::SpaceRef { id } => {
                 let id = *id;
-                if let Some(r) = self.doc.spaces.iter_mut().find(|s| s.id == id).and_then(|s| s.ref_line.as_mut()) {
-                    r.b = w;
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    let cam = crate::persp::solve(sp).ok();
+                    if let Some(r) = sp.ref_line.as_mut() {
+                        r.b = w;
+                        // the axis follows the drawing (X/Y along the floor, Z up)
+                        if let Some(ax) = cam.as_ref().and_then(|c| r.infer_axis(c)) {
+                            r.axis = ax;
+                        }
+                    }
                 }
                 self.changed = true;
                 self.modified = true;
@@ -8750,7 +8757,8 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for sp in &self.doc.spaces {
-                if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, &sp.name).clicked() {
+                let name = elided(sp.name.clone(), egui::TextStyle::Body.resolve(ui.style()), INK(), 150.0);
+                if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, name).clicked() {
                     pick = Some(sp.id);
                 }
             }
@@ -8814,7 +8822,7 @@ impl App {
                 let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if ui.selectable_label(self.space_ref_draw, "기준 길이").on_hover_text("바닥에 닿은 점에서 시작해 축 방향으로 긋기 · Z: 수직 높이").clicked() {
+                    if ui.selectable_label(self.space_ref_draw, "기준 길이").on_hover_text("바닥에 닿은 점에서 시작해 긋기 · 축은 방향으로 자동 (수직: 높이)").clicked() {
                         ref_toggle = true;
                     }
                     if let Some(mut r) = rl {
@@ -8873,7 +8881,9 @@ impl App {
         if let Some(n) = &follow_name {
             ui.horizontal(|ui| {
                 let mut on = true;
-                if ui.checkbox(&mut on, format!("사진 따라가기 · {n}")).on_hover_text("사진을 옮기거나 크기·회전을 바꾸면 공간 전체가 함께").changed() {
+                // a long photo name is cut, not allowed to widen the panel
+                let label = elided(format!("사진 따라가기 · {n}"), egui::TextStyle::Body.resolve(ui.style()), INK(), ui.available_width() - 28.0);
+                if ui.checkbox(&mut on, label).on_hover_text(format!("{n}\n사진을 옮기거나 크기·회전을 바꾸면 공간 전체가 함께")).changed() {
                     unfollow = true;
                 }
             });
@@ -8895,7 +8905,8 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             ui.label("벽");
             for (wid, name) in &walls {
-                if ui.selectable_label(self.wall_sel == Some(*wid), name.as_str()).clicked() {
+                let short = elided(name.clone(), egui::TextStyle::Body.resolve(ui.style()), INK(), 150.0);
+                if ui.selectable_label(self.wall_sel == Some(*wid), short).clicked() {
                     wall_pick = Some(*wid);
                 }
             }
@@ -8958,7 +8969,7 @@ impl App {
             self.space_ref_draw = !self.space_ref_draw;
             if self.space_ref_draw {
                 self.space_mask_draw = false;
-                self.status = "바닥 점에서 축 방향으로 끌어 기준 길이".into();
+                self.status = "바닥 점에서 끌어 기준 길이".into();
             }
         }
         if mask_clear {
@@ -9109,7 +9120,7 @@ impl App {
             }
             if let Some(r) = s.ref_line {
                 let (a, b) = (xf.w2s(r.a), xf.w2s(r.b));
-                let col = Color32::WHITE;
+                let col = AXIS_COLORS[(r.axis as usize).min(2)].lerp_to_gamma(Color32::WHITE, 0.45);
                 painter.line_segment([a, b], Stroke::new(4.0, Color32::from_black_alpha(140)));
                 painter.line_segment([a, b], Stroke::new(2.0, col));
                 // end ticks across the line

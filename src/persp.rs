@@ -409,7 +409,9 @@ impl RefLine {
             (d[2] < -1e-9).then(|| add(cam.center, scale(d, -1.0 / d[2])))
         };
         let a = on_plane(self.a)?;
-        if self.axis < 2 {
+        // the drawn direction decides (older lines may hold the wrong axis)
+        let axis = self.infer_axis(cam).unwrap_or(self.axis);
+        if axis < 2 {
             let b = on_plane(self.b)?;
             return Some(norm(sub(b, a)));
         }
@@ -424,6 +426,31 @@ impl RefLine {
         }
         let t = (ed * dot(d, w) - dd * dot(e, w)) / den;
         Some(t.abs())
+    }
+
+    /// The world axis the drawn line follows best: the one whose direction at
+    /// its start point (towards that axis' vanishing point) is closest to it.
+    pub fn infer_axis(&self, cam: &Camera) -> Option<u8> {
+        let v = self.b - self.a;
+        if v.length() < 1e-3 {
+            return None;
+        }
+        let d = cam.ray(self.a);
+        if d[2] >= -1e-9 {
+            return None;
+        }
+        let p = add(cam.center, scale(d, -1.0 / d[2]));
+        let pa = cam.project(p)?;
+        (0..3u8)
+            .filter_map(|k| {
+                let mut e = [0.0; 3];
+                e[k as usize] = 0.01;
+                let q = cam.project(add(p, e))?;
+                let dir = q - pa;
+                (dir.length() > 1e-9).then(|| (k, (dir.normalized().dot(v.normalized())).abs()))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|x| x.0)
     }
 
     /// How high the camera is (metres) above the plane the line stands on.
@@ -1389,6 +1416,11 @@ mod tests {
         assert!((z.camera_height_m(&t).unwrap() - hc / 100.0).abs() < 1e-3);
         // a post standing on a table (plane z = 70): height above the table
         let tb = RefLine { a: t.project([-60.0, 80.0, 70.0]).unwrap(), b: t.project([-60.0, 80.0, 100.0]).unwrap(), axis: 2, metres: 0.3 };
+        // the axis comes from the drawing itself
+        assert_eq!(z.infer_axis(&t), Some(2));
+        assert_eq!(x.infer_axis(&t), Some(0));
+        let y = RefLine { a: t.project([0.0, 0.0, 0.0]).unwrap(), b: t.project([0.0, 150.0, 0.0]).unwrap(), axis: 0, metres: 1.0 };
+        assert_eq!(y.infer_axis(&t), Some(1));
         assert!((tb.camera_height_m(&t).unwrap() - (hc - 70.0) / 100.0).abs() < 1e-3);
     }
 
