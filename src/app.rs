@@ -1060,7 +1060,9 @@ impl App {
             let size = it.next().flatten().unwrap_or(40.0);
             let reps = it.next().flatten().unwrap_or(8.0) as usize;
             app.s.text_size = size;
-            let txt = "가나다라마바사아자차카타파하 ABCDEFGHIJ abcdefghij 0123456789 ".repeat(reps);
+            // a colour that stands out on the void
+            app.s.color = Color32::from_rgb(120, 230, 255);
+            let txt = "가나다라마바사아자차카타파하 ABCDEFGHIJ abcdefghij gjpqy 0123456789 ".repeat(reps);
             let id = app.new_text_layer(pos2(-600.0, 0.0), txt);
             app.sel = Some(id);
             // third value: a zoom on the box's middle
@@ -1074,6 +1076,11 @@ impl App {
             if v.ends_with(",edit") {
                 app.editing = Some(id);
                 app.edit_focus = true;
+            } else if v.ends_with(",plain") {
+                // nothing selected: no outline over the glyphs
+                app.sel = None;
+                app.editing = None;
+                app.tool = Tool::Select;
             } else {
                 app.editing = None;
                 app.tool = Tool::Select;
@@ -1513,6 +1520,13 @@ impl App {
             }
         }
         acc
+    }
+
+    /// Where the whole selection shows on the canvas (layers and drawing parts).
+    fn selection_bounds(&self) -> Option<Rect> {
+        let cams = crate::persp::cameras(&self.doc.spaces);
+        let layers = self.selected_ids().into_iter().filter_map(|id| self.doc.get(id)?.shown_bounds(&cams));
+        layers.chain(self.sub_bounds()).reduce(|a, b| a.union(b))
     }
 
     /// Does a world point land on something selected (to start a group move)?
@@ -6824,6 +6838,13 @@ impl App {
                         self.mark();
                     }
                 }
+                // exactly the selection's bounds (padding is set when saving)
+                if let Some(b) = self.selection_bounds() {
+                    if ui.button("선택에 맞추기").clicked() {
+                        self.doc.export_frame = Some(Rect::from_min_max(b.min.floor(), b.max.ceil()));
+                        self.mark();
+                    }
+                }
             }
             Tool::Space => self.space_panel(ui),
             Tool::Select => {
@@ -6870,13 +6891,15 @@ impl App {
             return;
         };
         if !self.extra_sel.is_empty() {
-            ui.label(egui::RichText::new(format!("{}개 선택 · 아래는 첫 번째 항목", self.extra_sel.len() + 1)).color(INK_3()));
+            ui.label(egui::RichText::new(format!("{}개 선택 · 첫 항목 값 표시 · 모두에 적용", self.extra_sel.len() + 1)).color(INK_3()));
         }
         if let Some(owner) = self.doc.get(id).and_then(|l| l.mask_of) {
             self.mask_props(ui, id, owner);
             return;
         }
         let Some(idx) = self.doc.index_of(id) else { return };
+        // the primary as it was, to pass the panel's edits on to the rest
+        let before = self.doc.layers[idx].clone();
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
@@ -7242,11 +7265,14 @@ impl App {
             }
         }
         if changed {
+            self.spread_edit(&before);
             self.mark();
         }
         let kc = kh.iter().enumerate().filter(|x| *x.1).fold(0u16, |a, (i, _)| a | (1 << i));
         if kc != 0 {
-            self.key_layer(id, kc);
+            for sid in self.selected_ids() {
+                self.key_layer(sid, kc);
+            }
         }
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
@@ -7274,11 +7300,13 @@ impl App {
             Some(VidAct::Still) => self.video_still(id),
             None => {}
         }
-        match space_req {
-            Some(Some((sid, None))) => self.put_in_space(id, sid),
-            Some(Some((sid, Some(wid)))) => self.put_in_wall(id, sid, wid),
-            Some(None) => self.take_out_of_space(id),
-            None => {}
+        for lid in self.selected_ids() {
+            match space_req {
+                Some(Some((sid, None))) => self.put_in_space(lid, sid),
+                Some(Some((sid, Some(wid)))) => self.put_in_wall(lid, sid, wid),
+                Some(None) => self.take_out_of_space(lid),
+                None => {}
+            }
         }
         if want_mask {
             self.mask_button(id);
@@ -7286,6 +7314,18 @@ impl App {
         }
         if start_crop {
             self.set_tool(Tool::Crop);
+        }
+    }
+
+    /// Passes an edit of the primary selection (`before` -> its state now) on to
+    /// the other selected layers: moves, turns and resizes as deltas, set
+    /// values (opacity, thickness, colours, fonts, blend...) as they are.
+    fn spread_edit(&mut self, before: &Layer) {
+        let Some(after) = self.sel_layer().cloned() else { return };
+        for id in self.extra_sel.clone() {
+            if let Some(l) = self.doc.get_mut(id).filter(|l| !l.locked) {
+                spread_to(before, &after, l);
+            }
         }
     }
 
@@ -9920,5 +9960,126 @@ impl eframe::App for App {
         if self.drag.is_some() || crate::penhook::state().barrel || self.frames < 6 {
             ctx.request_repaint();
         }
+    }
+}
+
+/// One edit (`before` -> `after`) applied to another layer `l`: moves, turns
+/// and resizes as deltas; opacity, thickness and style values as they are.
+fn spread_to(before: &Layer, after: &Layer, l: &mut Layer) {
+    use crate::anim::{ch, diff_ch, key_of};
+    let (kb, ka) = (key_of(before, 0.0), key_of(after, 0.0));
+    let c = diff_ch(&kb, &ka);
+    let ratio = |i: usize| if kb.ext[i].abs() > 1e-6 { ka.ext[i] / kb.ext[i] } else { 1.0 };
+    let mut k = key_of(l, 0.0);
+    if c & ch::POS != 0 {
+        k.center[0] += ka.center[0] - kb.center[0];
+        k.center[1] += ka.center[1] - kb.center[1];
+    }
+    if c & ch::SIZE != 0 {
+        k.ext = [k.ext[0] * ratio(0), k.ext[1] * ratio(1)];
+    }
+    if c & ch::ROT != 0 {
+        k.rot += ka.rot - kb.rot;
+    }
+    if c & ch::OPA != 0 {
+        k.opacity = ka.opacity;
+    }
+    if let (Some(b), Some(a), Some(p)) = (kb.place, ka.place, k.place.as_mut()) {
+        if c & ch::P_POS != 0 {
+            for i in 0..3 {
+                p.pos[i] += a.pos[i] - b.pos[i];
+            }
+        }
+        if c & ch::P_ROT != 0 {
+            for i in 0..3 {
+                p.rot[i] += a.rot[i] - b.rot[i];
+            }
+        }
+        if c & ch::P_SCALE != 0 && b.scale.abs() > 1e-9 {
+            p.scale *= a.scale / b.scale;
+        }
+        if c & ch::P_THICK != 0 {
+            p.thick = a.thick;
+        }
+    }
+    crate::anim::apply_key(l, &k);
+    copy_style(&before.kind, &after.kind, &mut l.kind);
+}
+
+/// Copies the style values that changed from `b` to `a` onto `l` (same kind
+/// only; the text itself is never copied).
+fn copy_style(b: &LayerKind, a: &LayerKind, l: &mut LayerKind) {
+    macro_rules! pass {
+        ($x:expr, $y:expr, $z:expr) => {
+            if $x != $y {
+                $z = $y.clone();
+            }
+        };
+    }
+    match (b, a, l) {
+        (LayerKind::Text(b), LayerKind::Text(a), LayerKind::Text(l)) => {
+            pass!(b.color, a.color, l.color);
+            pass!(b.family, a.family, l.family);
+            pass!(b.style, a.style, l.style);
+            pass!(b.bg, a.bg, l.bg);
+            pass!(b.wrap, a.wrap, l.wrap);
+            pass!(b.blend, a.blend, l.blend);
+        }
+        (LayerKind::Shape(b), LayerKind::Shape(a), LayerKind::Shape(l)) => {
+            pass!(b.color, a.color, l.color);
+            pass!(b.fill, a.fill, l.fill);
+            pass!(b.width, a.width, l.width);
+        }
+        (LayerKind::Image(b), LayerKind::Image(a), LayerKind::Image(l)) => {
+            pass!(b.adjust.brightness, a.adjust.brightness, l.adjust.brightness);
+            pass!(b.adjust.contrast, a.adjust.contrast, l.adjust.contrast);
+            pass!(b.adjust.saturation, a.adjust.saturation, l.adjust.saturation);
+        }
+        (LayerKind::Raster(b), LayerKind::Raster(a), LayerKind::Raster(l)) => {
+            pass!(b.blend, a.blend, l.blend);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(x: f32, size: f32) -> Layer {
+        let mut d = Document::default();
+        let t = TextLayer { pos: pos2(x, 0.0), text: "ab".into(), size, color: Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal };
+        let id = d.insert("t".into(), LayerKind::Text(t), None);
+        d.get(id).unwrap().clone()
+    }
+
+    #[test]
+    fn edits_spread_as_deltas_and_values() {
+        let before = text(0.0, 40.0);
+        let mut after = before.clone();
+        // primary: moved by 30, turned 0.2, made 2x bigger, half opaque, red
+        if let LayerKind::Text(t) = &mut after.kind {
+            t.rotation = 0.2;
+            t.color = Color32::RED;
+        }
+        let mut k = crate::anim::key_of(&after, 0.0);
+        k.center[0] += 30.0;
+        k.ext[0] *= 2.0;
+        k.opacity = 0.5;
+        crate::anim::apply_key(&mut after, &k);
+        let mut other = text(500.0, 20.0);
+        if let LayerKind::Text(t) = &mut other.kind {
+            t.rotation = 1.0;
+        }
+        let c0 = crate::anim::key_of(&other, 0.0).center;
+        spread_to(&before, &after, &mut other);
+        let ko = crate::anim::key_of(&other, 0.0);
+        let LayerKind::Text(t) = &other.kind else { unreachable!() };
+        assert!((ko.center[0] - c0[0] - 30.0).abs() < 1e-3, "moved by the same amount");
+        assert!((t.size - 40.0).abs() < 1e-3, "scaled by the same ratio");
+        assert!((t.rotation - 1.2).abs() < 1e-5, "turned by the same angle");
+        assert_eq!(other.opacity, 0.5);
+        assert_eq!(t.color, Color32::RED);
+        assert_eq!(t.text, "ab", "text itself is not copied");
     }
 }

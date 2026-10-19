@@ -145,9 +145,10 @@ pub fn layout(t: &TextLayer) -> TextLayout {
     let (mut top, mut bottom) = (0.0f32, h);
     for &(g, _, y) in &glyphs {
         if let Some(b) = *ink.entry(g).or_insert_with(|| font.outline(g).map(|o| o.bounds)) {
-            // outline bounds are font units, y up
-            top = top.min(y - b.max.y * sy);
-            bottom = bottom.max(y - b.min.y * sy);
+            // font units, y up (ab_glyph may hand min/max over swapped)
+            let (lo, hi) = (b.min.y.min(b.max.y), b.min.y.max(b.max.y));
+            top = top.min(y - hi * sy);
+            bottom = bottom.max(y - lo * sy);
         }
     }
     if top < 0.0 {
@@ -237,4 +238,21 @@ fn render_into(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2, w: u32, 
         });
     }
     Some(pm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_holds_every_glyph() {
+        // whatever the font's ascent/descent say, the rendered ink stays inside
+        let t = TextLayer { pos: Pos2::ZERO, text: "gjpqy ÅÉ Drifting".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default() };
+        let lay = layout(&t);
+        let pm = render(&t, &lay, 1.0, Vec2::ZERO).unwrap();
+        let (w, h) = (pm.width() as usize, pm.height() as usize);
+        let row = |y: usize| (0..w).any(|x| pm.data()[(y * w + x) * 4 + 3] > 0);
+        // the box edges (last row is the +1 margin) carry no ink
+        assert!(!row(0) && !row(h - 1), "ink touches the box edge");
+    }
 }
