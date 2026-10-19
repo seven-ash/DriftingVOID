@@ -1063,8 +1063,13 @@ impl App {
                 }
                 ids.push(id);
             }
-            app.sel = ids.first().copied();
-            app.extra_sel = ids[1..].to_vec();
+            // "single": the turned middle one alone (handle checks)
+            if std::env::var("DV_MULTI_DEMO").is_ok_and(|v| v == "single") {
+                app.sel = Some(ids[1]);
+            } else {
+                app.sel = ids.first().copied();
+                app.extra_sel = ids[1..].to_vec();
+            }
         }
         if std::env::var_os("DV_TEST_TEXT_LONG").is_some() {
             // a long one-line text box (layout/texture checks)
@@ -4090,11 +4095,25 @@ impl App {
 
     // ------------------------------------------------------------ handles
 
+    /// A lone text box or shape that gets the group's scale/rotate handles
+    /// (true: text, corners too; false: shape, rotate only — its ends resize it).
+    fn single_handles(&self) -> Option<bool> {
+        if !self.extra_sel.is_empty() || !self.sub.is_empty() || self.editing.is_some() {
+            return None;
+        }
+        let l = self.sel_layer().filter(|l| !l.locked && l.place.is_none() && l.mask_of.is_none())?;
+        match &l.kind {
+            LayerKind::Text(_) => Some(true),
+            LayerKind::Shape(_) => Some(false),
+            _ => None,
+        }
+    }
+
     /// Handles of the selection in screen space: (id, position).
-    /// Union of the selected layers' bounds (multi-selection only).
+    /// Union of the selected layers' bounds (several layers, or one text/shape).
     fn group_box(&self) -> Option<Rect> {
         if self.extra_sel.is_empty() && self.sub.is_empty() {
-            return None;
+            return self.single_handles().and_then(|_| self.sel_layer()?.bounds());
         }
         let whole = self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b));
         match (whole, self.sub_bounds()) {
@@ -4108,13 +4127,20 @@ impl App {
         let Some(b) = self.group_box().filter(|_| self.tool == Tool::Select) else { return Vec::new() };
         let xf = self.xf();
         let r = xf.rect_w2s(b);
-        vec![
-            (30, r.left_top()),
-            (31, r.right_top()),
-            (32, r.right_bottom()),
-            (33, r.left_bottom()),
-            (34, r.center_top() - vec2(0.0, 28.0)),
-        ]
+        let rot = (34, r.center_top() - vec2(0.0, 28.0));
+        match (self.single_handles(), self.sel_layer().map(|l| &l.kind)) {
+            (Some(false), _) => vec![rot],
+            // a lone text box: on its own (turned) outline
+            (Some(true), Some(LayerKind::Text(t))) => {
+                let tr = crate::text::layout(t).rect(t.pos);
+                let c = tr.center();
+                let q = [tr.left_top(), tr.right_top(), tr.right_bottom(), tr.left_bottom()].map(|p| xf.w2s(crate::doc::rot_about(p, c, t.rotation)));
+                let up = vec2(t.rotation.sin(), -t.rotation.cos());
+                let top = q[0] + (q[1] - q[0]) * 0.5;
+                vec![(30, q[0]), (31, q[1]), (32, q[2]), (33, q[3]), (34, top + up * 28.0)]
+            }
+            _ => vec![(30, r.left_top()), (31, r.right_top()), (32, r.right_bottom()), (33, r.left_bottom()), rot],
+        }
     }
 
     fn handles(&self) -> Vec<(u8, Pos2)> {
@@ -4146,7 +4172,7 @@ impl App {
             }
             LayerKind::Text(t) if self.tool == Tool::Select => {
                 let r = crate::text::layout(t).rect(t.pos);
-                out.push((20, xf.w2s(r.right_center())));
+                out.push((20, xf.w2s(crate::doc::rot_about(r.right_center(), r.center(), t.rotation))));
             }
             _ => {}
         }
@@ -8969,14 +8995,21 @@ impl App {
             painter.circle_filled(xf.w2s(*center), 3.0, ACCENT);
         } else if let Some(b) = self.group_box().filter(|_| self.tool == Tool::Select) {
             let r = xf.rect_w2s(b);
-            painter.rect_stroke(r, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
+            // a lone text/shape keeps its own outline; only the handles are added
+            if self.single_handles().is_none() {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
+            }
             let gh = self.group_handles();
-            let rh = gh[4].1;
-            painter.line_segment([r.center_top(), rh], Stroke::new(1.0, ACCENT));
-            painter.circle_filled(rh, 5.0, Color32::WHITE);
-            painter.circle_stroke(rh, 5.0, Stroke::new(1.5, ACCENT));
-            for (_, p) in &gh[..4] {
-                handle_box(painter, *p, ACCENT);
+            for (h, p) in &gh {
+                if *h == 34 {
+                    // stem from the outline's top middle (the turned one for text)
+                    let foot = if gh.len() == 5 { gh[0].1 + (gh[1].1 - gh[0].1) * 0.5 } else { r.center_top() };
+                    painter.line_segment([foot, *p], Stroke::new(1.0, ACCENT));
+                    painter.circle_filled(*p, 5.0, Color32::WHITE);
+                    painter.circle_stroke(*p, 5.0, Stroke::new(1.5, ACCENT));
+                } else {
+                    handle_box(painter, *p, ACCENT);
+                }
             }
         }
         let cams = crate::persp::cameras(&self.doc.spaces);
@@ -9028,6 +9061,17 @@ impl App {
                             }
                         }
                     }
+                }
+            }
+            LayerKind::Text(t) if t.rotation != 0.0 => {
+                // the turned box itself
+                let tr = crate::text::layout(t).rect(t.pos);
+                let c = tr.center();
+                let mut pts: Vec<Pos2> = [tr.left_top(), tr.right_top(), tr.right_bottom(), tr.left_bottom()].iter().map(|p| xf.w2s(crate::doc::rot_about(*p, c, t.rotation))).collect();
+                pts.push(pts[0]);
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0, accent), 5.0, 4.0));
+                for (_, p) in self.handles() {
+                    handle_box(painter, p, accent);
                 }
             }
             _ => {
