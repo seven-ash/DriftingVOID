@@ -405,7 +405,7 @@ mod tests {
         k1.center[0] += 100.0;
         l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], ..Default::default() });
         let tone = Arc::new(crate::audio::AudioData::from_samples(48_000, (0..96_000).map(|i| ((i / 2) as f32 * 0.05).sin() * 0.3).collect()));
-        let voice = crate::audio::Voice { data: tone, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 10.0), gain: 1.0 };
+        let voice = crate::audio::Voice { data: tone, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 10.0), gain: 1.0, env: None };
         let out = std::env::temp_dir().join("dv_export_test.mp4");
         let _ = std::fs::remove_file(&out);
         let job = Job {
@@ -453,7 +453,7 @@ mod tests {
         let info = crate::video::probe(&clip).unwrap();
         let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(64, 32)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([64, 32]) };
         let mut im = crate::doc::ImageLayer::new(src, egui::pos2(0.0, 0.0));
-        im.video = Some(crate::doc::VideoRef { path: clip.to_string_lossy().into(), info, time: 0.0, speed: 1.0, looping: false, mute: false, slot: 1 });
+        im.video = Some(crate::doc::VideoRef { path: clip.to_string_lossy().into(), info, time: 0.0, speed: 1.0, looping: false, mute: false, volume: 1.0, slot: 1 });
         let mut doc = Document::default();
         doc.insert("v".into(), LayerKind::Image(im), None);
         let job = Job {

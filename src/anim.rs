@@ -61,7 +61,13 @@ pub mod ch {
     pub const P_SCALE: u16 = 64;
     pub const P_THICK: u16 = 128;
     pub const FOLLOW: u16 = 256;
-    pub const ALL: u16 = 511;
+    /// Sound volume (video layers, sound clips).
+    pub const VOL: u16 = 512;
+    pub const ALL: u16 = 1023;
+    /// Everything a key held before volume existed (older files).
+    pub const OLD_ALL: u16 = 511;
+    /// Number of value bits.
+    pub const COUNT: u16 = 10;
 }
 
 /// The values that differ between two states (for auto-key).
@@ -79,6 +85,9 @@ pub fn diff_ch(a: &Key, b: &Key) -> u16 {
     }
     if ne(a.opacity, b.opacity) {
         c |= ch::OPA;
+    }
+    if ne(a.vol, b.vol) {
+        c |= ch::VOL;
     }
     if a.follow != b.follow {
         c |= ch::FOLLOW;
@@ -103,7 +112,11 @@ pub fn diff_ch(a: &Key, b: &Key) -> u16 {
 }
 
 fn all_ch() -> u16 {
-    ch::ALL
+    ch::OLD_ALL
+}
+
+fn unit_vol() -> f32 {
+    1.0
 }
 
 /// Copies the values named by `c` from `src` into `dst`.
@@ -119,6 +132,9 @@ fn copy_ch(dst: &mut Key, src: &Key, c: u16) {
     }
     if c & ch::OPA != 0 {
         dst.opacity = src.opacity;
+    }
+    if c & ch::VOL != 0 {
+        dst.vol = src.vol;
     }
     if c & ch::FOLLOW != 0 {
         dst.follow = src.follow;
@@ -156,9 +172,12 @@ pub struct Key {
     /// Offsets blend between keys on the same layer; switching holds.
     #[serde(default)]
     pub follow: Option<Option<Follow>>,
-    /// Which values this key holds (`ch`); older files hold everything.
+    /// Which values this key holds (`ch`); older files hold everything they knew.
     #[serde(default = "all_ch")]
     pub ch: u16,
+    /// Sound volume (1 = as recorded).
+    #[serde(default = "unit_vol")]
+    pub vol: f32,
 }
 
 fn lerp(a: f32, b: f32, u: f64) -> f32 {
@@ -177,6 +196,7 @@ impl Key {
             ext: [lerp(self.ext[0], o.ext[0], u), lerp(self.ext[1], o.ext[1], u)],
             rot: lerp(self.rot, o.rot, u),
             opacity: lerp(self.opacity, o.opacity, u),
+            vol: lerp(self.vol, o.vol, u),
             place: match (self.place, o.place) {
                 (Some(a), Some(b)) => Some(PlaceKey {
                     pos: lerp3(a.pos, b.pos, u),
@@ -257,7 +277,7 @@ impl Anim {
             return None;
         }
         let mut out = Key { t, ..*base };
-        for bit in 0..9 {
+        for bit in 0..ch::COUNT {
             let c = 1u16 << bit;
             let ks: Vec<&Key> = self.keys.iter().filter(|k| k.ch & c != 0).collect();
             let (Some(first), Some(last)) = (ks.first(), ks.last()) else { continue };
@@ -332,12 +352,34 @@ pub struct AudioClip {
     pub gain: f32,
     #[serde(default)]
     pub mute: bool,
+    /// Volume keys (VOL only).
+    #[serde(default)]
+    pub anim: Anim,
 }
 
 impl AudioClip {
     pub fn end(&self) -> f64 {
         self.start + self.len
     }
+
+    /// A key holding this clip's volume at `t`.
+    pub fn vol_key(&self, t: f64) -> Key {
+        Key { t, center: [0.0; 2], ext: [0.0; 2], rot: 0.0, opacity: 1.0, place: None, ease: Ease::default(), follow: None, ch: ch::VOL, vol: self.gain }
+    }
+}
+
+/// Volume over timeline time from keys (`None` when nothing is keyed): samples
+/// every 10 ms from `t0` to `t1`, for the sound mixer.
+pub fn vol_envelope(anim: &Anim, t0: f64, t1: f64) -> Option<crate::audio::Envelope> {
+    if !anim.keys.iter().any(|k| k.ch & ch::VOL != 0) {
+        return None;
+    }
+    let dt = 0.01;
+    let t1 = t1.min(t0 + 3600.0).max(t0);
+    let n = ((t1 - t0) / dt).ceil() as usize + 2;
+    let base = anim.keys[0];
+    let v: Vec<f32> = (0..n).map(|i| anim.sample_on(t0 + i as f64 * dt, &base).map_or(1.0, |k| k.vol)).collect();
+    Some(crate::audio::Envelope { t0, dt, v })
 }
 
 /// A camera on the canvas: a region that can move over time and is shown in its
@@ -371,7 +413,7 @@ pub struct Follow {
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL & !ch::VOL, vol: 1.0 }
     }
 
     pub fn apply(&mut self, k: &Key) {
@@ -457,7 +499,17 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         place: l.place.as_ref().map(|p| PlaceKey { pos: p.pos, rot: p.rot, scale: p.scale, thick: p.thick }),
         ease: Ease::default(),
         follow: None,
-        ch: ch::ALL,
+        // only video layers have a volume to key
+        ch: if video_vol(l).is_some() { ch::ALL } else { ch::ALL & !ch::VOL },
+        vol: video_vol(l).unwrap_or(1.0),
+    }
+}
+
+/// A video layer's sound volume.
+fn video_vol(l: &Layer) -> Option<f32> {
+    match &l.kind {
+        LayerKind::Image(im) => im.video.as_ref().map(|v| v.volume),
+        _ => None,
     }
 }
 
@@ -469,6 +521,9 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
             im.center = c;
             im.scale = k.ext[0].max(1e-4);
             im.rotation = k.rot;
+            if let Some(v) = im.video.as_mut() {
+                v.volume = k.vol.max(0.0);
+            }
         }
         LayerKind::Text(tx) => {
             tx.size = k.ext[0].max(1.0);
@@ -496,6 +551,13 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
 
 /// Writes every keyed layer's and camera's state at the playhead.
 pub fn evaluate(doc: &mut Document) {
+    let t = doc.timeline.time;
+    for a in doc.audio.iter_mut() {
+        let base = a.vol_key(t);
+        if let Some(k) = a.anim.sample_on(t, &base) {
+            a.gain = k.vol.max(0.0);
+        }
+    }
     let t = doc.timeline.time;
     for l in &mut doc.layers {
         let base = key_of(l, t);
@@ -559,8 +621,26 @@ mod tests {
     use crate::doc::{ShapeKind, ShapeLayer};
     use egui::Color32;
 
+    #[test]
+    fn clip_volume_keys_make_an_envelope() {
+        let mut a = AudioClip { id: 1, name: "a".into(), path: "a.wav".into(), start: 1.0, offset: 0.0, len: 4.0, gain: 1.0, mute: false, anim: Anim::default() };
+        let mut k0 = a.vol_key(1.0);
+        k0.ease = Ease::Linear;
+        a.anim.set_key(k0);
+        a.gain = 0.0;
+        a.anim.set_key(a.vol_key(3.0));
+        let e = vol_envelope(&a.anim, a.start, a.end()).unwrap();
+        assert!((e.at(1.0) - 1.0).abs() < 1e-3);
+        assert!((e.at(2.0) - 0.5).abs() < 1e-2, "{}", e.at(2.0));
+        assert!(e.at(4.5).abs() < 1e-3, "holds after the last key");
+        // a key from an older file holds everything it knew, not the volume
+        let old: Key = serde_json::from_str(r#"{"t":0,"center":[0,0],"ext":[1,0],"rot":0,"opacity":1}"#).unwrap();
+        assert_eq!(old.ch & ch::VOL, 0);
+        assert_eq!(old.vol, 1.0);
+    }
+
     fn k(t: f64, x: f32) -> Key {
-        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL }
+        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL, vol: 1.0 }
     }
 
     #[test]

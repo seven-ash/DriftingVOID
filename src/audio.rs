@@ -84,6 +84,28 @@ pub struct Voice {
     pub speed: f64,
     pub span: (f64, f64),
     pub gain: f32,
+    /// Keyed volume over timeline time (replaces `gain` where present).
+    pub env: Option<Arc<Envelope>>,
+}
+
+/// Volume sampled every `dt` seconds of timeline time from `t0`.
+#[derive(Debug)]
+pub struct Envelope {
+    pub t0: f64,
+    pub dt: f64,
+    pub v: Vec<f32>,
+}
+
+impl Envelope {
+    pub fn at(&self, t: f64) -> f32 {
+        let x = ((t - self.t0) / self.dt).max(0.0);
+        let i = x.floor() as usize;
+        match (self.v.get(i), self.v.get(i + 1)) {
+            (Some(a), Some(b)) => a + (b - a) * (x - i as f64) as f32,
+            (Some(a), None) => *a,
+            _ => self.v.last().copied().unwrap_or(1.0),
+        }
+    }
 }
 
 /// Mixed stereo sample at timeline time `t`.
@@ -92,8 +114,9 @@ pub fn mix_at(voices: &[Voice], t: f64) -> (f32, f32) {
     for v in voices {
         if t >= v.span.0 && t < v.span.1 {
             if let Some((a, b)) = v.data.at(v.src0 + (t - v.t0) * v.speed) {
-                l += a * v.gain;
-                r += b * v.gain;
+                let g = v.env.as_ref().map_or(v.gain, |e| e.at(t));
+                l += a * g;
+                r += b * g;
             }
         }
     }
@@ -210,7 +233,7 @@ mod tests {
     #[test]
     fn mixing_follows_the_mapping() {
         let d = ramp(1000, 2.0);
-        let v = Voice { data: d.clone(), t0: 5.0, src0: 0.5, speed: 2.0, span: (5.0, 6.0), gain: 1.0 };
+        let v = Voice { data: d.clone(), t0: 5.0, src0: 0.5, speed: 2.0, span: (5.0, 6.0), gain: 1.0, env: None };
         // timeline 5.25 -> source 1.0 -> half of the ramp
         let (l, r) = mix_at(std::slice::from_ref(&v), 5.25);
         assert!((l - 0.5).abs() < 1e-2 && (r + 0.5).abs() < 1e-2, "{l} {r}");
@@ -237,7 +260,7 @@ mod tests {
     fn output_clock_runs() {
         let Ok(out) = Output::open() else { return };
         let d = ramp(out.rate, 2.0);
-        out.play(vec![Voice { data: d, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 2.0), gain: 0.0 }], 1.0);
+        out.play(vec![Voice { data: d, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 2.0), gain: 0.0, env: None }], 1.0);
         std::thread::sleep(std::time::Duration::from_millis(400));
         let p = out.pos().unwrap();
         assert!(p > 1.1 && p < 1.8, "{p}");

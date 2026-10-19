@@ -351,7 +351,7 @@ mod video_tests {
         // a preview-sized frame without file bytes, as video frames are
         let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]) };
         let mut im = ImageLayer::new(src, pos2(10.0, 20.0));
-        im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, mute: false, slot: 1 });
+        im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, mute: false, volume: 1.0, slot: 1 });
         assert_eq!(im.crop.size(), vec2(1920.0, 1080.0));
         let mut doc = Document::default();
         doc.insert("v".into(), LayerKind::Image(im), None);

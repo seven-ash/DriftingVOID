@@ -1705,7 +1705,7 @@ impl App {
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("영상").to_string();
         let id = self.add_image(src, name, at);
         if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, mute: false, slot: next_rev() });
+            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, mute: false, volume: 1.0, slot: next_rev() });
         }
         Ok(info.width as f32)
     }
@@ -1772,7 +1772,7 @@ impl App {
         let t = if v.time >= v.info.duration - v.info.frame_len() * 1.5 { 0.0 } else { v.time };
         if solo && v.info.audio && !v.mute {
             if let Some(Some(data)) = self.audio_cache.get(&v.path).cloned() {
-                let voice = crate::audio::Voice { data, t0: 0.0, src0: t, speed: v.speed, span: (0.0, f64::MAX), gain: 1.0 };
+                let voice = crate::audio::Voice { data, t0: 0.0, src0: t, speed: v.speed, span: (0.0, f64::MAX), gain: v.volume, env: None };
                 if let Some(o) = self.audio_output() {
                     o.play(vec![voice], 0.0);
                 }
@@ -2510,7 +2510,7 @@ impl App {
 
     fn row_anim(&self, row: TlRow) -> Option<&crate::anim::Anim> {
         match row {
-            TlRow::Audio(_) => None,
+            TlRow::Audio(id) => self.doc.audio.iter().find(|a| a.id == id).map(|a| &a.anim),
             TlRow::Layer(id) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
             TlRow::Cam(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
         }
@@ -2518,7 +2518,7 @@ impl App {
 
     fn row_anim_mut(&mut self, row: TlRow) -> Option<&mut crate::anim::Anim> {
         match row {
-            TlRow::Audio(_) => None,
+            TlRow::Audio(id) => self.doc.audio.iter_mut().find(|a| a.id == id).map(|a| &mut a.anim),
             TlRow::Layer(id) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
             TlRow::Cam(id) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
         }
@@ -2799,8 +2799,24 @@ impl App {
             ui.horizontal(|ui| {
                 let a = &mut self.doc.audio[i];
                 ui.label(egui::RichText::new(format!("소리 · {}", a.name)).color(AUDIO_COLOR));
-                ui.label("볼륨");
-                changed |= ui.add(crate::calc::drag(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2)).changed();
+                let tt = self.doc.timeline.time;
+                let mark = if a.anim.keys.iter().any(|k| (k.t - tt).abs() < 1e-3 && k.ch & crate::anim::ch::VOL != 0) {
+                    crate::dial::KeyMark::Here
+                } else if a.anim.keys.is_empty() {
+                    crate::dial::KeyMark::None
+                } else {
+                    crate::dial::KeyMark::Keyed
+                };
+                let mut hit = false;
+                crate::dial::label_cell(ui, "볼륨", Some(mark), &mut hit);
+                let vr = ui.add(crate::calc::drag(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2));
+                changed |= vr.changed();
+                // auto-key: a changed volume keys itself
+                if hit || (vr.changed() && self.doc.timeline.autokey) {
+                    let k = a.vol_key(tt);
+                    a.anim.set_key(k);
+                    changed = true;
+                }
                 changed |= ui.checkbox(&mut a.mute, "음소거").changed();
                 ui.label(egui::RichText::new(format!("{} ~ {}", crate::video::timecode(a.start), crate::video::timecode(a.end()))).monospace().color(INK_3()));
                 del = ui.button("삭제").clicked();
@@ -3222,7 +3238,7 @@ impl App {
         let id = self.doc.new_id();
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("소리").to_string();
         let path = p.to_string_lossy().to_string();
-        self.doc.audio.push(crate::anim::AudioClip { id, name, path: path.clone(), start: self.doc.timeline.time, offset: 0.0, len: 0.0, gain: 1.0, mute: false });
+        self.doc.audio.push(crate::anim::AudioClip { id, name, path: path.clone(), start: self.doc.timeline.time, offset: 0.0, len: 0.0, gain: 1.0, mute: false, anim: Default::default() });
         self.doc.timeline.on = true;
         self.aud_sel = Some(id);
         self.ensure_audio(&path);
@@ -3234,12 +3250,21 @@ impl App {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for a in &self.doc.audio {
-            (a.id, a.start.to_bits(), a.offset.to_bits(), a.len.to_bits(), a.gain.to_bits(), a.mute).hash(&mut h);
+            // keyed volume: the keys, not the sampled value that moves while playing
+            let keyed = a.anim.keys.iter().any(|k| k.ch & crate::anim::ch::VOL != 0);
+            (a.id, a.start.to_bits(), a.offset.to_bits(), a.len.to_bits(), if keyed { 0 } else { a.gain.to_bits() }, a.mute).hash(&mut h);
+            vol_keys_hash(&a.anim, &mut h);
         }
         for l in &self.doc.layers {
             if let LayerKind::Image(im) = &l.kind {
                 if let Some(v) = &im.video {
                     (l.id, l.visible, v.mute, v.speed.to_bits(), l.anim.as_ref().and_then(|a| a.span).map(|s| (s[0].to_bits(), s[1].to_bits()))).hash(&mut h);
+                    let keyed = l.anim.as_ref().is_some_and(|a| a.keys.iter().any(|k| k.ch & crate::anim::ch::VOL != 0));
+                    if keyed {
+                        vol_keys_hash(l.anim.as_ref().unwrap(), &mut h);
+                    } else {
+                        v.volume.to_bits().hash(&mut h);
+                    }
                 }
             }
         }
@@ -3307,7 +3332,8 @@ impl App {
         let mut out = Vec::new();
         for a in self.doc.audio.iter().filter(|a| !a.mute && a.len > 0.0) {
             if let Some(Some(d)) = self.audio_cache.get(&a.path) {
-                out.push(crate::audio::Voice { data: d.clone(), t0: a.start, src0: a.offset, speed: 1.0, span: (a.start, a.end()), gain: a.gain });
+                let env = crate::anim::vol_envelope(&a.anim, a.start, a.end()).map(Arc::new);
+                out.push(crate::audio::Voice { data: d.clone(), t0: a.start, src0: a.offset, speed: 1.0, span: (a.start, a.end()), gain: a.gain, env });
             }
         }
         for l in &self.doc.layers {
@@ -3317,7 +3343,9 @@ impl App {
             let (t0, src0) = l.anim.as_ref().map_or((0.0, 0.0), |a| (a.start(), a.video_start));
             let span = l.anim.as_ref().and_then(|a| a.span).map_or((0.0, f64::MAX), |s| (s[0], s[1]));
             if l.visible {
-                out.push(crate::audio::Voice { data: d.clone(), t0, src0, speed: v.speed, span, gain: 1.0 });
+                let end = span.1.min(self.doc.timeline.duration.max(t0) + 1.0);
+                let env = l.anim.as_ref().and_then(|a| crate::anim::vol_envelope(a, span.0.max(0.0), end)).map(Arc::new);
+                out.push(crate::audio::Voice { data: d.clone(), t0, src0, speed: v.speed, span, gain: v.volume, env });
             }
         }
         out
@@ -6989,7 +7017,7 @@ impl App {
         let km = |c: u16| tl_on.then(|| key_mark(an.as_ref(), tt, tol, c));
         use crate::anim::ch;
         // key buttons pressed, by value bit
-        let mut kh = [false; 9];
+        let mut kh = [false; 10];
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -7061,6 +7089,9 @@ impl App {
                                 changed |= ui.checkbox(&mut v.mute, "소리 끔").changed();
                             }
                         });
+                        if v.info.audio {
+                            changed |= ui.add(crate::dial::Dial::new(&mut v.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).mixed(mxc(ch::VOL))).changed();
+                        }
                         ui.small(format!(
                             "{}×{} · {:.2} fps · {}{}",
                             v.info.width,
@@ -10046,6 +10077,14 @@ impl eframe::App for App {
         if self.drag.is_some() || crate::penhook::state().barrel || self.frames < 6 {
             ctx.request_repaint();
         }
+    }
+}
+
+/// Hashes the volume keys of `a` (what the mixer's envelope is built from).
+fn vol_keys_hash(a: &crate::anim::Anim, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    for k in a.keys.iter().filter(|k| k.ch & crate::anim::ch::VOL != 0) {
+        (k.t.to_bits(), k.vol.to_bits(), k.ease as u8).hash(h);
     }
 }
 

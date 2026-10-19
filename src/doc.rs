@@ -58,6 +58,9 @@ pub struct VideoRef {
     /// Leave its soundtrack out.
     #[serde(default)]
     pub mute: bool,
+    /// Soundtrack volume (keyable).
+    #[serde(default = "unit_f32")]
+    pub volume: f32,
     /// Texture slot that stays the same while frames change (runtime only).
     #[serde(skip, default = "next_rev")]
     pub slot: u64,
@@ -638,4 +641,8 @@ mod tests {
         let after = corner(&t);
         assert!((before - after).length() < 1e-3, "{before:?} vs {after:?}");
     }
+}
+
+fn unit_f32() -> f32 {
+    1.0
 }
