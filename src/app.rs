@@ -8823,7 +8823,7 @@ impl App {
                 let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if ui.selectable_label(self.space_ref_draw, "기준 길이").on_hover_text("바닥에 닿은 점에서 시작해 긋기 · 축은 방향으로 자동 (수직: 높이)").clicked() {
+                    if ui.selectable_label(self.space_ref_draw, "기준 길이").on_hover_text("수평면(바닥·탁자·창틀 등) 위 점에서 시작 · 수직: 높이, 수평: 그 면 위 길이 · 축 자동").clicked() {
                         ref_toggle = true;
                     }
                     if let Some(mut r) = rl {
@@ -8841,11 +8841,11 @@ impl App {
                 match rl.map(|r| r.camera_height_m(&cam)) {
                     Some(Some(m)) => {
                         ui.horizontal(|ui| {
-                            ui.small(format!("카메라 높이 ≈ {m:.2} m (기준선이 놓인 면에서)"));
+                            ui.small(format!("카메라 높이 ≈ {m:.2} m (기준면에서)"));
                         });
                         // the floor through the origin onto the plane the reference stands on
                         let on_floor = rl.is_some_and(|r| r.a.distance(self.doc.spaces[i].origin) < 0.5);
-                        if !on_floor && ui.button("바닥을 기준선에 맞추기").on_hover_text("원점(⨀)을 기준선 시작점으로 · 공간 바닥 = 기준선이 놓인 면").clicked() {
+                        if !on_floor && ui.button("기준면을 공간 바닥으로").on_hover_text("원점(⨀)을 기준선 시작점으로 · 공간 바닥 = 기준선이 놓인 수평면").clicked() {
                             floor_to_ref = true;
                         }
                     }
@@ -8981,7 +8981,7 @@ impl App {
             self.space_ref_draw = !self.space_ref_draw;
             if self.space_ref_draw {
                 self.space_mask_draw = false;
-                self.status = "바닥 점에서 끌어 기준 길이".into();
+                self.status = "수평면 위 점에서 끌어 기준 길이".into();
             }
         }
         if mask_clear {
