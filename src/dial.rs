@@ -18,6 +18,7 @@ pub struct Dial<'a> {
     integer: bool,
     vertical: bool,
     key: Option<(KeyMark, &'a mut bool)>,
+    mixed: bool,
 }
 
 /// State of a keyable value at the playhead.
@@ -84,7 +85,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None, mixed: false }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -122,12 +123,22 @@ impl<'a> Dial<'a> {
         self
     }
 
+    /// The selection holds different values: the number reads "—" (the ring
+    /// still shows the first one and edits as usual).
+    pub fn mixed(mut self, m: bool) -> Self {
+        self.mixed = m;
+        self
+    }
+
     /// Shows the reset pin when the value differs from `d`.
     pub fn default(mut self, d: f32) -> Self {
         self.default = Some(d);
         self
     }
 }
+
+/// What a number box shows when the selection holds different values.
+pub const MIXED: &str = "—";
 
 const TICK_PX: f32 = 7.0;
 const TICKS_PER_RANGE: f32 = 60.0;
@@ -175,7 +186,7 @@ impl Widget for Dial<'_> {
         if self.vertical {
             return vertical_ui(self, ui);
         }
-        let Dial { value, range, step, text, suffix, default, integer, key, .. } = self;
+        let Dial { value, range, step, text, suffix, default, integer, key, mixed, .. } = self;
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
         // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
@@ -310,6 +321,9 @@ impl Widget for Dial<'_> {
                     .custom_parser(crate::calc::parse);
                 if !suffix.is_empty() {
                     dv = dv.suffix(suffix.clone());
+                }
+                if mixed {
+                    dv = dv.custom_formatter(|_, _| MIXED.into());
                 }
                 ui.spacing_mut().interact_size.x = value_w;
                 let vr = ui.add(dv);

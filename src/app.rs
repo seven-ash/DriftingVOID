@@ -1051,6 +1051,21 @@ impl App {
             app.editing = Some(id);
             app.edit_focus = true;
         }
+        if std::env::var_os("DV_MULTI_DEMO").is_some() {
+            // three texts that differ in size and turn, all selected (panel checks)
+            app.s.color = Color32::from_rgb(120, 230, 255);
+            let mut ids = Vec::new();
+            for (i, (sz, deg)) in [(40.0, 0.0), (60.0, 15.0), (80.0, 0.0)].into_iter().enumerate() {
+                app.s.text_size = sz;
+                let id = app.new_text_layer(pos2(-300.0, -150.0 + i as f32 * 120.0), format!("글자 {}", i + 1));
+                if let Some(LayerKind::Text(t)) = app.doc.get_mut(id).map(|l| &mut l.kind) {
+                    t.rotation = f32::to_radians(deg);
+                }
+                ids.push(id);
+            }
+            app.sel = ids.first().copied();
+            app.extra_sel = ids[1..].to_vec();
+        }
         if std::env::var_os("DV_TEST_TEXT_LONG").is_some() {
             // a long one-line text box (layout/texture checks)
             app.tool = Tool::Text;
@@ -6900,6 +6915,32 @@ impl App {
         let Some(idx) = self.doc.index_of(id) else { return };
         // the primary as it was, to pass the panel's edits on to the rest
         let before = self.doc.layers[idx].clone();
+        // values that differ across the selection show as "—"
+        let (mx, mx_adj, mx_width) = {
+            let k0 = crate::anim::key_of(&before, 0.0);
+            let others: Vec<&Layer> = self.extra_sel.iter().filter_map(|i| self.doc.get(*i)).collect();
+            let mx = others.iter().fold(0u16, |m, o| m | crate::anim::diff_ch(&k0, &crate::anim::key_of(o, 0.0)));
+            let adj = |l: &Layer| match &l.kind {
+                LayerKind::Image(im) => Some([im.adjust.brightness, im.adjust.contrast, im.adjust.saturation]),
+                _ => None,
+            };
+            let a0 = adj(&before);
+            let mut mx_adj = [false; 3];
+            for o in &others {
+                if let (Some(a), Some(b)) = (a0, adj(o)) {
+                    for i in 0..3 {
+                        mx_adj[i] |= a[i] != b[i];
+                    }
+                }
+            }
+            let width = |l: &Layer| match &l.kind {
+                LayerKind::Shape(s) => Some(s.width),
+                _ => None,
+            };
+            let mx_width = others.iter().any(|o| width(o).is_some_and(|w| Some(w) != width(&before)));
+            (mx, mx_adj, mx_width)
+        };
+        let mxc = |c: u16| mx & c != 0;
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
@@ -6932,7 +6973,7 @@ impl App {
                 }
                 want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
             });
-            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3])).changed();
+            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).mixed(mxc(ch::OPA))).changed();
             if l.place.is_none() {
                 // 2D position (the centre); placed layers use the 3D fields below
                 let c0 = crate::anim::key_of(l, 0.0).center;
@@ -6943,9 +6984,10 @@ impl App {
                     crate::dial::label_cell(ui, "위치", km(ch::POS), &mut kh[0]);
                     ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
                     ui.spacing_mut().interact_size.x = 56.0;
-                    mv |= ui.add(crate::calc::drag(&mut x).speed(1.0).max_decimals(1)).changed();
+                    let m = mxc(ch::POS);
+                    mv |= ui.add(pos_box(&mut x, m)).changed();
                     ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("Y").color(INK_3())));
-                    mv |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(1)).changed();
+                    mv |= ui.add(pos_box(&mut y, m)).changed();
                 });
                 if mv {
                     l.translate(vec2(x - c0[0], y - c0[1]));
@@ -7008,12 +7050,12 @@ impl App {
                     }
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1])).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -7041,9 +7083,9 @@ impl App {
                     });
                     ui.label("보정");
                     let a = &mut im.adjust;
-                    changed |= ui.add(crate::dial::Dial::new(&mut a.brightness, -1.0..=1.0).text("밝기").default(0.0)).changed();
-                    changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text("대비").default(0.0)).changed();
-                    changed |= ui.add(crate::dial::Dial::new(&mut a.saturation, -1.0..=1.0).text("채도").default(0.0)).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.brightness, -1.0..=1.0).text("밝기").default(0.0).mixed(mx_adj[0])).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text("대비").default(0.0).mixed(mx_adj[1])).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.saturation, -1.0..=1.0).text("채도").default(0.0).mixed(mx_adj[2])).changed();
                     if ui.button("보정 초기화").clicked() {
                         *a = Adjust::default();
                         changed = true;
@@ -7054,7 +7096,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1])).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         ui.horizontal(|ui| {
                             let mut has = t.bg.is_some();
@@ -7089,7 +7131,7 @@ impl App {
                             });
                     });
                     let mut deg = t.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
                         t.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -7114,12 +7156,12 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         if !shape_tool {
-                            changed |= ui.add(crate::dial::Dial::new(&mut s.width, 0.0..=60.0).text("굵기")).changed();
+                            changed |= ui.add(crate::dial::Dial::new(&mut s.width, 0.0..=60.0).text("굵기").mixed(mx_width)).changed();
                         }
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         let mut deg = s.rotation.to_degrees();
-                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2])).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
                             s.rotation = deg.to_radians();
                             changed = true;
                         }
@@ -7212,26 +7254,26 @@ impl App {
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.pos[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(km(ch::P_POS), &mut kh[4])).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(km(ch::P_POS), &mut kh[4]).mixed(mxc(ch::P_POS))).changed() {
                             pl.pos[i] = v as f64;
                             changed = true;
                         }
                     }
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.rot[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(km(ch::P_ROT), &mut kh[5])).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(km(ch::P_ROT), &mut kh[5]).mixed(mxc(ch::P_ROT))).changed() {
                             pl.rot[i] = v as f64;
                             changed = true;
                         }
                     }
                     let mut pct = (pl.scale * 100.0) as f32;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(km(ch::P_SCALE), &mut kh[6])).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(km(ch::P_SCALE), &mut kh[6]).mixed(mxc(ch::P_SCALE))).changed() {
                         pl.scale = pct as f64 / 100.0;
                         changed = true;
                     }
                     let mut th = pl.thick as f32;
                     if ui
-                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]))
+                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]).mixed(mxc(ch::P_THICK)))
                         .on_hover_text("평면 뒤로 밀어낸 두께")
                         .changed()
                     {
@@ -9961,6 +10003,12 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
     }
+}
+
+/// A position number box ("—" when the selection's positions differ).
+fn pos_box(v: &mut f32, mixed: bool) -> egui::DragValue<'_> {
+    let d = crate::calc::drag(v).speed(1.0).max_decimals(1);
+    if mixed { d.custom_formatter(|_, _| crate::dial::MIXED.into()) } else { d }
 }
 
 /// One edit (`before` -> `after`) applied to another layer `l`: moves, turns
