@@ -1301,6 +1301,11 @@ impl App {
             if let Some(id) = app.sel {
                 let c = app.doc.get(id).map(|l| crate::anim::key_of(l, 0.0).center).unwrap_or([0.0, 0.0]);
                 app.mask_button(id);
+                // DV_MASK_INV=strength: inverted, at that strength
+                if let (Some(k), Some(m)) = (std::env::var("DV_MASK_INV").ok().and_then(|v| v.parse::<f32>().ok()), app.sel.and_then(|m| app.doc.get_mut(m))) {
+                    m.mask_invert = true;
+                    m.opacity = k;
+                }
                 if let Some(LayerKind::Raster(r)) = app.sel.and_then(|m| app.doc.get_mut(m)).map(|l| &mut l.kind) {
                     r.fill_rect(Rect::from_min_max(pos2(c[0], c[1] - 4000.0), pos2(c[0] + 4000.0, c[1] + 4000.0)), true);
                 }
@@ -1657,7 +1662,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false });
         self.sel = Some(id);
         self.mark();
         id
@@ -2442,6 +2447,7 @@ impl App {
             mask_of: Some(owner),
             mask_anchor: Some((owner, c)),
             mask_pose: None,
+            mask_invert: false,
         };
         // just under its layer, so the list shows it beneath
         self.doc.layers.insert(i, layer);
@@ -7514,7 +7520,23 @@ impl App {
         let names: Vec<(LayerId, String)> = self.doc.layers.iter().rev().filter(|l| l.mask_of.is_none()).map(|l| (l.id, l.display_name())).collect();
         let owner_name = names.iter().find(|n| n.0 == owner).map_or(String::new(), |n| n.1.clone());
         ui.label(egui::RichText::new(format!("마스크 · {owner_name}")).color(INK_2()));
-        ui.small("칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)");
+        let inv = self.doc.get(id).is_some_and(|l| l.mask_invert);
+        ui.small(if inv { "칠한 곳만 보임 · 지우개: 가리기" } else { "칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)" });
+        // strength (the mask layer's opacity, keyable) and invert
+        let (tl_on, tt, tol) = (self.doc.timeline.on, self.doc.timeline.time, self.doc.timeline.frame_len() * 0.5);
+        let mut key_hit = false;
+        let mut mask_changed = false;
+        if let Some(l) = self.doc.get_mut(id) {
+            let mark = tl_on.then(|| key_mark(l.anim.as_ref(), tt, tol, crate::anim::ch::OPA));
+            mask_changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("강도").default(1.0).key(mark, &mut key_hit)).changed();
+            mask_changed |= ui.checkbox(&mut l.mask_invert, "반전").changed();
+        }
+        if mask_changed {
+            self.mark();
+        }
+        if key_hit {
+            self.key_layer(id, crate::anim::ch::OPA);
+        }
         let anchor = self.doc.get(id).and_then(|l| l.mask_anchor).map(|a| a.0);
         let mut pick: Option<Option<LayerId>> = None;
         ui.horizontal(|ui| {

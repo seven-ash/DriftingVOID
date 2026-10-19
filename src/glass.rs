@@ -207,6 +207,8 @@ struct Res {
     g1: Option<Tex>,
     /// What was on screen right before a masked layer.
     mdst: Option<Tex>,
+    /// The masked layer as drawn (inverted masks bring it back where painted).
+    mlay: Option<Tex>,
     /// Uploaded text pixmaps for the blend pass, by cache key.
     texts: std::collections::HashMap<u64, glow::Texture>,
     /// What lies under a blended text (kept apart from the glass textures).
@@ -433,13 +435,15 @@ void main() {
 /// already under it (the egui pipeline only does normal / additive).
 const FS_MASK: &str = r#"
 uniform sampler2D u_m;     // mask tile (alpha = hidden)
-uniform sampler2D u_dst;   // screen before the layer
+uniform sampler2D u_dst;   // what to put back: the screen before the layer, or the layer
 uniform vec2 u_dsize;      // allocated size of u_dst
+uniform float u_k;         // strength
+uniform int u_full;        // 1: the whole quad counts as painted
 in vec2 v_uv;
 out vec4 o;
 void main() {
-    float m = texture(u_m, v_uv).a;
-    o = vec4(texture(u_dst, gl_FragCoord.xy / u_dsize).rgb, m);
+    float m = u_full == 1 ? 1.0 : texture(u_m, v_uv).a;
+    o = vec4(texture(u_dst, gl_FragCoord.xy / u_dsize).rgb, m * u_k);
 }
 "#;
 
@@ -631,19 +635,34 @@ pub fn mask_begin(screen: Rect) -> Shape {
     Shape::Callback(egui::PaintCallback { rect: screen, callback: std::sync::Arc::new(cb) })
 }
 
-/// After a masked layer: where the mask is painted, puts back what was there.
-/// `tiles`: mask tile textures with their screen corners (TL TR BR BL, points).
-pub fn mask_restore(screen: Rect, tiles: Vec<([egui::Pos2; 4], egui::TextureId)>) -> Shape {
+/// After a masked layer: where the mask is painted, puts back what was there
+/// (`strength` of it). Inverted: everything is put back, then the layer
+/// returns where painted. `tiles`: mask tile textures with their screen
+/// corners (TL TR BR BL, points).
+pub fn mask_restore(screen: Rect, tiles: Vec<([egui::Pos2; 4], egui::TextureId)>, strength: f32, invert: bool) -> Shape {
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         // SAFETY: called by egui_glow on the GL thread with its context current.
         unsafe {
             let gl = painter.gl();
-            let guard = RES.lock().unwrap();
-            let Some(res) = guard.as_ref() else { return };
-            let Some(dst) = res.mdst.as_ref() else { return };
+            let mut guard = RES.lock().unwrap();
+            let Some(res) = guard.as_mut() else { return };
             let ppp = info.pixels_per_point;
             let [sw, sh] = info.screen_size_px;
             let (sw, sh) = (sw as i32, sh as i32);
+            if invert {
+                // keep the layer as drawn before covering it up
+                if ensure(gl, &mut res.mlay, sw, sh).is_none() {
+                    return;
+                }
+                let t = res.mlay.as_ref().unwrap();
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(t.fbo));
+                gl.blit_framebuffer(0, 0, sw, sh, 0, 0, sw, sh, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            let res = &*res;
+            let Some(dst) = res.mdst.as_ref() else { return };
             gl.viewport(0, 0, sw, sh);
             let clip = info.clip_rect_in_pixels();
             gl.enable(glow::SCISSOR_TEST);
@@ -659,6 +678,23 @@ pub fn mask_restore(screen: Rect, tiles: Vec<([egui::Pos2; 4], egui::TextureId)>
             gl.bind_texture(glow::TEXTURE_2D, Some(dst.tex));
             gl.uniform_1_i32(u("u_dst").as_ref(), 1);
             gl.uniform_1_i32(u("u_m").as_ref(), 0);
+            gl.uniform_1_f32(u("u_k").as_ref(), strength);
+            gl.uniform_1_i32(u("u_full").as_ref(), 0);
+            if invert {
+                // 1. everything back as it was before the layer
+                let c = clip;
+                let (x0, y0, x1, y1) = (c.left_px as f32, c.from_bottom_px as f32, (c.left_px + c.width_px) as f32, (c.from_bottom_px + c.height_px) as f32);
+                gl.uniform_2_f32_slice(u("u_p").as_ref(), &[x0, y1, x1, y1, x1, y0, x0, y0]);
+                gl.uniform_1_i32(u("u_full").as_ref(), 1);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.uniform_1_i32(u("u_full").as_ref(), 0);
+                // 2. the layer again where painted
+                if let Some(lay) = res.mlay.as_ref() {
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(lay.tex));
+                    gl.uniform_2_f32(u("u_dsize").as_ref(), lay.w as f32, lay.h as f32);
+                }
+            }
             for (corners, id) in &tiles {
                 let Some(t) = painter.texture(*id) else { continue };
                 let flat: Vec<f32> = corners.iter().flat_map(|p| [p.x * ppp, sh as f32 - p.y * ppp]).collect();
@@ -817,7 +853,7 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let mask = compile(gl, &header, VS_BLEND, FS_MASK).map_err(|e| eprintln!("glass mask: {e}")).ok()?;
         let group = compile(gl, &header, VS_BLEND, FS_GROUP).map_err(|e| eprintln!("glass group: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, mask, group, gb: None, g0: None, g1: None, mdst: None, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, mask, group, gb: None, g0: None, g1: None, mdst: None, mlay: None, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 

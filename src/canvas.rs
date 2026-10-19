@@ -506,17 +506,20 @@ pub fn draw_doc(
         }
         if let (true, Some(m)) = (masking, mask) {
             if let LayerKind::Raster(r) = &m.kind {
+                // anchored masks follow their anchor live (playback, before a resample)
+                let map = crate::export::mask_map(doc, m);
                 let mut tiles = Vec::new();
                 for (&key, t) in &r.tiles {
                     let tr = Rect::from_min_size(pos2((key.0 * TILE) as f32, (key.1 * TILE) as f32), vec2(TILE as f32, TILE as f32)).translate(r.offset);
-                    if !tr.intersects(view_w) {
+                    let corners = [tr.left_top(), tr.right_top(), tr.right_bottom(), tr.left_bottom()].map(|p| map.map_or(p, |mm| mm.fwd(p)));
+                    if !Rect::from_points(&corners).intersects(view_w) {
                         continue;
                     }
-                    let sr = xf.rect_w2s(tr);
-                    tiles.push(([sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom()], cache.tile(ctx, m.id, key, t)));
+                    tiles.push((corners.map(|p| xf.w2s(p)), cache.tile(ctx, m.id, key, t)));
                 }
-                if !tiles.is_empty() {
-                    painter.add(crate::glass::mask_restore(painter.clip_rect(), tiles));
+                let k = m.opacity.clamp(0.0, 1.0);
+                if (!tiles.is_empty() || m.mask_invert) && k > 0.0 {
+                    painter.add(crate::glass::mask_restore(painter.clip_rect(), tiles, k, m.mask_invert));
                 }
             }
         }

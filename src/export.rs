@@ -28,16 +28,63 @@ pub fn output_size(region: Rect, scale: f32) -> (u32, u32) {
     )
 }
 
-/// The visible mask of a layer, if it has one.
-pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&crate::raster::RasterLayer> {
-    doc.layers.iter().find(|m| m.mask_of == Some(id) && m.visible).and_then(|m| match &m.kind {
-        LayerKind::Raster(r) => Some(r),
-        _ => None,
-    })
+/// The visible mask layer of a layer, if it has one.
+pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&Layer> {
+    doc.layers.iter().find(|m| m.mask_of == Some(id) && m.visible && matches!(m.kind, LayerKind::Raster(_)))
 }
 
-/// Hides what a mask covers: painted mask pixels are hidden (both in canvas space).
-pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect, scale: f32) {
+/// Where a mask's pixels show now: it was painted with its anchor at `last`
+/// (centre), turned `pr` and sized `pe`; the anchor is now at `c`, turned by
+/// `th` more and scaled by `s`. Identity when the mask is in step (sync after
+/// edits); during playback and in video exports the mask follows through this.
+#[derive(Clone, Copy, Debug)]
+pub struct MaskMap {
+    pub last: Pos2,
+    pub c: Pos2,
+    pub th: f32,
+    pub s: f32,
+}
+
+impl MaskMap {
+    /// Mask-space point -> where it shows.
+    pub fn fwd(&self, p: Pos2) -> Pos2 {
+        self.c + (crate::doc::rot_about(p, self.last, self.th) - self.last) * self.s
+    }
+
+    /// Shown point -> mask space.
+    pub fn inv(&self, p: Pos2) -> Pos2 {
+        crate::doc::rot_about(self.last + (p - self.c) / self.s.max(1e-6), self.last, -self.th)
+    }
+}
+
+/// The live transform of an anchored mask (None: not anchored or in step).
+pub fn mask_map(doc: &Document, mask: &Layer) -> Option<MaskMap> {
+    let (aid, last) = mask.mask_anchor?;
+    let [pr, pe] = mask.mask_pose?;
+    let a = doc.get(aid)?;
+    let k = crate::anim::key_of(a, 0.0);
+    let c = egui::pos2(k.center[0], k.center[1]);
+    let last = egui::pos2(last[0], last[1]);
+    let s = if pe.abs() > 1e-6 && k.ext[0].abs() > 1e-6 { k.ext[0] / pe } else { 1.0 };
+    let th = k.rot - pr;
+    let m = MaskMap { last, c, th, s };
+    let moved = (c - last).length() > 1e-3 || th.abs() > 1e-5 || (s - 1.0).abs() > 1e-5;
+    moved.then_some(m)
+}
+
+/// How much of a point the mask hides (0..1): painted coverage (or its
+/// opposite when inverted), times the mask layer's opacity (its strength).
+pub fn mask_hide(mask: &Layer, map: Option<MaskMap>, p: Pos2) -> f32 {
+    let LayerKind::Raster(r) = &mask.kind else { return 0.0 };
+    let q = map.map_or(p, |m| m.inv(p));
+    let a = r.alpha_at_world(q) as f32 / 255.0;
+    let a = if mask.mask_invert { 1.0 - a } else { a };
+    a * mask.opacity.clamp(0.0, 1.0)
+}
+
+/// Hides what a mask covers (both in canvas space).
+pub fn apply_mask(pm: &mut Pixmap, doc: &Document, m: &Layer, region: Rect, scale: f32) {
+    let map = mask_map(doc, m);
     let w = pm.width() as usize;
     let data = pm.data_mut();
     for (i, px) in data.chunks_exact_mut(4).enumerate() {
@@ -45,7 +92,8 @@ pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect,
             continue;
         }
         let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
-        let a = 255 - m.alpha_at_world(egui::pos2(region.min.x + x / scale, region.min.y + y / scale)) as u16;
+        let h = mask_hide(m, map, egui::pos2(region.min.x + x / scale, region.min.y + y / scale));
+        let a = (255.0 * (1.0 - h)).round() as u16;
         if a == 255 {
             continue;
         }
@@ -87,7 +135,7 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
             one.mask_of = None;
             let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
             let mut pm = render_band(&mini, full, scale, None, y0, h, flat)?;
-            apply_mask(&mut pm, m, region, scale);
+            apply_mask(&mut pm, doc, m, region, scale);
             out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             continue;
         }
@@ -752,6 +800,44 @@ mod ss_tests {
         // the fill shows in both
         let px = |p: &Pixmap| p.pixel(50, 40).unwrap();
         assert!(px(&three).blue() > 200 && px(&one).blue() > 200);
+    }
+
+    #[test]
+    fn masks_invert_scale_and_follow() {
+        use crate::doc::{ShapeKind, ShapeLayer};
+        use egui::pos2;
+        let mut doc = Document::default();
+        let red = ShapeLayer { kind: ShapeKind::Rect, a: pos2(0.0, 0.0), b: pos2(100.0, 100.0), color: Color32::RED, width: 0.0, fill: Some(Color32::RED), rotation: 0.0 };
+        let owner = doc.insert("r".into(), LayerKind::Shape(red), None);
+        let mut r = crate::raster::RasterLayer::default();
+        r.fill_rect(Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(50.0, 100.0)), true);
+        let mid = doc.insert("m".into(), LayerKind::Raster(r), None);
+        let k0 = crate::anim::key_of(doc.get(owner).unwrap(), 0.0);
+        {
+            let m = doc.get_mut(mid).unwrap();
+            m.mask_of = Some(owner);
+            m.mask_anchor = Some((owner, k0.center));
+            m.mask_pose = Some([k0.rot, k0.ext[0]]);
+        }
+        let m = doc.get(mid).unwrap().clone();
+        // painted half hidden; inverted: the other half; half strength: half hidden
+        assert_eq!(mask_hide(&m, None, pos2(25.0, 50.0)), 1.0);
+        assert_eq!(mask_hide(&m, None, pos2(75.0, 50.0)), 0.0);
+        let mut inv = m.clone();
+        inv.mask_invert = true;
+        assert_eq!(mask_hide(&inv, None, pos2(75.0, 50.0)), 1.0);
+        let mut half = m.clone();
+        half.opacity = 0.5;
+        assert_eq!(mask_hide(&half, None, pos2(25.0, 50.0)), 0.5);
+        // the owner turns half a turn about its centre: the hidden half swaps sides
+        assert!(mask_map(&doc, &m).is_none(), "in step");
+        if let Some(LayerKind::Shape(s)) = doc.get_mut(owner).map(|l| &mut l.kind) {
+            s.rotation = std::f32::consts::PI;
+        }
+        let map = mask_map(&doc, &m).expect("follows");
+        assert!(map.inv(map.fwd(pos2(10.0, 20.0))).distance(pos2(10.0, 20.0)) < 1e-3);
+        assert_eq!(mask_hide(&m, Some(map), pos2(75.0, 50.0)), 1.0);
+        assert_eq!(mask_hide(&m, Some(map), pos2(25.0, 50.0)), 0.0);
     }
 
     #[test]

@@ -425,6 +425,8 @@ pub struct Layer {
     pub mask_anchor: Option<(LayerId, [f32; 2])>,
     /// The anchor's rotation and extent when the mask was last turned/scaled.
     pub mask_pose: Option<[f32; 2]>,
+    /// A mask that shows only what is painted (hides the rest).
+    pub mask_invert: bool,
 }
 
 impl Layer {
@@ -613,7 +615,7 @@ impl Document {
     /// Inserts above `above` (or at the top) and returns the new id.
     pub fn insert(&mut self, name: String, kind: LayerKind, above: Option<LayerId>) -> LayerId {
         let id = self.new_id();
-        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None };
+        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false };
         let idx = above.and_then(|a| self.index_of(a)).map(|i| i + 1).unwrap_or(self.layers.len());
         self.layers.insert(idx, layer);
         id
