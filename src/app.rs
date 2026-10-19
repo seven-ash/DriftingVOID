@@ -8797,6 +8797,7 @@ impl App {
         }
         let mut height_req: Option<f64> = None;
         let (mut ref_toggle, mut ref_clear) = (false, false);
+        let mut floor_to_ref = false;
         let mut ref_metres: Option<f64> = None;
         let sp = &self.doc.spaces[i];
         match crate::persp::solve(sp) {
@@ -8839,7 +8840,14 @@ impl App {
                 });
                 match rl.map(|r| r.camera_height_m(&cam)) {
                     Some(Some(m)) => {
-                        ui.small(format!("카메라 높이 ≈ {m:.2} m (기준선이 놓인 면에서)"));
+                        ui.horizontal(|ui| {
+                            ui.small(format!("카메라 높이 ≈ {m:.2} m (기준선이 놓인 면에서)"));
+                        });
+                        // the floor through the origin onto the plane the reference stands on
+                        let on_floor = rl.is_some_and(|r| r.a.distance(self.doc.spaces[i].origin) < 0.5);
+                        if !on_floor && ui.button("바닥을 기준선에 맞추기").on_hover_text("원점(⨀)을 기준선 시작점으로 · 공간 바닥 = 기준선이 놓인 면").clicked() {
+                            floor_to_ref = true;
+                        }
                     }
                     Some(None) => {
                         ui.small(egui::RichText::new("기준선이 지평선 위: 측정 불가").color(INK_3()));
@@ -8963,6 +8971,10 @@ impl App {
         }
         if ref_clear {
             s.ref_line = None;
+            ch = true;
+        }
+        if let (true, Some(r)) = (floor_to_ref, s.ref_line) {
+            s.origin = r.a;
             ch = true;
         }
         if ref_toggle {
