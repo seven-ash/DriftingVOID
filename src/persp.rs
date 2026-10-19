@@ -397,20 +397,28 @@ pub struct RefLine {
 }
 
 impl RefLine {
-    /// Its length in world units for this camera (None when a point misses
-    /// the floor, e.g. above the horizon).
-    pub fn world_len(&self, cam: &Camera) -> Option<f64> {
-        let a = cam.unproject_plane(self.a, 2)?;
+    /// The line's length for a camera 1 unit above the horizontal plane the
+    /// line stands on (single-view metrology). It depends only on the
+    /// camera's direction and focal length, not on where the origin (floor)
+    /// is, so a wrong floor cannot skew it. None when a point is at or above
+    /// the horizon.
+    pub fn rel_len(&self, cam: &Camera) -> Option<f64> {
+        // `a` on the plane one unit below the camera
+        let on_plane = |p: Pos2| {
+            let d = cam.ray(p);
+            (d[2] < -1e-9).then(|| add(cam.center, scale(d, -1.0 / d[2])))
+        };
+        let a = on_plane(self.a)?;
         if self.axis < 2 {
-            let b = cam.unproject_plane(self.b, 2)?;
+            let b = on_plane(self.b)?;
             return Some(norm(sub(b, a)));
         }
-        // the vertical through `a` against the ray through `b`: closest approach
+        // straight up from `a` to where the ray through `b` passes closest
         let d = cam.ray(self.b);
         let e = [0.0, 0.0, 1.0];
         let w = sub(a, cam.center);
-        let (ee, ed, dd) = (dot(e, e), dot(e, d), dot(d, d));
-        let den = ee * dd - ed * ed;
+        let (ed, dd) = (dot(e, d), dot(d, d));
+        let den = dd - ed * ed;
         if den.abs() < 1e-12 {
             return None;
         }
@@ -418,9 +426,9 @@ impl RefLine {
         Some(t.abs())
     }
 
-    /// Metres per world unit, when the line can be measured.
-    pub fn unit_m(&self, cam: &Camera) -> Option<f64> {
-        self.world_len(cam).filter(|l| *l > 1e-9).map(|l| self.metres / l)
+    /// How high the camera is (metres) above the plane the line stands on.
+    pub fn camera_height_m(&self, cam: &Camera) -> Option<f64> {
+        self.rel_len(cam).filter(|l| *l > 1e-9).map(|l| self.metres / l)
     }
 }
 
@@ -1371,14 +1379,17 @@ mod tests {
     }
 
     #[test]
-    fn reference_lengths_measure_the_world() {
+    fn reference_lengths_give_the_camera_height() {
         let t = truth();
-        // a 120-unit floor edge along X and a 90-unit post at (50, 40)
+        let hc = t.center[2];
+        // 1 unit = 1 cm: a 120 cm floor edge and a 90 cm post
         let x = RefLine { a: t.project([0.0, 0.0, 0.0]).unwrap(), b: t.project([120.0, 0.0, 0.0]).unwrap(), axis: 0, metres: 1.2 };
-        assert!((x.world_len(&t).unwrap() - 120.0).abs() < 1e-3);
-        assert!((x.unit_m(&t).unwrap() - 0.01).abs() < 1e-6);
+        assert!((x.camera_height_m(&t).unwrap() - hc / 100.0).abs() < 1e-4, "{:?} vs {}", x.camera_height_m(&t), hc / 100.0);
         let z = RefLine { a: t.project([50.0, 40.0, 0.0]).unwrap(), b: t.project([50.0, 40.0, 90.0]).unwrap(), axis: 2, metres: 0.9 };
-        assert!((z.world_len(&t).unwrap() - 90.0).abs() < 1e-2, "{:?}", z.world_len(&t));
+        assert!((z.camera_height_m(&t).unwrap() - hc / 100.0).abs() < 1e-3);
+        // a post standing on a table (plane z = 70): height above the table
+        let tb = RefLine { a: t.project([-60.0, 80.0, 70.0]).unwrap(), b: t.project([-60.0, 80.0, 100.0]).unwrap(), axis: 2, metres: 0.3 };
+        assert!((tb.camera_height_m(&t).unwrap() - (hc - 70.0) / 100.0).abs() < 1e-3);
     }
 
     #[test]

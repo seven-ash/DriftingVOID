@@ -8804,7 +8804,8 @@ impl App {
                 let h0 = crate::persp::cam_height(&cam) as f32;
                 let mut h = h0;
                 ui.horizontal(|ui| {
-                    let r = ui.add(crate::dial::Dial::new(&mut h, 0.0..=(h0.abs() * 4.0).max(1000.0)).text("카메라 높이"));
+                    // a fixed range and step: a range that follows the value runs away
+                    let r = ui.add(crate::dial::Dial::new(&mut h, 1.0..=1_000_000.0).step(1.0).text("카메라 높이"));
                     if r.changed() && (h - h0).abs() > 1e-3 {
                         height_req = Some(h as f64);
                     }
@@ -8828,8 +8829,14 @@ impl App {
                         }
                     }
                 });
-                if let Some(k) = rl.and_then(|r| r.unit_m(&cam)) {
-                    ui.small(format!("카메라 높이 ≈ {:.2} m", h0.abs() as f64 * k));
+                match rl.map(|r| r.camera_height_m(&cam)) {
+                    Some(Some(m)) => {
+                        ui.small(format!("카메라 높이 ≈ {m:.2} m (기준선이 놓인 면에서)"));
+                    }
+                    Some(None) => {
+                        ui.small(egui::RichText::new("기준선이 지평선 위: 측정 불가").color(INK_3()));
+                    }
+                    None => {}
                 }
             }
             Err(e) => {
@@ -8930,9 +8937,14 @@ impl App {
         }
         let facing = crate::persp::cameras(&self.doc.spaces).get(&self.doc.spaces[i].id).map(crate::persp::Light::facing);
         let s = &mut self.doc.spaces[i];
-        if let Some(o) = height_req.and_then(|h| crate::persp::origin_for_height(s, h)) {
-            s.origin = o;
-            ch = true;
+        if let Some(h) = height_req {
+            match crate::persp::origin_for_height(s, h) {
+                Some(o) => {
+                    s.origin = o;
+                    ch = true;
+                }
+                None => self.status = format!("카메라 높이 {h:.0}: 원점을 옮겨 닿을 수 없음"),
+            }
         }
         if let (Some(m), Some(r)) = (ref_metres, s.ref_line.as_mut()) {
             r.metres = m;
