@@ -278,6 +278,20 @@ enum VidAct {
     Still,
 }
 
+/// One undo/redo state: the document, the selection it had, and the bytes it
+/// alone holds (shared buffers not in the state after it).
+struct Snap {
+    doc: Document,
+    sel: Option<LayerId>,
+    extra: Vec<LayerId>,
+    sub: SubSel,
+    cost: usize,
+}
+
+/// History limits: memory first (distinct buffers), then a step count.
+const UNDO_BYTES: usize = 1 << 30;
+const UNDO_STEPS: usize = 500;
+
 /// Selections inside drawing layers (pen strokes, brush pixel boxes).
 #[derive(Clone, Default)]
 struct SubSel {
@@ -743,9 +757,13 @@ struct VideoExportDlg {
 
 pub struct App {
     doc: Document,
-    undo: Vec<Document>,
-    redo: Vec<Document>,
+    undo: Vec<Snap>,
+    redo: Vec<Snap>,
     committed: Document,
+    /// The selection when `committed` was taken.
+    committed_sel: (Option<LayerId>, Vec<LayerId>, SubSel),
+    /// Last scroll input (s): scroll bursts on dials become one undo step.
+    scroll_at: f64,
     changed: bool,
     modified: bool,
     path: Option<PathBuf>,
@@ -900,6 +918,8 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             committed: Document::default(),
+            committed_sel: Default::default(),
+            scroll_at: 0.0,
             changed: false,
             modified: false,
             path: None,
@@ -1324,9 +1344,12 @@ impl App {
                 self.fix_sel();
             }
             let prev = std::mem::replace(&mut self.committed, self.doc.clone());
-            self.undo.push(prev);
-            if self.undo.len() > 200 {
-                self.undo.remove(0);
+            let (sel, extra, sub) = std::mem::replace(&mut self.committed_sel, (self.sel, self.extra_sel.clone(), self.sub.clone()));
+            let cost = prev.bytes_not_in(&self.doc);
+            self.undo.push(Snap { doc: prev, sel, extra, sub, cost });
+            let mut total: usize = self.undo.iter().map(|u| u.cost).sum();
+            while self.undo.len() > 1 && (total > UNDO_BYTES || self.undo.len() > UNDO_STEPS) {
+                total -= self.undo.remove(0).cost;
             }
             self.redo.clear();
             self.changed = false;
@@ -1337,28 +1360,52 @@ impl App {
         self.cancel_drag();
         self.finish_text_edit();
         self.commit_if_idle(false);
-        if let Some(d) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.doc, d));
-            self.committed = self.doc.clone();
-            self.modified = true;
-            self.fix_sel();
+        if let Some(u) = self.undo.pop() {
+            let cost = self.doc.bytes_not_in(&u.doc);
+            let cur = self.take_state(u, cost);
+            self.redo.push(cur);
         }
+    }
+
+    /// Swaps in a history state (document and its selection) and returns the
+    /// current one, costed at `cost`.
+    fn take_state(&mut self, u: Snap, cost: usize) -> Snap {
+        let doc = std::mem::replace(&mut self.doc, u.doc);
+        let cur = Snap {
+            doc,
+            sel: std::mem::replace(&mut self.sel, u.sel),
+            extra: std::mem::replace(&mut self.extra_sel, u.extra),
+            sub: std::mem::replace(&mut self.sub, u.sub),
+            cost,
+        };
+        self.committed = self.doc.clone();
+        self.committed_sel = (self.sel, self.extra_sel.clone(), self.sub.clone());
+        self.modified = true;
+        self.fix_sel();
+        cur
     }
 
     fn redo(&mut self) {
         self.cancel_drag();
         self.finish_text_edit();
-        if let Some(d) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.doc, d));
-            self.committed = self.doc.clone();
-            self.modified = true;
-            self.fix_sel();
+        if let Some(u) = self.redo.pop() {
+            let cost = self.doc.bytes_not_in(&u.doc);
+            let cur = self.take_state(u, cost);
+            self.undo.push(cur);
         }
     }
 
     fn fix_sel(&mut self) {
-        // stroke indices and pixel boxes don't survive undo/redo reliably
-        self.sub = SubSel::default();
+        // drawing selections only where their layer (and strokes) still exist
+        let doc = &self.doc;
+        self.sub.strokes.retain_mut(|(id, idx)| match doc.get(*id).map(|l| &l.kind) {
+            Some(LayerKind::Vector(v)) => {
+                idx.retain(|&i| i < v.strokes.len());
+                !idx.is_empty()
+            }
+            _ => false,
+        });
+        self.sub.pixels.retain(|(id, _)| matches!(doc.get(*id).map(|l| &l.kind), Some(LayerKind::Raster(_))));
         if let Some(id) = self.sel {
             if self.doc.get(id).is_none() {
                 self.sel = None;
@@ -1477,6 +1524,7 @@ impl App {
         self.committed = self.doc.clone();
         self.undo.clear();
         self.redo.clear();
+        self.committed_sel = Default::default();
         self.changed = false;
         self.modified = false;
         self.path = path;
@@ -9785,7 +9833,17 @@ impl eframe::App for App {
         self.unsaved_modal(&ctx);
         self.peek_ui(&ctx);
 
-        let typing = ctx.text_edit_focused();
+        // a dial drag or a scroll burst is one undo step: commit once the
+        // pointer is up and scrolling has paused
+        let (now, scrolled, down) = ctx.input(|i| (i.time, i.smooth_scroll_delta != Vec2::ZERO, i.pointer.any_down()));
+        if scrolled {
+            self.scroll_at = now;
+        }
+        let settling = now - self.scroll_at < 0.4;
+        if self.changed && settling {
+            ctx.request_repaint_after(std::time::Duration::from_millis(450));
+        }
+        let typing = ctx.text_edit_focused() || down || settling;
         self.commit_if_idle(typing);
         self.tex.gc();
 

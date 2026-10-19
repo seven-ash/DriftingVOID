@@ -467,6 +467,52 @@ pub struct Document {
 }
 
 impl Document {
+    /// Every shared pixel/point buffer of the document as (address, bytes).
+    /// Snapshots share these, so history memory is the bytes of distinct addresses.
+    pub fn blobs(&self, f: &mut impl FnMut(usize, usize)) {
+        for l in &self.layers {
+            match &l.kind {
+                LayerKind::Image(im) => {
+                    f(Arc::as_ptr(&im.src.rgba) as usize, im.src.rgba.as_raw().len());
+                    f(Arc::as_ptr(&im.src.encoded) as usize, im.src.encoded.len());
+                }
+                LayerKind::Vector(v) => {
+                    for s in &v.strokes {
+                        f(Arc::as_ptr(s) as usize, s.pts.len() * 12 + s.tris.len() * 8 + 64);
+                    }
+                }
+                LayerKind::Raster(r) => {
+                    for t in r.tiles.values() {
+                        f(Arc::as_ptr(t) as usize, t.px.len() + 32);
+                    }
+                    for t in r.rec_base.iter().flat_map(|m| m.values()) {
+                        f(Arc::as_ptr(t) as usize, t.px.len() + 32);
+                    }
+                    for rec in &r.recs {
+                        f(Arc::as_ptr(rec) as usize, rec.pts.len() * 12 + rec.times.len() * 4 + 64);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Bytes of `self`'s shared buffers that `other` does not hold.
+    pub fn bytes_not_in(&self, other: &Document) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        other.blobs(&mut |p, _| {
+            seen.insert(p);
+        });
+        let mut n = 0;
+        let mut mine = std::collections::HashSet::new();
+        self.blobs(&mut |p, b| {
+            if !seen.contains(&p) && mine.insert(p) {
+                n += b;
+            }
+        });
+        n + 4096
+    }
+
     pub fn new_id(&mut self) -> LayerId {
         self.next_id += 1;
         self.next_id
@@ -548,6 +594,24 @@ pub type TileMap = HashMap<(i32, i32), Arc<crate::raster::Tile>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_counts_only_new_buffers() {
+        let mut r = crate::raster::RasterLayer::default();
+        r.fill_rect(Rect::from_min_size(Pos2::ZERO, vec2(10.0, 10.0)), true);
+        let mut a = Document::default();
+        let id = a.insert("b".into(), LayerKind::Raster(r), None);
+        let b = a.clone();
+        // a clone shares every tile
+        assert_eq!(a.bytes_not_in(&b), 4096);
+        let mut c = a.clone();
+        if let Some(Layer { kind: LayerKind::Raster(r), .. }) = c.get_mut(id) {
+            r.fill_rect(Rect::from_min_size(pos2(300.0, 0.0), vec2(10.0, 10.0)), true);
+        }
+        // one new tile in c
+        assert!(c.bytes_not_in(&a) > 256 * 256 * 4);
+        assert_eq!(a.bytes_not_in(&c), 4096);
+    }
 
     #[test]
     fn rotated_text_grows_from_its_first_corner() {
