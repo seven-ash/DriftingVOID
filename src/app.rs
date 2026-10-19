@@ -1249,6 +1249,16 @@ impl App {
                 }
             }
         }
+        if let Ok(v) = std::env::var("DV_CHROMA") {
+            // "r,g,b": a chroma key on the first photo, which gets selected
+            let n: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if let (3, Some(l)) = (n.len(), app.doc.layers.iter_mut().find(|l| matches!(l.kind, LayerKind::Image(_)))) {
+                if let LayerKind::Image(im) = &mut l.kind {
+                    im.adjust.chroma = Some([n[0], n[1], n[2]]);
+                }
+                app.sel = Some(l.id);
+            }
+        }
         if std::env::var_os("DV_TL_DEMO").is_some() {
             // timeline on, the selected layer keyed to move and grow over 2 s, a camera
             // that pans, playhead at 1 s (screenshots)
@@ -7009,6 +7019,9 @@ impl App {
             .map(|s| (s.id, s.name.clone(), cams.contains_key(&s.id), s.walls.iter().map(|w| (w.id, w.name.clone())).collect()))
             .collect();
         let mut space_req: Option<Option<(u64, Option<u64>)>> = None;
+        // chroma key slot dragged (pointer now) / dropped (pointer at release)
+        let mut chroma_drag: Option<Pos2> = None;
+        let mut chroma_drop: Option<Pos2> = None;
         let mut vid_act: Option<VidAct> = None;
         let is_playing = self.playing.contains_key(&id);
         let tl = &self.doc.timeline;
@@ -7144,8 +7157,41 @@ impl App {
                     changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text("대비").default(0.0).mixed(mx_adj[1])).changed();
                     changed |= ui.add(crate::dial::Dial::new(&mut a.saturation, -1.0..=1.0).text("채도").default(0.0).mixed(mx_adj[2])).changed();
                     if ui.button("보정 초기화").clicked() {
-                        *a = Adjust::default();
+                        a.reset_tone();
                         changed = true;
+                    }
+                    // chroma key: drag the slot onto the canvas to take a colour
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let mut no = false;
+                        crate::dial::label_cell(ui, "크로마 키", None, &mut no);
+                        let (sr, sresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click_and_drag());
+                        let p = ui.painter();
+                        match a.chroma {
+                            Some([r, g, b]) => {
+                                p.rect_filled(sr, 4.0, Color32::from_rgb(r, g, b));
+                            }
+                            None => {
+                                p.line_segment([sr.left_bottom() + vec2(4.0, -4.0), sr.right_top() + vec2(-4.0, 4.0)], Stroke::new(1.2, INK_3()));
+                            }
+                        }
+                        p.rect_stroke(sr, 4.0, Stroke::new(1.0, if sresp.hovered() || sresp.dragged() { ACCENT } else { INK_3() }), StrokeKind::Inside);
+                        if sresp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                            chroma_drag = ui.ctx().pointer_latest_pos();
+                        }
+                        if sresp.drag_stopped() {
+                            chroma_drop = ui.ctx().pointer_latest_pos();
+                        }
+                        sresp.on_hover_text("캔버스로 끌어 색 선택");
+                        if a.chroma.is_some() && ui.small_button("해제").clicked() {
+                            a.chroma = None;
+                            changed = true;
+                        }
+                    });
+                    if a.chroma.is_some() {
+                        changed |= ui.add(crate::dial::Dial::new(&mut a.key_tol, 0.0..=0.6).step(0.01).text("허용 범위").default(0.12)).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut a.key_soft, 0.0..=0.4).step(0.01).text("부드럽게").default(0.08)).changed();
                     }
                 }
                 LayerKind::Text(t) => {
@@ -7376,6 +7422,22 @@ impl App {
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
         }
+        if let Some(sp) = chroma_drag {
+            // preview of the colour under the pointer
+            if let Some(c) = self.chroma_sample(id, sp) {
+                let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("chroma_pick")));
+                p.circle_filled(sp + vec2(18.0, -18.0), 10.0, c);
+                p.circle_stroke(sp + vec2(18.0, -18.0), 10.0, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+        if let Some(sp) = chroma_drop {
+            if let Some(c) = self.chroma_sample(id, sp) {
+                if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    im.adjust.chroma = Some([c.r(), c.g(), c.b()]);
+                }
+                self.mark();
+            }
+        }
         match vid_act {
             Some(VidAct::Play(on)) => self.video_play(id, on),
             Some(VidAct::Step(d)) => self.video_step(id, d),
@@ -7414,6 +7476,26 @@ impl App {
         if start_crop {
             self.set_tool(Tool::Crop);
         }
+    }
+
+    /// The colour under screen point `sp` for a chroma key on photo `id`: its
+    /// own source pixel there (before any adjustment), else the picture.
+    fn chroma_sample(&self, id: LayerId, sp: Pos2) -> Option<Color32> {
+        if !self.canvas_rect.contains(sp) {
+            return None;
+        }
+        let w = self.xf().s2w(sp);
+        if let Some((LayerKind::Image(im), true)) = self.doc.get(id).map(|l| (&l.kind, l.place.is_none())) {
+            if im.contains(w) {
+                let s = im.world_to_src(w);
+                let k = im.src.rgba.width() as f32 / im.src.size().x.max(1.0);
+                let (x, y) = ((s.x * k) as u32, (s.y * k) as u32);
+                if let Some(p) = im.src.rgba.get_pixel_checked(x, y) {
+                    return Some(Color32::from_rgb(p[0], p[1], p[2]));
+                }
+            }
+        }
+        crate::export::sample(&self.doc, w)
     }
 
     /// Passes an edit of the primary selection (`before` -> its state now) on to
@@ -10165,6 +10247,9 @@ fn copy_style(b: &LayerKind, a: &LayerKind, l: &mut LayerKind) {
             pass!(b.adjust.brightness, a.adjust.brightness, l.adjust.brightness);
             pass!(b.adjust.contrast, a.adjust.contrast, l.adjust.contrast);
             pass!(b.adjust.saturation, a.adjust.saturation, l.adjust.saturation);
+            pass!(b.adjust.chroma, a.adjust.chroma, l.adjust.chroma);
+            pass!(b.adjust.key_tol, a.adjust.key_tol, l.adjust.key_tol);
+            pass!(b.adjust.key_soft, a.adjust.key_soft, l.adjust.key_soft);
         }
         (LayerKind::Raster(b), LayerKind::Raster(a), LayerKind::Raster(l)) => {
             pass!(b.blend, a.blend, l.blend);

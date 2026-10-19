@@ -66,28 +66,105 @@ pub struct VideoRef {
     pub slot: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Adjust {
     pub brightness: f32,
     pub contrast: f32,
     pub saturation: f32,
+    /// Chroma key: pixels near this colour turn transparent.
+    #[serde(default)]
+    pub chroma: Option<[u8; 3]>,
+    /// How far (chroma distance, 0..1) still counts as the key colour.
+    #[serde(default = "key_tol")]
+    pub key_tol: f32,
+    /// Width of the soft edge beyond `key_tol`.
+    #[serde(default = "key_soft")]
+    pub key_soft: f32,
+}
+
+fn key_tol() -> f32 {
+    0.12
+}
+
+fn key_soft() -> f32 {
+    0.08
+}
+
+impl Default for Adjust {
+    fn default() -> Self {
+        Self { brightness: 0.0, contrast: 0.0, saturation: 0.0, chroma: None, key_tol: key_tol(), key_soft: key_soft() }
+    }
+}
+
+/// Chroma (Cb, Cr) of an sRGB colour, each about -0.5..0.5.
+fn cbcr(r: f32, g: f32, b: f32) -> (f32, f32) {
+    (-0.168_736 * r - 0.331_264 * g + 0.5 * b, 0.5 * r - 0.418_688 * g - 0.081_312 * b)
 }
 
 impl Adjust {
     pub fn is_identity(&self) -> bool {
-        self.brightness == 0.0 && self.contrast == 0.0 && self.saturation == 0.0
+        self.brightness == 0.0 && self.contrast == 0.0 && self.saturation == 0.0 && self.chroma.is_none()
+    }
+
+    /// Only the tone values (brightness, contrast, saturation) back to neutral.
+    pub fn reset_tone(&mut self) {
+        self.brightness = 0.0;
+        self.contrast = 0.0;
+        self.saturation = 0.0;
     }
 
     pub fn key(&self) -> u64 {
         let b = (self.brightness * 1000.0) as i64 as u64;
         let c = (self.contrast * 1000.0) as i64 as u64;
         let s = (self.saturation * 1000.0) as i64 as u64;
-        b.wrapping_mul(1_000_003) ^ c.wrapping_mul(7_919) ^ s.wrapping_mul(104_729)
+        let k = self.chroma.map_or(0, |[r, g, b]| 1 + ((r as u64) << 16 | (g as u64) << 8 | b as u64))
+            ^ ((self.key_tol * 1000.0) as u64).wrapping_mul(31_337)
+            ^ ((self.key_soft * 1000.0) as u64).wrapping_mul(65_537);
+        b.wrapping_mul(1_000_003) ^ c.wrapping_mul(7_919) ^ s.wrapping_mul(104_729) ^ k.wrapping_mul(2_654_435_761)
+    }
+
+    /// Chroma key: alpha falls to 0 where a pixel's chroma is within `key_tol`
+    /// of the key colour, rising over `key_soft`; what is left near the edge
+    /// loses the key colour's cast (spill).
+    fn apply_key(&self, rgba: &mut [u8]) {
+        let Some([kr, kg, kb]) = self.chroma else { return };
+        let (kcb, kcr) = cbcr(kr as f32 / 255.0, kg as f32 / 255.0, kb as f32 / 255.0);
+        let kl = (kcb * kcb + kcr * kcr).sqrt().max(1e-4);
+        let (lo, hi) = (self.key_tol, self.key_tol + self.key_soft.max(1e-4));
+        for px in rgba.chunks_exact_mut(4) {
+            if px[3] == 0 {
+                continue;
+            }
+            let (r, g, b) = (px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0);
+            let (cb, cr) = cbcr(r, g, b);
+            let d = ((cb - kcb).powi(2) + (cr - kcr).powi(2)).sqrt();
+            if d >= hi {
+                continue;
+            }
+            let x = ((d - lo) / (hi - lo)).clamp(0.0, 1.0);
+            let a = x * x * (3.0 - 2.0 * x);
+            px[3] = (px[3] as f32 * a).round() as u8;
+            // spill: remove the part of the chroma that points at the key
+            let along = (cb * kcb + cr * kcr) / kl;
+            if along > 0.0 {
+                let k = along * (1.0 - a) / kl;
+                let (ncb, ncr) = (cb - kcb * k, cr - kcr * k);
+                let y = 0.299 * r + 0.587 * g + 0.114 * b;
+                let rgb = [y + 1.402 * ncr, y - 0.344_136 * ncb - 0.714_136 * ncr, y + 1.772 * ncb];
+                for i in 0..3 {
+                    px[i] = (rgb[i].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+        }
     }
 
     /// Applies the adjustment in place to straight-alpha RGBA bytes.
     pub fn apply(&self, rgba: &mut [u8]) {
         if self.is_identity() {
+            return;
+        }
+        self.apply_key(rgba);
+        if self.brightness == 0.0 && self.contrast == 0.0 && self.saturation == 0.0 {
             return;
         }
         let mut lut = [[0f32; 256]; 1];
@@ -645,4 +722,22 @@ mod tests {
 
 fn unit_f32() -> f32 {
     1.0
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn chroma_key_clears_the_key_colour_only() {
+        let a = Adjust { chroma: Some([20, 200, 40]), ..Default::default() };
+        // green screen, a near green, skin, white
+        let mut px = vec![20, 200, 40, 255, 40, 190, 60, 255, 220, 170, 140, 255, 255, 255, 255, 255];
+        a.apply(&mut px);
+        assert_eq!(px[3], 0, "key colour gone");
+        assert!(px[7] < 40, "near colour mostly gone: {}", px[7]);
+        assert_eq!(px[11], 255, "skin stays");
+        assert_eq!(px[15], 255, "white stays");
+        assert_eq!(&px[8..11], &[220, 170, 140], "far colours keep their RGB");
+    }
 }
