@@ -238,8 +238,9 @@ fn content_to_world(pl: &Placement, m: &M3, t: V3, p: Pos2) -> V3 {
 pub fn light_handle(cam: &Camera, l: &persp::Light) -> (V3, V3) {
     let len = cam.origin_depth().max(1.0) * 0.3;
     let d = l.dir();
-    let sun = persp::scale(d, -len);
-    (sun, persp::scale(d, -len * 0.04))
+    // around the working point on the floor (the origin is the camera itself)
+    let at = cam.ref_pt;
+    (persp::add(at, persp::scale(d, -len)), persp::add(at, persp::scale(d, -len * 0.04)))
 }
 
 fn light_gizmo(painter: &Painter, proj: &Proj, cam: &Camera, l: &persp::Light, selected: bool) {
@@ -667,6 +668,8 @@ mod tests {
             line_err: vec![],
             rms_deg: 0.0,
             f_assumed: false,
+            floor_z: 0.0,
+            ref_pt: [0.0; 3],
         }
     }
 

@@ -226,7 +226,7 @@ impl WallFrame {
 }
 
 /// Plane of a wall quad. The orientation comes from the quad's two vanishing
-/// points; the position from where its bottom edge meets the floor (z = 0) for
+/// points; the position from where its bottom edge meets the floor for
 /// standing walls, the floor itself for floor-like quads, else the origin's depth.
 pub fn wall_frame(cam: &Camera, w: &Wall) -> Option<WallFrame> {
     let [tl, tr, br, bl] = w.corners;
@@ -264,14 +264,7 @@ pub fn wall_frame(cam: &Camera, w: &Wall) -> Option<WallFrame> {
     }
     let skew_deg = 90.0 - dot(u, v).clamp(-1.0, 1.0).acos().to_degrees();
     // a point on the plane
-    let ground = |p: Pos2| -> Option<V3> {
-        let d = cam.ray(p);
-        if d[2].abs() < 1e-12 {
-            return None;
-        }
-        let t = -cam.center[2] / d[2];
-        (t > 0.0).then(|| add(cam.center, scale(d, t)))
-    };
+    let ground = |p: Pos2| cam.hit_floor(p);
     let mid = pos2((tl.x + tr.x + br.x + bl.x) * 0.25, (tl.y + tr.y + br.y + bl.y) * 0.25);
     let p = if n[2].abs() < 0.5 {
         ground(bl).or_else(|| ground(br))
@@ -383,6 +376,21 @@ pub struct Space {
     /// A length of known size in the picture: the metre scale.
     #[serde(default)]
     pub ref_line: Option<RefLine>,
+    /// How far the floor is below the camera (world units, cm). The camera sits
+    /// at the world origin, so the eye-level plane z = 0 is the horizon.
+    #[serde(default = "default_floor")]
+    pub floor: f64,
+    /// Eye-level world (camera at the origin). Older files were floor-origin
+    /// worlds and are converted on load (`to_eye_level`).
+    #[serde(default)]
+    pub eye: bool,
+}
+
+/// Floor depth below the camera when nothing measured it (cm): eye height.
+pub const DEFAULT_FLOOR: f64 = 160.0;
+
+fn default_floor() -> f64 {
+    DEFAULT_FLOOR
 }
 
 /// A reference length drawn on the picture (canvas points). It starts on the
@@ -571,7 +579,8 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
         sp.follow = Some(SpaceFollow { layer: f.layer, last: cur });
         sp.roll += th;
         let id = sp.id;
-        let kk = k as f64;
+        // eye level: only the picture (focal length) scales, the world stays
+        let kk = if sp.eye { 1.0 } else { k as f64 };
         for l in &mut doc.layers {
             if let Some(pl) = l.place.as_mut().filter(|p| p.space == id) {
                 pl.base_t = scale(pl.base_t, kk);
@@ -586,7 +595,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, ref_line: None }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, ref_line: None, floor: DEFAULT_FLOOR, eye: true }
     }
 
     /// The canvas area the space shows in.
@@ -610,8 +619,13 @@ pub struct Camera {
     pub c: [f64; 2],
     /// World → camera rotation.
     pub r: M3,
-    /// Camera centre in world units (1 unit = 1 px at the origin).
+    /// Camera centre in world units: the origin in an eye-level world.
     pub center: V3,
+    /// World height of the floor plane (negative: below the camera).
+    pub floor_z: f64,
+    /// A point on the floor ahead of the camera (under the frame's bottom
+    /// middle), the default depth for placing and viewing.
+    pub ref_pt: V3,
     /// Long side of the frame in pixels (for the 35 mm equivalent).
     pub long_side: f64,
     pub frame: Rect,
@@ -635,9 +649,20 @@ impl Camera {
         Some(pos2((self.f * x[0] / x[2] + self.c[0]) as f32, (self.f * x[1] / x[2] + self.c[1]) as f32))
     }
 
-    /// Camera depth of the world origin (1 world unit = 1 px there).
+    /// Camera depth of the reference floor point (the scene's working depth).
     pub fn origin_depth(&self) -> f64 {
-        self.to_cam([0.0; 3])[2]
+        self.to_cam(self.ref_pt)[2]
+    }
+
+    /// Where the ray through image point `p` meets the floor (None at or above
+    /// the horizon).
+    pub fn hit_floor(&self, p: Pos2) -> Option<V3> {
+        let d = self.ray(p);
+        if d[2] > -1e-9 {
+            return None;
+        }
+        let t = (self.floor_z - self.center[2]) / d[2];
+        (t > 0.0).then(|| add(self.center, scale(d, t)))
     }
 
     pub fn project(&self, w: V3) -> Option<Pos2> {
@@ -708,57 +733,6 @@ const DEFAULT_F_35: f64 = 50.0;
 const HUBER: f64 = 0.0087; // ≈ 0.5°
 /// Tukey cut-off: lines further off than this stop counting.
 const TUKEY: f64 = 0.035; // ≈ 2°
-
-/// The camera's height above the floor (world Z of its centre, world units).
-pub fn cam_height(cam: &Camera) -> f64 {
-    cam.center[2]
-}
-
-/// Where to put the space origin (⨀) so the camera ends up `h` above the
-/// floor: the origin slides along the picture's vertical (towards the Z
-/// vanishing point), which is what dragging it up or down does by hand.
-pub fn origin_for_height(space: &Space, h: f64) -> Option<Pos2> {
-    let cam = solve(space).ok()?;
-    let o = space.origin;
-    let up = cam.project([0.0, 0.0, cam.origin_depth().max(1.0) * 0.05])?;
-    let u = (up - o).normalized();
-    if !u.x.is_finite() || !u.y.is_finite() {
-        return None;
-    }
-    let height_at = |t: f32| {
-        let mut sp = space.clone();
-        sp.origin = o + u * t;
-        solve(&sp).ok().map(|c| cam_height(&c) - h)
-    };
-    // bracket the target near the current origin, then bisect
-    let span = space.frame.height().max(space.frame.width()) * 1.5;
-    let n = 120;
-    let ts: Vec<f32> = (0..=n).map(|i| -span + 2.0 * span * i as f32 / n as f32).collect();
-    let vals: Vec<Option<f64>> = ts.iter().map(|&t| height_at(t)).collect();
-    let mut best: Option<(f32, f32)> = None;
-    for i in 0..n {
-        if let (Some(a), Some(b)) = (vals[i], vals[i + 1]) {
-            if a == 0.0 || a.signum() != b.signum() {
-                let (lo, hi) = (ts[i], ts[i + 1]);
-                if best.is_none_or(|(l, _)| lo.abs().min(hi.abs()) < l.abs()) {
-                    best = Some((lo, hi));
-                }
-            }
-        }
-    }
-    let (mut lo, mut hi) = best?;
-    let flo = height_at(lo)?;
-    for _ in 0..40 {
-        let mid = (lo + hi) * 0.5;
-        let fm = height_at(mid)?;
-        if fm.signum() == flo.signum() {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    Some(o + u * ((lo + hi) * 0.5))
-}
 
 pub fn solve(space: &Space) -> Result<Camera, String> {
     let fr = space.frame;
@@ -1047,21 +1021,39 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
     }
     let f_px = f * s;
     let c_px = [ox + c[0] * s, oy + c[1] * s];
-    // 4. translation: one world unit = one pixel at the origin
-    let o = space.origin;
-    let xc0 = [o.x as f64 - c_px[0], o.y as f64 - c_px[1], f_px];
-    let center = scale(mul_mv(&transpose(&r), xc0), -1.0);
-    Ok(Camera {
+    // 4. translation. Eye level: the camera is the origin and the floor lies
+    // `floor` below it. Older floor-origin worlds: one unit = one pixel at the
+    // origin point (kept only to convert them).
+    let (center, floor_z) = if space.eye {
+        ([0.0; 3], -space.floor.abs().max(1e-6))
+    } else {
+        let o = space.origin;
+        let xc0 = [o.x as f64 - c_px[0], o.y as f64 - c_px[1], f_px];
+        (scale(mul_mv(&transpose(&r), xc0), -1.0), 0.0)
+    };
+    let mut cam = Camera {
         f: f_px,
         c: c_px,
         r,
         center,
+        floor_z,
+        ref_pt: [0.0; 3],
         long_side: 2.0 * s,
         frame: fr,
         line_err,
         rms_deg: (se / sw.max(1e-12)).sqrt().to_degrees(),
         f_assumed,
-    })
+    };
+    // working depth: the floor under the frame's bottom middle, else three
+    // floor-depths ahead along the view
+    let h = (center[2] - floor_z).abs().max(1e-6);
+    cam.ref_pt = cam.hit_floor(fr.center_bottom()).filter(|p| norm(sub(*p, center)) < h * 40.0).unwrap_or_else(|| {
+        let fwd = [r[2][0], r[2][1], r[2][2]];
+        let mut p = add(center, scale(fwd, h * 3.0));
+        p[2] = floor_z;
+        p
+    });
+    Ok(cam)
 }
 
 // ---------------------------------------------------------------- placement (phase 2)
@@ -1262,6 +1254,47 @@ impl Placement {
     }
 }
 
+/// Converts floor-origin spaces (older files) to eye-level worlds: the camera
+/// moves to the origin, the scale makes the old floor sit `DEFAULT_FLOOR` below
+/// it, and everything placed in the space (layers, walls, keyed thickness)
+/// moves with it, so the picture stays exactly the same.
+pub fn to_eye_level(doc: &mut crate::doc::Document) {
+    for i in 0..doc.spaces.len() {
+        if doc.spaces[i].eye {
+            continue;
+        }
+        let Ok(cam) = solve(&doc.spaces[i]) else {
+            // not solvable yet: nothing placed can depend on it
+            doc.spaces[i].eye = true;
+            doc.spaces[i].floor = DEFAULT_FLOOR;
+            continue;
+        };
+        let c = cam.center;
+        let k = if c[2].abs() > 1e-6 { DEFAULT_FLOOR / c[2].abs() } else { 1.0 };
+        let sp = &mut doc.spaces[i];
+        sp.eye = true;
+        sp.floor = DEFAULT_FLOOR;
+        for w in &mut sp.walls {
+            w.offset *= k;
+        }
+        let id = sp.id;
+        for l in &mut doc.layers {
+            let Some(pl) = l.place.as_mut().filter(|p| p.space == id) else { continue };
+            pl.base_t = scale(sub(pl.base_t, c), k);
+            pl.base_k *= k;
+            pl.thick *= k;
+            pl.wall_uv = [pl.wall_uv[0] * k, pl.wall_uv[1] * k];
+            if let Some(a) = l.anim.as_mut() {
+                for key in &mut a.keys {
+                    if let Some(pk) = key.place.as_mut() {
+                        pk.thick *= k;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Solved cameras of all spaces that have enough lines.
 pub fn cameras(spaces: &[Space]) -> std::collections::HashMap<u64, Camera> {
     spaces.iter().filter_map(|s| solve(s).ok().map(|c| (s.id, c))).collect()
@@ -1280,7 +1313,9 @@ pub fn depth_grid(cam: &Camera, frame: Rect) -> Vec<(V3, V3, u8)> {
     if cam.r[0][a].abs() < cam.r[0][b].abs() {
         std::mem::swap(&mut a, &mut b);
     }
-    let long = frame.width().max(frame.height()) as f64;
+    // world width the frame covers at the working depth
+    let long = frame.width().max(frame.height()) as f64 * cam.origin_depth().max(1e-6) / cam.f;
+    let base = cam.ref_pt;
     let g = {
         let x = long / 8.0;
         let e = 10f64.powf(x.log10().floor());
@@ -1288,14 +1323,15 @@ pub fn depth_grid(cam: &Camera, frame: Rect) -> Vec<(V3, V3, u8)> {
         (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
     };
     // wide enough to reach the whole frame even when the view is strongly tilted
-    let ea = (frame.width() as f64 * 1.5 / g).ceil() * g;
-    let eb = (frame.height() as f64 * 1.5 / g).ceil() * g;
+    let k = cam.origin_depth().max(1e-6) / cam.f;
+    let ea = (frame.width() as f64 * k * 1.5 / g).ceil() * g;
+    let eb = (frame.height() as f64 * k * 1.5 / g).ceil() * g;
     let pt = |td: f64, ua: f64, ub: f64| {
         let mut p = [0.0; 3];
         p[d] = td;
         p[a] = ua;
         p[b] = ub;
-        p
+        add(p, base)
     };
     // with Z (up) across the slices they stand on the floor instead of straddling it
     let (blo, bhi) = if b == 2 { (0.0, 2.0 * eb) } else { (-eb, eb) };
@@ -1349,6 +1385,8 @@ mod tests {
             line_err: vec![],
             rms_deg: 0.0,
             f_assumed: false,
+            floor_z: 0.0,
+            ref_pt: [0.0; 3],
         }
     }
 
@@ -1386,6 +1424,7 @@ mod tests {
         let t = truth();
         let origin = t.project([0.0; 3]).unwrap();
         let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.eye = false;
         sp.lines = lines_for(&t, axes, noise);
         sp.origin = origin;
         sp.free_pp = free_pp;
@@ -1425,19 +1464,39 @@ mod tests {
     }
 
     #[test]
-    fn camera_height_dial_moves_the_origin() {
+    fn eye_level_world_and_old_files_convert_unchanged() {
         let t = truth();
+        // an older floor-origin space with a layer placed in it
         let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.eye = false;
         sp.lines = lines_for(&t, &[0, 1, 2], 0.0);
         sp.origin = t.project([0.0; 3]).unwrap();
-        let h0 = cam_height(&solve(&sp).unwrap());
-        for want in [h0 * 0.6, h0 * 1.5] {
-            let o = origin_for_height(&sp, want).expect("reachable");
-            let mut s2 = sp.clone();
-            s2.origin = o;
-            let h = cam_height(&solve(&s2).unwrap());
-            assert!((h - want).abs() < want.abs() * 1e-3, "{h} vs {want} (from {h0})");
+        let old = solve(&sp).unwrap();
+        let mut pl = Placement::facing(1, &old, pos2(700.0, 450.0));
+        pl.thick = 40.0;
+        pl.rot = [10.0, 20.0, 0.0];
+        let h_old = pl.homography_at(&old, 25.0);
+        let mut doc = crate::doc::Document::default();
+        doc.spaces.push(sp);
+        let id = doc.insert("x".into(), crate::doc::LayerKind::Shape(crate::doc::ShapeLayer { kind: crate::doc::ShapeKind::Rect, a: pos2(600.0, 400.0), b: pos2(800.0, 500.0), color: egui::Color32::RED, width: 0.0, fill: None, rotation: 0.0 }), None);
+        doc.get_mut(id).unwrap().place = Some(pl);
+        to_eye_level(&mut doc);
+        let sp = &doc.spaces[0];
+        assert!(sp.eye && (sp.floor - DEFAULT_FLOOR).abs() < 1e-9);
+        let cam = solve(sp).unwrap();
+        // the camera is the origin, the floor 160 below
+        assert!(norm(cam.center) < 1e-9 && (cam.floor_z + DEFAULT_FLOOR).abs() < 1e-9);
+        // same picture: the layer (and its extrusion, scaled with the world) maps alike
+        let pl = doc.get(id).unwrap().place.clone().unwrap();
+        let k = pl.thick / 40.0;
+        let h_new = pl.homography_at(&cam, 25.0 * k);
+        for p in [pos2(600.0, 400.0), pos2(800.0, 500.0), pos2(650.0, 480.0)] {
+            let (a, b) = (apply_h(&h_old, p).unwrap(), apply_h(&h_new, p).unwrap());
+            assert!(a.distance(b) < 1e-2, "{a:?} vs {b:?}");
         }
+        // floor points still land on the floor
+        let fp = cam.hit_floor(pos2(800.0, 900.0)).unwrap();
+        assert!((fp[2] + DEFAULT_FLOOR).abs() < 1e-6);
     }
 
     #[test]
@@ -1461,6 +1520,7 @@ mod tests {
     fn outlier_is_downweighted() {
         let t = truth();
         let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.eye = false;
         sp.lines = lines_for(&t, &[0, 1, 2], 0.3);
         sp.origin = t.project([0.0; 3]).unwrap();
         let mut bad = sp.lines[0];
@@ -1475,6 +1535,7 @@ mod tests {
     fn too_few_lines() {
         let t = truth();
         let mut sp = Space::new(1, "t".into(), t.frame);
+        sp.eye = false;
         sp.lines = lines_for(&t, &[0, 1], 0.0);
         sp.lines.truncate(5); // 4 X + 1 Y
         assert!(solve(&sp).is_err());
@@ -1621,6 +1682,7 @@ mod tests {
         let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(1600, 1000)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
         let pid = doc.insert("p".into(), LayerKind::Image(ImageLayer::new(src, pos2(800.0, 500.0))), None);
         let mut sp = Space::new(1, "s".into(), t.frame);
+        sp.eye = false;
         sp.lines = lines_for(&t, &[0, 1, 2], 0.0);
         sp.origin = t.project([0.0; 3]).unwrap();
         sp.follow = Some(SpaceFollow { layer: pid, last: [800.0, 500.0, 1.0, 0.0] });

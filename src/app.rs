@@ -173,7 +173,6 @@ enum Drag {
     SpaceFrame { id: u64, handle: u8, start: Pos2, orig: Rect },
     /// Vanishing line: `end` 0 = a, 1 = b, 2 = whole line.
     SpaceLine { id: u64, idx: usize, end: u8, start: Pos2, orig: crate::persp::VLine },
-    SpaceOrigin { id: u64 },
     SpaceMask { id: u64, start: Pos2 },
     SpaceRef { id: u64 },
     WallRect { sid: u64, wid: u64, start: Pos2 },
@@ -5154,10 +5153,6 @@ impl App {
                 let Some(l) = self.doc.spaces.iter().find(|s| s.id == *id).and_then(|s| s.lines.get(*idx)) else { return };
                 (if *end == 0 { l.a } else { l.b }, Some((l.a, l.b, crate::persp::AXIS_COLORS[(l.axis as usize).min(2)])))
             }
-            Some(Drag::SpaceOrigin { id }) => match self.doc.spaces.iter().find(|s| s.id == *id) {
-                Some(s) => (s.origin, None),
-                None => return,
-            },
             Some(Drag::WallCorner { sid, wid, idx }) => {
                 match self.doc.spaces.iter().find(|s| s.id == *sid).and_then(|s| s.walls.iter().find(|x| x.id == *wid)) {
                     Some(wl) => (wl.corners[*idx], Some((wl.corners[(*idx + 3) % 4], wl.corners[*idx], crate::view3d::WALL_COLOR))),
@@ -5316,9 +5311,6 @@ impl App {
                         break 'ends;
                     }
                 }
-            }
-            if hit.is_none() && xf.w2s(s.origin).distance(sp) <= 10.0 {
-                hit = Some(Drag::SpaceOrigin { id });
             }
             if hit.is_none() {
                 for (h, p) in rect_handles(s.frame).iter().enumerate() {
@@ -5615,14 +5607,6 @@ impl App {
                             l.b = orig.b + d;
                         }
                     }
-                }
-                self.changed = true;
-                self.modified = true;
-            }
-            Drag::SpaceOrigin { id } => {
-                let id = *id;
-                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
-                    s.origin = w;
                 }
                 self.changed = true;
                 self.modified = true;
@@ -8751,7 +8735,7 @@ impl App {
     fn space_panel(&mut self, ui: &mut egui::Ui) {
         use crate::persp::{AXIS_COLORS, AXIS_NAMES};
         ui.strong("3D 공간");
-        ui.small("끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점·원점 끌기 · Delete: 선 지우기");
+        ui.small("끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점 끌기 · Delete: 선 지우기");
         let mut pick = None;
         let mut new = false;
         ui.horizontal_wrapped(|ui| {
@@ -8795,9 +8779,8 @@ impl App {
         if let Some(ax) = axis_pick {
             self.set_space_axis(ax);
         }
-        let mut height_req: Option<f64> = None;
+        let mut floor_req: Option<f64> = None;
         let (mut ref_toggle, mut ref_clear) = (false, false);
-        let mut floor_to_ref = false;
         let mut ref_metres: Option<f64> = None;
         let sp = &self.doc.spaces[i];
         match crate::persp::solve(sp) {
@@ -8809,16 +8792,16 @@ impl App {
                     cam.fov_deg()
                 ));
                 ui.small(format!("35 mm 환산 · 선 오차 {:.2}° (RMS)", cam.rms_deg));
-                // camera height (⨀ point): world units, with a rough metre value
-                let h0 = crate::persp::cam_height(&cam) as f32;
-                let mut h = h0;
-                ui.horizontal(|ui| {
-                    // a fixed range and step: a range that follows the value runs away
-                    let r = ui.add(crate::dial::Dial::new(&mut h, 1.0..=1_000_000.0).step(1.0).text("카메라 높이"));
-                    if r.changed() && (h - h0).abs() > 1e-3 {
-                        height_req = Some(h as f64);
-                    }
-                });
+                // the camera is the origin (eye level = horizon); the floor is a
+                // plane this far below it (world units = cm)
+                let f0 = self.doc.spaces[i].floor as f32;
+                let mut fl = f0;
+                // a fixed range and step: a range that follows the value runs away
+                let r = ui.add(crate::dial::Dial::new(&mut fl, 1.0..=100_000.0).step(1.0).text("바닥 깊이"));
+                if r.changed() && (fl - f0).abs() > 1e-3 {
+                    floor_req = Some(fl as f64);
+                }
+                r.on_hover_text("카메라(눈높이)에서 바닥면까지 · cm");
                 // metres only with a reference length (a photo alone has no scale)
                 let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
@@ -8843,10 +8826,10 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.small(format!("카메라 높이 ≈ {m:.2} m (기준면에서)"));
                         });
-                        // the floor through the origin onto the plane the reference stands on
-                        let on_floor = rl.is_some_and(|r| r.a.distance(self.doc.spaces[i].origin) < 0.5);
-                        if !on_floor && ui.button("기준면을 공간 바닥으로").on_hover_text("원점(⨀)을 기준선 시작점으로 · 공간 바닥 = 기준선이 놓인 수평면").clicked() {
-                            floor_to_ref = true;
+                        // the floor plane onto the plane the reference stands on (cm)
+                        let on_floor = (self.doc.spaces[i].floor - m * 100.0).abs() < 0.5;
+                        if !on_floor && ui.button("기준면을 공간 바닥으로").on_hover_text("바닥 깊이 = 기준선이 놓인 수평면까지 (실측 cm)").clicked() {
+                            floor_req = Some(m * 100.0);
                         }
                     }
                     Some(None) => {
@@ -8956,14 +8939,9 @@ impl App {
         }
         let facing = crate::persp::cameras(&self.doc.spaces).get(&self.doc.spaces[i].id).map(crate::persp::Light::facing);
         let s = &mut self.doc.spaces[i];
-        if let Some(h) = height_req {
-            match crate::persp::origin_for_height(s, h) {
-                Some(o) => {
-                    s.origin = o;
-                    ch = true;
-                }
-                None => self.status = format!("카메라 높이 {h:.0}: 원점을 옮겨 닿을 수 없음"),
-            }
+        if let Some(f) = floor_req {
+            s.floor = f.max(1.0);
+            ch = true;
         }
         if let (Some(m), Some(r)) = (ref_metres, s.ref_line.as_mut()) {
             r.metres = m;
@@ -8971,10 +8949,6 @@ impl App {
         }
         if ref_clear {
             s.ref_line = None;
-            ch = true;
-        }
-        if let (true, Some(r)) = (floor_to_ref, s.ref_line) {
-            s.origin = r.a;
             ch = true;
         }
         if ref_toggle {
@@ -9186,10 +9160,6 @@ impl App {
             for p in rect_handles(s.frame) {
                 handle_box(painter, xf.w2s(p), INK());
             }
-            let o = xf.w2s(s.origin);
-            painter.circle_filled(o, 6.0, Color32::from_black_alpha(150));
-            painter.circle_stroke(o, 6.0, Stroke::new(1.5, Color32::WHITE));
-            painter.circle_filled(o, 1.8, Color32::WHITE);
         }
     }
 

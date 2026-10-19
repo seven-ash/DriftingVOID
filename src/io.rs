@@ -344,6 +344,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
         doc.next_id = doc.next_id.max(fl.id);
         doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert });
     }
+    crate::persp::to_eye_level(&mut doc);
     Ok(doc)
 }
 
