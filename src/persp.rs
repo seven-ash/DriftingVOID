@@ -1066,12 +1066,6 @@ impl Placement {
         (lin, add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k)))
     }
 
-    /// The plane's unit axes in world space (content +x, content +y).
-    pub fn axes(&self) -> (V3, V3) {
-        let (m, _) = self.world_affine();
-        (normalize([m[0][0], m[1][0], m[2][0]]), normalize([m[0][1], m[1][1], m[2][1]]))
-    }
-
     /// Unit normal of the plane in world space.
     pub fn normal(&self) -> V3 {
         let (m, _) = self.world_affine();
@@ -1094,47 +1088,6 @@ impl Placement {
         let (ax, ay) = (self.anchor.x as f64, self.anchor.y as f64);
         let sh = [[1.0, 0.0, -ax], [0.0, 1.0, -ay], [0.0, 0.0, 1.0]];
         mul_mm(&mul_mm(&k, &p), &sh)
-    }
-
-    /// Extrusion slices as (offset along the normal, is an end cap), far to near.
-    /// `project` maps world points to screen pixels; slices are about 0.75 px apart.
-    #[cfg(test)]
-    pub fn slices(&self, project: impl Fn(V3) -> Option<Pos2>, view_depth: impl Fn(V3) -> f64) -> Vec<(f64, bool)> {
-        self.slices_over(None, project, view_depth)
-    }
-
-    /// As `slices`, spaced by where the extrusion looks thickest on screen: the
-    /// origin and, with `bounds` (content rect), its four corners.
-    pub fn slices_over(&self, bounds: Option<Rect>, project: impl Fn(V3) -> Option<Pos2>, view_depth: impl Fn(V3) -> f64) -> Vec<(f64, bool)> {
-        if self.thick <= 0.0 {
-            return vec![(0.0, true)];
-        }
-        let (m, t) = self.world_affine();
-        let n = scale(self.normal(), self.thick);
-        let back = add(t, n);
-        let mut pts = vec![t];
-        if let Some(b) = bounds {
-            for p in [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()] {
-                let d = [(p.x - self.anchor.x) as f64, (p.y - self.anchor.y) as f64, 0.0];
-                pts.push(add(t, mul_mv(&m, d)));
-            }
-        }
-        let px = pts
-            .iter()
-            .filter_map(|&w| match (project(w), project(add(w, n))) {
-                (Some(a), Some(b)) => Some(a.distance(b) as f64),
-                _ => None,
-            })
-            .fold(0.0f64, f64::max);
-        let px = if px > 0.0 { px } else { 48.0 };
-        let k = (px / 0.75).ceil().clamp(1.0, 2000.0) as usize;
-        let mut v: Vec<(f64, bool)> = (0..=k).map(|i| (self.thick * i as f64 / k as f64, i == 0 || i == k)).collect();
-        if view_depth(t) > view_depth(back) {
-            // the back is nearer (seen from behind): draw from the front face on
-            return v;
-        }
-        v.reverse();
-        v
     }
 
     /// Camera depth of the plane origin (for back-to-front sorting).
@@ -1459,15 +1412,21 @@ mod tests {
     }
 
     #[test]
-    fn slices_run_far_to_near() {
+    fn extrusion_shows_one_cap_and_its_near_sides() {
         let t = truth();
         let mut pl = Placement::facing(1, &t, pos2(700.0, 450.0));
         pl.thick = 50.0;
-        let v = pl.slices(|w| t.project(w), |w| t.to_cam(w)[2]);
-        assert!(v.len() > 2);
-        assert!(v.first().unwrap().0 > v.last().unwrap().0, "back first");
-        assert!(v.first().unwrap().1 && v.last().unwrap().1);
-        assert_eq!(v.last().unwrap().0, 0.0);
+        // a 100-unit square outline, outward normals
+        let sq = [pos2(650.0, 400.0), pos2(750.0, 400.0), pos2(750.0, 500.0), pos2(650.0, 500.0)];
+        let ns = [[0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
+        let edges: Vec<crate::extrude::Edge> = (0..4).map(|i| crate::extrude::Edge { a: sq[i], b: sq[(i + 1) % 4], n: ns[i], ca: [255; 3], cb: [255; 3] }).collect();
+        let to_eye = |w: V3| sub(t.center, w);
+        // facing the camera: the front cap shows
+        assert_eq!(crate::extrude::visible_cap(&pl, &to_eye).0, 0.0);
+        let sides = crate::extrude::sides(&edges, &pl, &|w| t.project(w), &to_eye, &|w| t.to_cam(w)[2], None, 0.5);
+        // off-centre view: some sides show, never all four
+        assert!(sides.len() < 4, "{}", sides.len());
+        assert!(sides.windows(2).all(|w| w[0].depth >= w[1].depth));
     }
 
     #[test]

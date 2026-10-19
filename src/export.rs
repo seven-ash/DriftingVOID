@@ -28,64 +28,6 @@ pub fn output_size(region: Rect, scale: f32) -> (u32, u32) {
     )
 }
 
-/// Outward edge directions per texel in content space (unit, or zero away from
-/// edges): from the alpha, softened so the direction reaches a few texels in.
-pub fn edge_normals(pm: &Pixmap) -> Vec<[f32; 2]> {
-    let (w, h) = (pm.width() as usize, pm.height() as usize);
-    let mut a: Vec<f32> = pm.data().chunks_exact(4).map(|p| p[3] as f32 / 255.0).collect();
-    // two separable box blurs, radius 3
-    for _ in 0..2 {
-        let mut t = vec![0f32; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let (x0, x1) = (x.saturating_sub(3), (x + 4).min(w));
-                t[y * w + x] = a[y * w + x0..y * w + x1].iter().sum::<f32>() / (x1 - x0) as f32;
-            }
-        }
-        for y in 0..h {
-            for x in 0..w {
-                let (y0, y1) = (y.saturating_sub(3), (y + 4).min(h));
-                a[y * w + x] = (y0..y1).map(|yy| t[yy * w + x]).sum::<f32>() / (y1 - y0) as f32;
-            }
-        }
-    }
-    let at = |x: isize, y: isize| a[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
-    let mut out = vec![[0f32; 2]; w * h];
-    for y in 0..h as isize {
-        for x in 0..w as isize {
-            let gx = at(x + 1, y) - at(x - 1, y);
-            let gy = at(x, y + 1) - at(x, y - 1);
-            let m = (gx * gx + gy * gy).sqrt();
-            if m > 1e-3 {
-                out[y as usize * w + x as usize] = [-gx / m, -gy / m];
-            }
-        }
-    }
-    out
-}
-
-/// The sides of an extrusion lit by `light`: each texel darkened by how its edge
-/// (world normal from `u`/`v` and the edge direction) faces the light.
-pub fn shade_sides(pm: &Pixmap, normals: &[[f32; 2]], u: crate::persp::V3, v: crate::persp::V3, light: &crate::persp::Light) -> Pixmap {
-    let mut out = pm.clone();
-    let mid = light.ambient + (1.0 - light.ambient) * 0.5;
-    for (px, n) in out.data_mut().chunks_exact_mut(4).zip(normals) {
-        if px[3] == 0 {
-            continue;
-        }
-        let s = if n[0] == 0.0 && n[1] == 0.0 {
-            mid
-        } else {
-            let (nx, ny) = (n[0] as f64, n[1] as f64);
-            light.shade([u[0] * nx + v[0] * ny, u[1] * nx + v[1] * ny, u[2] * nx + v[2] * ny])
-        };
-        for c in &mut px[..3] {
-            *c = (*c as f32 * s).round() as u8;
-        }
-    }
-    out
-}
-
 /// The visible mask of a layer, if it has one.
 pub fn mask_for(doc: &Document, id: crate::doc::LayerId) -> Option<&crate::raster::RasterLayer> {
     doc.layers.iter().find(|m| m.mask_of == Some(id) && m.visible).and_then(|m| match &m.kind {
@@ -111,16 +53,6 @@ pub fn apply_mask(pm: &mut Pixmap, m: &crate::raster::RasterLayer, region: Rect,
             *c = ((*c as u16 * a + 127) / 255) as u8;
         }
     }
-}
-
-/// One layer alone, rendered and masked (opacity included).
-pub fn render_masked(doc: &Document, layer: &Layer, m: &crate::raster::RasterLayer, region: Rect, scale: f32) -> Result<Pixmap, String> {
-    let mut one = layer.clone();
-    one.mask_of = None;
-    let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
-    let mut pm = render(&mini, region, scale, None)?;
-    apply_mask(&mut pm, m, region, scale);
-    Ok(pm)
 }
 
 /// Rows `y0 .. y0 + h` of the render of `region` (output pixels): the same
@@ -171,28 +103,20 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
             });
             let light = doc.spaces.iter().find(|s| s.id == pl.space).and_then(|s| s.light).filter(|_| pl.thick > 0.0);
             // flattened once per export and shared by every band
-            if let Some(fl) = flat.get(layer, pl, res, light) {
+            if let Some(fl) = flat.get(layer, pl, res) {
                 let (src, rect, res) = (&fl.0, fl.1, fl.2);
-                let sides = fl.3.as_ref();
                 let to_out = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * scale, (p.y - full.min.y) * scale - dy));
-                let n0 = pl.normal();
-                for (off, cap) in pl.slices_over(layer.bounds(), to_out, |w| cam.to_cam(w)[2]) {
-                    let hs = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
-                    match (&light, sides) {
-                        (Some(l), Some(sd)) => {
-                            if cap {
-                                // front face looks against the extrusion, the back along it
-                                let n = if off == 0.0 { crate::persp::scale(n0, -1.0) } else { n0 };
-                                warp_onto(&mut out, src, rect, res, &hs, layer.opacity, clip, l.shade(n));
-                            } else {
-                                warp_onto(&mut out, sd, rect, res, &hs, layer.opacity, clip, 1.0);
-                            }
-                        }
-                        _ => {
-                            let shade = if cap { 1.0 } else { crate::canvas::SIDE_SHADE };
-                            warp_onto(&mut out, src, rect, res, &hs, layer.opacity, clip, shade);
-                        }
+                if pl.thick <= 0.0 {
+                    warp_onto(&mut out, src, rect, res, &h, layer.opacity, clip, 1.0);
+                } else {
+                    let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+                    if let Some(edges) = &fl.3 {
+                        let sides = crate::extrude::sides(edges, pl, &to_out, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE);
+                        fill_sides(&mut out, &sides, layer.opacity, clip);
                     }
+                    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+                    let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
+                    warp_onto(&mut out, src, rect, res, &hc, layer.opacity, clip, light.map_or(1.0, |l| l.shade(n)));
                 }
             }
             continue;
@@ -217,28 +141,61 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
     Ok(out)
 }
 
-/// Flattened 3D layers (and their lit sides) for one export, shared by its bands.
+/// Flattened 3D layers (and their extrusion outlines) for one export, shared by
+/// its bands.
 #[derive(Default)]
 pub struct FlatCache {
     #[allow(clippy::type_complexity)]
-    map: std::sync::Mutex<HashMap<(u64, u32), std::sync::Arc<(Pixmap, Rect, f32, Option<Pixmap>)>>>,
+    map: std::sync::Mutex<HashMap<(u64, u32), std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>>>,
 }
 
 impl FlatCache {
-    fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32, light: Option<crate::persp::Light>) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Pixmap>)>> {
+    #[allow(clippy::type_complexity)]
+    fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>> {
         let key = (layer.id, res.to_bits());
         let mut m = self.map.lock().unwrap();
         if let Some(v) = m.get(&key) {
             return Some(v.clone());
         }
         let (src, rect, res) = flatten_layer(layer, res)?;
-        let sides = light.map(|l| {
-            let (u, v) = pl.axes();
-            shade_sides(&src, &edge_normals(&src), u, v, &l)
-        });
-        let v = std::sync::Arc::new((src, rect, res, sides));
+        let edges = (pl.thick > 0.0).then(|| crate::extrude::trace(&src, rect, res));
+        let v = std::sync::Arc::new((src, rect, res, edges));
         m.insert(key, v.clone());
         Some(v)
+    }
+}
+
+/// Extrusion side quads (output pixels, far to near) filled with their colours.
+/// Each quad is stretched a little along its edge so neighbours overlap instead
+/// of leaving anti-aliasing seams.
+fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, clip: Option<Rect>) {
+    let mask = clip.and_then(|c| {
+        let mut m = tiny_skia::Mask::new(out.width(), out.height())?;
+        let r = tiny_skia::Rect::from_ltrb(c.min.x, c.min.y, c.max.x, c.max.y)?;
+        m.fill_path(&PathBuilder::from_rect(r), FillRule::Winding, false, Transform::identity());
+        Some(m)
+    });
+    for sd in sides {
+        let [a, b, c, d] = sd.q;
+        let grow = |p: Pos2, q: Pos2| {
+            let v = q - p;
+            let l = v.length();
+            if l > 1e-3 { p - v / l * 0.35 } else { p }
+        };
+        let (a, d) = (grow(a, b), grow(d, c));
+        let (b, c) = (grow(b, a), grow(c, d));
+        let mut pb = PathBuilder::new();
+        pb.move_to(a.x, a.y);
+        pb.line_to(b.x, b.y);
+        pb.line_to(c.x, c.y);
+        pb.line_to(d.x, d.y);
+        pb.close();
+        let Some(path) = pb.finish() else { continue };
+        let rgb = [0, 1, 2].map(|k| ((sd.ca[k] + sd.cb[k]) * 0.5 * 255.0).round().clamp(0.0, 255.0) as u8);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], (opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        paint.anti_alias = true;
+        out.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), mask.as_ref());
     }
 }
 

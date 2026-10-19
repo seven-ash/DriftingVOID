@@ -54,18 +54,8 @@ pub struct TexCache {
     videos: HashMap<u64, ((u64, u64), TextureHandle, u64)>,
     /// Masked layers rendered on the CPU: (key, texture, last frame, region).
     masked: HashMap<LayerId, (u64, TextureHandle, u64, Rect)>,
-    /// Lit extrusion sides: (content key, flattened pixmap, edge normals, light key,
-    /// texture, last frame).
-    sides: HashMap<LayerId, SideTex>,
-}
-
-struct SideTex {
-    key: u64,
-    pm: tiny_skia::Pixmap,
-    normals: Vec<[f32; 2]>,
-    lkey: u64,
-    tex: Option<TextureHandle>,
-    frame: u64,
+    /// Extrusion outlines: (content key, edges, last frame).
+    outlines: HashMap<LayerId, (u64, std::sync::Arc<Vec<crate::extrude::Edge>>, u64)>,
 }
 
 impl TexCache {
@@ -82,95 +72,23 @@ impl TexCache {
         self.placed.retain(|_, v| f - v.2 < 120);
         self.videos.retain(|_, v| f - v.2 < 120);
         self.masked.retain(|_, v| f - v.2 < 120);
-        self.sides.retain(|_, v| f - v.frame < 120);
+        self.outlines.retain(|_, v| f - v.2 < 120);
     }
 
-    /// The sides texture of a lit extrusion (same layout as `placed`).
-    fn sides(&mut self, ctx: &Context, layer: &Layer, res: f32, u: crate::persp::V3, v: crate::persp::V3, light: &crate::persp::Light) -> Option<egui::TextureId> {
+    /// Outline of a layer's content for its extrusion sides (same `res` as `placed`).
+    pub fn outline(&mut self, layer: &Layer, res: f32) -> Option<std::sync::Arc<Vec<crate::extrude::Edge>>> {
         let key = content_key(layer) ^ (res.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let lkey = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for x in u.iter().chain(v.iter()).chain(light.rot.iter()) {
-                ((x * 1000.0).round() as i64).hash(&mut h);
-            }
-            light.ambient.to_bits().hash(&mut h);
-            h.finish()
-        };
         let frame = self.frame;
-        let fresh = self.sides.get(&layer.id).is_none_or(|e| e.key != key);
-        if fresh {
-            let (pm, _, _) = crate::export::flatten_layer(layer, res)?;
-            let normals = crate::export::edge_normals(&pm);
-            self.sides.insert(layer.id, SideTex { key, pm, normals, lkey: lkey ^ 1, tex: None, frame });
-        }
-        let e = self.sides.get_mut(&layer.id)?;
-        e.frame = frame;
-        if e.lkey != lkey || e.tex.is_none() {
-            let lit = crate::export::shade_sides(&e.pm, &e.normals, u, v, light);
-            let ci = ColorImage::from_rgba_premultiplied([lit.width() as usize, lit.height() as usize], lit.data());
-            let opts = TextureOptions { mipmap_mode: None, ..TEX_OPTS };
-            match &mut e.tex {
-                Some(t) => t.set(ci, opts),
-                None => e.tex = Some(ctx.load_texture(format!("sides{}", layer.id), ci, opts)),
-            }
-            e.lkey = lkey;
-        }
-        e.tex.as_ref().map(|t| t.id())
-    }
-
-    /// A masked layer as one texture over the visible part of it (CPU path, unused).
-    #[allow(dead_code)]
-    fn masked(&mut self, ctx: &Context, doc: &Document, layer: &Layer, m: &crate::raster::RasterLayer, view_w: Rect, zoom: f32) -> Option<(egui::TextureId, Rect)> {
-        let cams = crate::persp::cameras(&doc.spaces);
-        let b = layer.shown_bounds(&cams)?;
-        // power-of-two scale and a coarse grid, so small pans and zooms reuse it
-        let mut scale = 2f32.powf((zoom * ctx.pixels_per_point()).max(1.0 / 16.0).log2().ceil()).min(4.0);
-        let grid = 128.0 / scale;
-        let r = b.intersect(view_w.expand2(view_w.size() * 0.25));
-        if !r.is_positive() {
-            return None;
-        }
-        let r = Rect::from_min_max(
-            pos2((r.min.x / grid).floor() * grid, (r.min.y / grid).floor() * grid),
-            pos2((r.max.x / grid).ceil() * grid, (r.max.y / grid).ceil() * grid),
-        );
-        while r.width() * scale > 4096.0 || r.height() * scale > 4096.0 {
-            scale *= 0.5;
-        }
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        content_key(layer).hash(&mut h);
-        for (k, t) in &m.tiles {
-            (k, t.rev).hash(&mut h);
-        }
-        [m.offset.x, m.offset.y, r.min.x, r.min.y, r.max.x, r.max.y, scale, layer.opacity].map(f32::to_bits).hash(&mut h);
-        doc.timeline.time.to_bits().hash(&mut h);
-        if let Some(pl) = &layer.place {
-            serde_json::to_string(pl).unwrap_or_default().hash(&mut h);
-            serde_json::to_string(&doc.spaces.iter().find(|s| s.id == pl.space).map(|s| (s.frame, &s.lines, s.origin))).unwrap_or_default().hash(&mut h);
-        }
-        let key = h.finish();
-        let frame = self.frame;
-        if let Some(e) = self.masked.get_mut(&layer.id) {
+        if let Some(e) = self.outlines.get_mut(&layer.id) {
             if e.0 == key {
                 e.2 = frame;
-                return Some((e.1.id(), e.3));
+                return Some(e.1.clone());
             }
         }
-        let pm = crate::export::render_masked(doc, layer, m, r, scale).ok()?;
-        let img = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
-        let opts = TextureOptions { mipmap_mode: None, ..TEX_OPTS };
-        match self.masked.get_mut(&layer.id) {
-            Some(e) => {
-                e.1.set(img, opts);
-                *e = (key, e.1.clone(), frame, r);
-            }
-            None => {
-                let t = ctx.load_texture(format!("masked{}", layer.id), img, opts);
-                self.masked.insert(layer.id, (key, t, frame, r));
-            }
-        }
-        self.masked.get(&layer.id).map(|e| (e.1.id(), e.3))
+        let (pm, rect, res) = crate::export::flatten_layer(layer, res)?;
+        let edges = std::sync::Arc::new(crate::extrude::trace(&pm, rect, res));
+        self.outlines.insert(layer.id, (key, edges.clone(), frame));
+        Some(edges)
     }
 
     /// Texture of a layer's 2D content at `res` texels per canvas pixel.
@@ -352,12 +270,77 @@ pub fn content_key(l: &Layer) -> u64 {
     h.finish()
 }
 
-/// Side colour of an extrusion: the content darkened.
+/// Side colour of an extrusion without a light: the content darkened.
 pub const SIDE_SHADE: f32 = 0.55;
 
+/// Grid size for a textured quad whose corners are `corners` (screen px): cells
+/// of about 24 px, at most `cells` of them. Each cell is mapped affinely, so long
+/// quads seen in depth (long text) need many columns, not a fixed grid.
+pub fn grid_for(corners: [Pos2; 4], cells: f32) -> (usize, usize) {
+    let along = corners[0].distance(corners[1]).max(corners[3].distance(corners[2]));
+    let across = corners[0].distance(corners[3]).max(corners[1].distance(corners[2]));
+    let (mut nx, mut ny) = ((along / 24.0).ceil().max(2.0), (across / 24.0).ceil().max(2.0));
+    let k = (cells / (nx * ny)).sqrt().min(1.0);
+    nx = (nx * k).ceil().clamp(2.0, 512.0);
+    ny = (ny * k).ceil().clamp(2.0, 512.0);
+    (nx as usize, ny as usize)
+}
+
+/// A textured face: content `rect` (texture covers `size` from its corner) through
+/// `project` (content -> screen) on an `n` grid. Cells with an unprojectable
+/// corner are left out.
+pub fn face_mesh(tex: egui::TextureId, rect: Rect, size: Vec2, project: impl Fn(Pos2) -> Option<Pos2>, n: (usize, usize), color: Color32) -> Mesh {
+    let (nx, ny) = n;
+    let mut m = Mesh::with_texture(tex);
+    let mut ok = Vec::with_capacity((nx + 1) * (ny + 1));
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let p = rect.min + rect.size() * vec2(i as f32 / nx as f32, j as f32 / ny as f32);
+            let s = project(p);
+            ok.push(s.is_some());
+            m.vertices.push(egui::epaint::Vertex { pos: s.unwrap_or(Pos2::ZERO), uv: ((p - rect.min) / size).to_pos2(), color });
+        }
+    }
+    for j in 0..ny {
+        for i in 0..nx {
+            let a = j * (nx + 1) + i;
+            let c = a + nx + 1;
+            if ok[a] && ok[a + 1] && ok[c] && ok[c + 1] {
+                let (a, c) = (a as u32, c as u32);
+                m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
+            }
+        }
+    }
+    m
+}
+
+/// Extrusion sides (already projected, far to near) as one untextured mesh.
+pub fn side_mesh(sides: &[crate::extrude::Side], op: f32) -> Mesh {
+    let mut m = Mesh::default();
+    let col = |c: [f32; 3]| {
+        let [r, g, b] = c.map(|v| (v * op * 255.0).round().clamp(0.0, 255.0) as u8);
+        Color32::from_rgba_premultiplied(r, g, b, (op * 255.0).round() as u8)
+    };
+    for sd in sides {
+        let base = m.vertices.len() as u32;
+        let (ca, cb) = (col(sd.ca), col(sd.cb));
+        for (p, c) in sd.q.iter().zip([ca, cb, cb, ca]) {
+            m.colored_vertex(*p, c);
+        }
+        m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    m
+}
+
+/// A cap's tint: lit by its facing, or plain.
+pub fn cap_tint(op: f32, shade: f32) -> Color32 {
+    let v = (255.0 * op * shade) as u8;
+    Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
+}
+
 /// Draws a layer placed in a space: its flattened 2D content on a subdivided mesh
-/// through the space camera's homography; with thickness, as stacked slices along
-/// the plane normal (darker in between, far to near).
+/// through the space camera's homography; with thickness, the visible sides of
+/// its outline (far to near) and then the cap that faces the camera.
 #[allow(clippy::too_many_arguments)]
 fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::persp::Placement, cam: &crate::persp::Camera, xf: &Xf, cache: &mut TexCache, view_w: Rect, light: Option<crate::persp::Light>) {
     use crate::persp::apply_h;
@@ -373,75 +356,23 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
     let res = 2f32.powf(mag.max(1e-3).log2().ceil()).clamp(1.0 / 16.0, 2.0);
     let Some((tex, rect, size)) = cache.placed(ctx, layer, res) else { return };
     let op = layer.opacity.clamp(0.0, 1.0);
-    let cap = tint(op);
-    let side = {
-        let v = (255.0 * op * SIDE_SHADE) as u8;
-        Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
-    };
-    let slices = pl.slices_over(Some(b), |w| cam.project(w).map(|p| xf.w2s(p)), |w| cam.to_cam(w)[2]);
-    // lit: caps by their facing, sides from a texture shaded by edge direction
-    let light = light.filter(|_| pl.thick > 0.0);
-    let lit_sides = light.and_then(|l| {
-        let (u, v) = pl.axes();
-        cache.sides(ctx, layer, res, u, v, &l)
-    });
-    let n0 = pl.normal();
-    // grid cells of about 24 screen px: each cell is mapped affinely, so long
-    // boxes seen in depth (long text) need many columns, not a fixed 12×12
-    let px_len = |a: Pos2, b: Pos2| (b - a).length() * xf.zoom * ppp;
-    let along = px_len(corners[0], corners[1]).max(px_len(corners[3], corners[2]));
-    let across = px_len(corners[0], corners[3]).max(px_len(corners[1], corners[2]));
-    let grid = |cells: f32| {
-        let (mut nx, mut ny) = ((along / 24.0).ceil().max(2.0), (across / 24.0).ceil().max(2.0));
-        let k = (cells / (nx * ny)).sqrt().min(1.0);
-        nx = (nx * k).ceil().clamp(2.0, 512.0);
-        ny = (ny * k).ceil().clamp(2.0, 512.0);
-        (nx as usize, ny as usize)
-    };
-    // caps get the fine grid; the many side slices a coarser one
-    let (cap_grid, side_grid) = (grid(4096.0), grid(256.0));
-    for (off, is_cap) in slices {
-        let h = if off == 0.0 { h } else { pl.homography_at(cam, off) };
-        let (color, slice_tex) = match (light, lit_sides) {
-            (Some(l), Some(st)) => {
-                if is_cap {
-                    let n = if off == 0.0 { crate::persp::scale(n0, -1.0) } else { n0 };
-                    let s = l.shade(n);
-                    let v = (255.0 * op * s) as u8;
-                    (Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8), tex)
-                } else {
-                    (cap, st)
-                }
-            }
-            _ => (if is_cap { cap } else { side }, tex),
-        };
-        let (nx, ny) = if is_cap { cap_grid } else { side_grid };
-        let mut m = Mesh::with_texture(slice_tex);
-        let mut ok = true;
-        for j in 0..=ny {
-            for i in 0..=nx {
-                let t = vec2(i as f32 / nx as f32, j as f32 / ny as f32);
-                let p = rect.min + rect.size() * t;
-                let Some(s) = apply_h(&h, p) else {
-                    ok = false;
-                    break;
-                };
-                let uv = ((p - rect.min) / size).to_pos2();
-                m.vertices.push(egui::epaint::Vertex { pos: xf.w2s(s), uv, color });
-            }
-        }
-        if !ok {
-            continue;
-        }
-        for j in 0..ny as u32 {
-            for i in 0..nx as u32 {
-                let a = j * (nx as u32 + 1) + i;
-                let c = a + nx as u32 + 1;
-                m.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
-            }
-        }
-        painter.add(Shape::mesh(m));
+    let screen = [0, 1, 2, 3].map(|i| xf.w2s(corners[i]).to_vec2() * ppp).map(|v| v.to_pos2());
+    let grid = grid_for(screen, 4096.0);
+    if pl.thick <= 0.0 {
+        painter.add(face_mesh(tex, rect, size, |p| apply_h(&h, p).map(|s| xf.w2s(s)), grid, tint(op)));
+        return;
     }
+    let light = light.as_ref();
+    let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+    if let Some(edges) = cache.outline(layer, res) {
+        let project = |w: crate::persp::V3| cam.project(w).map(|p| xf.w2s(p));
+        let sides = crate::extrude::sides(&edges, pl, &project, &to_eye, &|w| cam.to_cam(w)[2], light, SIDE_SHADE);
+        painter.add(Shape::mesh(side_mesh(&sides, op)));
+    }
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    let hc = if off == 0.0 { h } else { pl.homography_at(cam, off) };
+    let color = cap_tint(op, light.map_or(1.0, |l| l.shade(n)));
+    painter.add(face_mesh(tex, rect, size, |p| apply_h(&hc, p).map(|s| xf.w2s(s)), grid, color));
 }
 
 fn tint(op: f32) -> Color32 {

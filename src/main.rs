@@ -8,6 +8,7 @@ mod dial;
 mod canvas;
 mod doc;
 mod export;
+mod extrude;
 mod fontdb;
 mod glass;
 mod okhsv;

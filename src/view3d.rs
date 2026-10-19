@@ -3,7 +3,7 @@
 //! transforms. The world is the space's (Z up); one unit is one canvas pixel at the
 //! origin.
 
-use egui::{Align2, Color32, Context, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+use egui::{Align2, Color32, Context, FontId, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 use crate::canvas::{TexCache, Xf};
 use crate::doc::{Document, Layer, LayerId};
@@ -341,40 +341,25 @@ fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj:
         0.25
     };
     let Some((tex, rect, size)) = cache.placed(ctx, l, res) else { return };
-    const N: usize = 12;
     let op = l.opacity.clamp(0.0, 1.0);
-    let cap = Color32::WHITE.gamma_multiply(op);
-    let side = {
-        let v = (255.0 * op * crate::canvas::SIDE_SHADE) as u8;
-        Color32::from_rgba_premultiplied(v, v, v, (255.0 * op) as u8)
+    let grid = if shown.len() == 4 { crate::canvas::grid_for([shown[0], shown[1], shown[2], shown[3]], 4096.0) } else { (12, 12) };
+    let face = |off: f64| {
+        let t = add(t, scale(pl.normal(), off));
+        move |p: Pos2| proj.project(content_to_world(pl, &m, t, p))
     };
-    let n = pl.normal();
-    for (off, is_cap) in pl.slices_over(l.bounds(), |w| proj.project(w), |w| proj.to_view(w)[2]) {
-        let color = if is_cap { cap } else { side };
-        let t = add(t, scale(n, off));
-        let mut mesh = Mesh::with_texture(tex);
-        let mut ok = Vec::with_capacity((N + 1) * (N + 1));
-        for j in 0..=N {
-            for i in 0..=N {
-                let tt = vec2(i as f32 / N as f32, j as f32 / N as f32);
-                let p = rect.min + rect.size() * tt;
-                let s = proj.project(content_to_world(pl, &m, t, p));
-                ok.push(s.is_some());
-                mesh.vertices.push(egui::epaint::Vertex { pos: s.unwrap_or(Pos2::ZERO), uv: ((p - rect.min) / size).to_pos2(), color });
-            }
-        }
-        for j in 0..N {
-            for i in 0..N {
-                let a = j * (N + 1) + i;
-                let c = a + N + 1;
-                if ok[a] && ok[a + 1] && ok[c] && ok[c + 1] {
-                    let (a, c) = (a as u32, c as u32);
-                    mesh.indices.extend_from_slice(&[a, a + 1, c + 1, a, c + 1, c]);
-                }
-            }
-        }
-        painter.add(Shape::mesh(mesh));
+    if pl.thick <= 0.0 {
+        painter.add(crate::canvas::face_mesh(tex, rect, size, face(0.0), grid, Color32::WHITE.gamma_multiply(op)));
+        return;
     }
+    // towards the viewer: the eye (perspective) or against the view axis (ortho)
+    let fwd = proj.r[2];
+    let to_eye = |w: V3| if proj.ppu.is_some() { scale(fwd, -1.0) } else { sub(proj.eye, w) };
+    if let Some(edges) = cache.outline(l, res) {
+        let sides = crate::extrude::sides(&edges, pl, &|w| proj.project(w), &to_eye, &|w| proj.to_view(w)[2], None, crate::canvas::SIDE_SHADE);
+        painter.add(Shape::mesh(crate::canvas::side_mesh(&sides, op)));
+    }
+    let (off, _) = crate::extrude::visible_cap(pl, &to_eye);
+    painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, crate::canvas::cap_tint(op, 1.0)));
 }
 
 fn draw_selection(painter: &Painter, doc: &Document, proj: &Proj, sel: Option<LayerId>) {
