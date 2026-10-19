@@ -425,7 +425,7 @@ pub fn pick(doc: &Document, proj: &Proj, space: u64, s: Pos2) -> Option<LayerId>
     let (o, d) = proj.ray(s);
     let mut best: Option<(f64, LayerId)> = None;
     for (l, pl) in members(doc, space) {
-        if !l.visible || l.locked {
+        if !l.visible || l.locked || l.mask_of.is_some() {
             continue;
         }
         let Some(b) = l.bounds() else { continue };

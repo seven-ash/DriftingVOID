@@ -3785,7 +3785,7 @@ impl App {
     fn hit_layer(&self, w0: Pos2, tol0: f32) -> Option<LayerId> {
         let cams = crate::persp::cameras(&self.doc.spaces);
         for l in self.doc.draw_order(&cams).into_iter().rev() {
-            if !l.visible || l.locked {
+            if !l.visible || l.locked || l.mask_of.is_some() {
                 continue;
             }
             // placed layers: test in their 2D content coordinates
@@ -5541,7 +5541,7 @@ impl App {
                     let inside = |b: Rect| if full { r.contains_rect(b) } else { r.contains(b.center()) };
                     let mut ids = Vec::new();
                     let mut sub = SubSel::default();
-                    for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked) {
+                    for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked && l.mask_of.is_none()) {
                         match &l.kind {
                             LayerKind::Vector(v) => {
                                 let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| inside(v.strokes[i].bounds.translate(v.offset))).collect();
@@ -5598,7 +5598,7 @@ impl App {
                 // brush pixels inside the outline
                 let mut ids = Vec::new();
                 let mut sub = SubSel::default();
-                for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked) {
+                for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked && l.mask_of.is_none()) {
                     match &l.kind {
                         LayerKind::Vector(v) => {
                             let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| in_poly(v.strokes[i].bounds.translate(v.offset).center(), &pts)).collect();
