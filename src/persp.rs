@@ -380,10 +380,16 @@ pub struct Space {
     /// Directional light for layers with thickness (shading only, no shadows).
     #[serde(default)]
     pub light: Option<Light>,
-    /// Metres per world unit, from a real camera height typed in (None: unknown).
+    /// Metres per world unit: from a real camera height typed in, or a guess.
     #[serde(default)]
     pub unit_m: Option<f64>,
+    /// `unit_m` is the eye-height guess (camera at 1.6 m when first solved).
+    #[serde(default)]
+    pub unit_guess: bool,
 }
+
+/// Assumed camera height (metres) when nothing else gives the scale.
+pub const EYE_HEIGHT_M: f64 = 1.6;
 
 /// A directional light: turned by `rot` (degrees, X then Y then Z) from shining
 /// along +Z; `ambient` is the brightness of faces turned away.
@@ -512,7 +518,7 @@ pub fn follow_photos(doc: &mut crate::doc::Document) {
 impl Space {
     pub fn new(id: u64, name: String, frame: Rect) -> Self {
         let origin = pos2(frame.center().x, frame.top() + frame.height() * 0.7);
-        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, unit_m: None }
+        Self { id, name, frame, lines: Vec::new(), origin, free_pp: false, grid: true, mask: None, walls: Vec::new(), follow: None, roll: 0.0, light: None, unit_m: None, unit_guess: false }
     }
 
     /// The canvas area the space shows in.

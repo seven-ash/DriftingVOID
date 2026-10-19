@@ -8748,6 +8748,7 @@ impl App {
         }
         let mut height_req: Option<f64> = None;
         let mut metre_req: Option<f64> = None;
+        let mut guess_req: Option<f64> = None;
         let sp = &self.doc.spaces[i];
         match crate::persp::solve(sp) {
             Ok(cam) => {
@@ -8767,17 +8768,21 @@ impl App {
                         height_req = Some(h as f64);
                     }
                 });
-                // metres: from a real height typed in once (a photo alone has no scale)
+                // metres: a real height typed in, else a guess that the camera was at
+                // eye height when the space was first solved
+                let (um, guess) = (self.doc.spaces[i].unit_m, self.doc.spaces[i].unit_guess);
+                if um.is_none() && h0.abs() > 1e-6 {
+                    guess_req = Some(crate::persp::EYE_HEIGHT_M / h0.abs() as f64);
+                }
                 ui.horizontal(|ui| {
                     let mut no = false;
-                    crate::dial::label_cell(ui, "실제 높이", None, &mut no);
-                    let um = self.doc.spaces[i].unit_m;
-                    let mut m = um.map_or(0.0, |k| h0 as f64 * k);
-                    let r = ui.add(crate::calc::drag(&mut m).range(0.0..=1000.0).speed(0.01).max_decimals(2).suffix(" m").custom_formatter(move |v, _| if um.is_none() { crate::dial::MIXED.into() } else { format!("{v:.2}") }));
+                    crate::dial::label_cell(ui, if guess || um.is_none() { "추정 높이" } else { "실제 높이" }, None, &mut no);
+                    let mut m = um.map_or(crate::persp::EYE_HEIGHT_M, |k| h0.abs() as f64 * k);
+                    let r = ui.add(crate::calc::drag(&mut m).range(0.0..=1000.0).speed(0.01).max_decimals(2).suffix(" m"));
                     if r.changed() && m > 0.0 && h0.abs() > 1e-6 {
-                        metre_req = Some(m / h0 as f64);
+                        metre_req = Some(m / h0.abs() as f64);
                     }
-                    r.on_hover_text("카메라의 실제 높이 · 미터 환산 기준");
+                    r.on_hover_text(if guess || um.is_none() { "눈높이 1.6 m 가정 · 실제 높이 입력 시 기준" } else { "카메라의 실제 높이 · 미터 환산 기준" });
                 });
             }
             Err(e) => {
@@ -8884,7 +8889,12 @@ impl App {
         }
         if let Some(k) = metre_req {
             s.unit_m = Some(k);
+            s.unit_guess = false;
             ch = true;
+        } else if let Some(k) = guess_req {
+            // not an edit: the guess is just remembered with the space
+            s.unit_m = Some(k);
+            s.unit_guess = true;
         }
         if mask_clear {
             s.mask = None;
