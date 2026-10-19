@@ -287,6 +287,25 @@ fn nice125(x: f64) -> f64 {
     (if m < 1.5 { 1.0 } else if m < 3.5 { 2.0 } else if m < 7.5 { 5.0 } else { 10.0 }) * e
 }
 
+/// The picture quad (TL, TR, BR, BL) of a vertical wall standing on the floor
+/// along the base line `a`–`b` (canvas points on the floor), `height` tall.
+/// None when an end is not on the floor.
+pub fn wall_on_base(cam: &Camera, a: Pos2, b: Pos2, height: f64) -> Option<[Pos2; 4]> {
+    let (pa, pb) = (cam.hit_floor(a)?, cam.hit_floor(b)?);
+    // keep the top in front of the camera (it may not reach the full height)
+    let up = |p: V3| {
+        let mut h = height;
+        for _ in 0..20 {
+            if let Some(q) = cam.project(add(p, [0.0, 0.0, h])) {
+                return Some(q);
+            }
+            h *= 0.5;
+        }
+        None
+    };
+    Some([up(pa)?, up(pb)?, cam.project(pb)?, cam.project(pa)?])
+}
+
 /// Grid on a wall's plane around its quad (weight 2 every fifth line).
 pub fn wall_grid(cam: &Camera, w: &Wall) -> Vec<(V3, V3, u8)> {
     let Some(f) = wall_frame(cam, w) else { return Vec::new() };
@@ -1152,6 +1171,44 @@ impl Placement {
         }
     }
 
+    /// Standing on the floor at `at` (a floor point), upright and turned to face
+    /// the camera across the floor; content point `anchor` (its bottom middle)
+    /// touches the floor there. One content pixel is as big as an image pixel
+    /// at that distance, so the layer starts at the size it showed in 2D.
+    pub fn standing(space: u64, cam: &Camera, at: V3, anchor: Pos2) -> Self {
+        let mut n = sub(cam.center, at);
+        n[2] = 0.0;
+        let n = if norm(n) > 1e-9 { normalize(n) } else { [0.0, -1.0, 0.0] };
+        // content x runs to the right on screen, y straight down
+        let mut u = normalize(cross([0.0, 0.0, 1.0], n));
+        let right = |v: V3| {
+            let a = cam.project(at);
+            let b = cam.project(add(at, v));
+            match (a, b) {
+                (Some(a), Some(b)) => (b.x - a.x) as f64,
+                _ => 1.0,
+            }
+        };
+        if right(u) < 0.0 {
+            u = scale(u, -1.0);
+        }
+        let v = [0.0, 0.0, -1.0];
+        let w = cross(u, v);
+        Self {
+            space,
+            anchor,
+            base_r: [[u[0], v[0], w[0]], [u[1], v[1], w[1]], [u[2], v[2], w[2]]],
+            base_t: at,
+            base_k: cam.to_cam(at)[2].max(1e-6) / cam.f,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            scale: 1.0,
+            thick: 0.0,
+            wall: None,
+            wall_uv: [0.0; 2],
+        }
+    }
+
     /// On a wall: the plane through the wall point under `anchor`, lying flat on the
     /// wall, with a scale that keeps the layer about its 2D size there.
     pub fn on_wall(space: u64, cam: &Camera, wall: &Wall, anchor: Pos2) -> Option<Self> {
@@ -1497,6 +1554,40 @@ mod tests {
         // floor points still land on the floor
         let fp = cam.hit_floor(pos2(800.0, 900.0)).unwrap();
         assert!((fp[2] + DEFAULT_FLOOR).abs() < 1e-6);
+    }
+
+    #[test]
+    fn standing_layers_touch_the_floor_upright() {
+        let t = truth();
+        let at = [120.0, 300.0, 0.0];
+        let anchor = pos2(50.0, 80.0);
+        let pl = Placement::standing(1, &t, at, anchor);
+        let (m, o) = pl.world_affine();
+        // the anchor is on the floor point, content up is world up
+        let world = |p: Pos2| add(o, mul_mv(&m, [(p.x - anchor.x) as f64, (p.y - anchor.y) as f64, 0.0]));
+        assert!(norm(sub(world(anchor), at)) < 1e-9);
+        let top = world(pos2(50.0, 0.0));
+        assert!(top[2] > 0.0 && (top[0] - at[0]).abs() < 1e-9 && (top[1] - at[1]).abs() < 1e-9);
+        // content right shows to the right
+        let r = world(pos2(90.0, 80.0));
+        assert!(t.project(r).unwrap().x > t.project(at).unwrap().x);
+    }
+
+    #[test]
+    fn walls_stand_on_their_base_line() {
+        let t = truth();
+        // a floor-origin camera: floor at z = 0
+        let (a3, b3) = ([100.0, 400.0, 0.0], [400.0, 380.0, 0.0]);
+        let (a, b) = (t.project(a3).unwrap(), t.project(b3).unwrap());
+        let q = wall_on_base(&t, a, b, 200.0).unwrap();
+        let w = Wall { id: 1, name: "w".into(), corners: q, offset: 0.0, snap_axis: false };
+        let f = wall_frame(&t, &w).unwrap();
+        // vertical, through both base points
+        assert!(f.col(2)[2].abs() < 1e-3, "normal {:?}", f.col(2));
+        for p3 in [a3, b3] {
+            let hit = f.hit(&t, t.project(p3).unwrap()).unwrap();
+            assert!(norm(sub(hit, p3)) < 0.5, "{hit:?} vs {p3:?}");
+        }
     }
 
     #[test]

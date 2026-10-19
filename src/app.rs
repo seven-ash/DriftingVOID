@@ -176,6 +176,8 @@ enum Drag {
     SpaceMask { id: u64, start: Pos2 },
     SpaceRef { id: u64 },
     WallRect { sid: u64, wid: u64, start: Pos2 },
+    /// A wall standing on a base line drawn on the floor.
+    WallBase { sid: u64, wid: u64, start: Pos2 },
     /// Canvas camera rectangle (handles as `rect_handles`, 8 = move).
     Cam { id: u64, handle: u8, start: Pos2, orig: Rect },
     WallCorner { sid: u64, wid: u64, idx: usize },
@@ -847,6 +849,10 @@ pub struct App {
     space_mask_draw: bool,
     /// The next drag in the space tool draws the reference length.
     space_ref_draw: bool,
+    /// The next click on the floor stands this layer there.
+    space_place: Option<LayerId>,
+    /// The next drag on the floor draws a wall's base line.
+    wall_base_new: bool,
     /// Selected wall of the active space, and whether the next drag draws a new one.
     wall_sel: Option<u64>,
     wall_new: bool,
@@ -989,6 +995,8 @@ impl App {
             tab_raw: Vec::new(),
             space_mask_draw: false,
             space_ref_draw: false,
+            space_place: None,
+            wall_base_new: false,
             wall_sel: None,
             wall_new: false,
             grs2d: None,
@@ -1184,6 +1192,36 @@ impl App {
                     let t2 = app.new_text_layer(o + vec2(-140.0, -40.0), t2_text);
                     app.put_in_space(t1, id);
                     app.put_in_space(t2, id);
+                    // DV_WALL_BASE="x1,y1,x2,y2" (photo pixels): a wall on that floor line, the second text on it
+                    if let Ok(v) = std::env::var("DV_WALL_BASE") {
+                        let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        let im = app.doc.layers.iter().find_map(|l| match &l.kind {
+                            LayerKind::Image(im) => Some(im.clone()),
+                            _ => None,
+                        });
+                        if let (4, Some(im)) = (n.len(), im) {
+                            let sp = app.doc.spaces.last().unwrap();
+                            let quad = crate::persp::solve(sp).ok().and_then(|c| crate::persp::wall_on_base(&c, im.src_to_world(pos2(n[0], n[1])), im.src_to_world(pos2(n[2], n[3])), sp.floor * 1.6));
+                            if let Some(q) = quad {
+                                let wid = app.doc.new_id();
+                                app.doc.spaces.last_mut().unwrap().walls.push(crate::persp::Wall { id: wid, name: "벽 1".into(), corners: q, offset: 0.0, snap_axis: false });
+                                app.wall_sel = Some(wid);
+                                app.put_in_wall(t2, id, wid);
+                            }
+                        }
+                    }
+                    // DV_STAND="x,y" (photo pixels): the first text stands on the floor there
+                    if let Ok(v) = std::env::var("DV_STAND") {
+                        let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        if n.len() == 2 {
+                            if let Some(im) = app.doc.layers.iter().find_map(|l| match &l.kind {
+                                LayerKind::Image(im) => Some(im.clone()),
+                                _ => None,
+                            }) {
+                                app.stand_on_floor(t1, id, im.src_to_world(pos2(n[0], n[1])));
+                            }
+                        }
+                    }
                     if let Some(pl) = app.doc.get_mut(t2).and_then(|l| l.place.as_mut()) {
                         pl.align_to_axes();
                         pl.pos = [0.0, 0.0, 0.0];
@@ -3894,6 +3932,34 @@ impl App {
         self.mark();
     }
 
+    /// Stands a layer upright on the floor where canvas point `w` shows, facing the
+    /// camera, its bottom middle on the floor (AR-style placing).
+    fn stand_on_floor(&mut self, id: LayerId, sid: u64, w: Pos2) {
+        let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
+        let Ok(cam) = crate::persp::solve(sp) else {
+            self.status = "공간 카메라 계산 불가".into();
+            return;
+        };
+        let Some(at) = cam.hit_floor(w) else {
+            self.status = "바닥 아님 (지평선 위)".into();
+            return;
+        };
+        let Some(i) = self.doc.index_of(id) else { return };
+        let Some(b) = self.doc.layers[i].bounds() else { return };
+        let mut pl = crate::persp::Placement::standing(sid, &cam, at, b.center_bottom());
+        if let Some(old) = &self.doc.layers[i].place {
+            pl.thick = old.thick;
+        }
+        self.doc.layers[i].place = Some(pl);
+        if let Some(top) = self.doc.layers.iter().rposition(|l| l.id != id && l.place.as_ref().is_some_and(|p| p.space == sid)) {
+            let l = self.doc.layers.remove(i);
+            let to = if top > i { top } else { top + 1 };
+            self.doc.layers.insert(to.min(self.doc.layers.len()), l);
+        }
+        self.status = "바닥에 세움".into();
+        self.mark();
+    }
+
     /// Puts a layer on a wall: its plane lies on the wall where its centre shows, and it
     /// moves along the wall from then on.
     fn put_in_wall(&mut self, id: LayerId, sid: u64, wid: u64) {
@@ -5249,6 +5315,25 @@ impl App {
 
     fn space_down(&mut self, sp: Pos2, w: Pos2) {
         let xf = self.xf();
+        if self.wall_base_new {
+            if let Some(i) = self.space_idx() {
+                let sid = self.doc.spaces[i].id;
+                let wid = self.doc.new_id();
+                let n = self.doc.spaces[i].walls.len() + 1;
+                self.doc.spaces[i].walls.push(crate::persp::Wall { id: wid, name: format!("벽 {n}"), corners: [w; 4], offset: 0.0, snap_axis: false });
+                self.wall_sel = Some(wid);
+                self.wall_base_new = false;
+                self.drag = Some(Drag::WallBase { sid, wid, start: w });
+                self.mark();
+                return;
+            }
+        }
+        if let Some(lid) = self.space_place.take() {
+            if let Some(i) = self.space_idx() {
+                self.stand_on_floor(lid, self.doc.spaces[i].id, w);
+                return;
+            }
+        }
         if self.wall_new {
             if let Some(i) = self.space_idx() {
                 let sid = self.doc.spaces[i].id;
@@ -5620,6 +5705,17 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
+            Drag::WallBase { sid, wid, start } => {
+                let (sid, wid, start) = (*sid, *wid, *start);
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == sid) {
+                    let quad = crate::persp::solve(sp).ok().and_then(|cam| crate::persp::wall_on_base(&cam, start, w, sp.floor * 1.6));
+                    if let (Some(q), Some(wl)) = (quad, sp.walls.iter_mut().find(|x| x.id == wid)) {
+                        wl.corners = q;
+                    }
+                }
+                self.changed = true;
+                self.modified = true;
+            }
             Drag::WallCorner { sid, wid, idx } => {
                 let (sid, wid, idx) = (*sid, *wid, *idx);
                 if let Some(wl) = self.doc.spaces.iter_mut().find(|s| s.id == sid).and_then(|s| s.walls.iter_mut().find(|x| x.id == wid)) {
@@ -5921,6 +6017,17 @@ impl App {
                 }
                 self.changed = true;
                 self.modified = true;
+            }
+            Drag::WallBase { sid, wid, start } => {
+                let zoom = self.zoom;
+                if let Some(sp) = self.doc.spaces.iter_mut().find(|s| s.id == sid) {
+                    // a click or a base off the floor makes no wall
+                    let tiny = sp.walls.iter().find(|x| x.id == wid).is_none_or(|wl| wl.corners[3].distance(wl.corners[2]) * zoom < 8.0 || wl.corners[3].distance(start) > 0.5);
+                    if tiny {
+                        sp.walls.retain(|x| x.id != wid);
+                        self.wall_sel = None;
+                    }
+                }
             }
             Drag::WallRect { sid, wid, .. } => {
                 let zoom = self.zoom;
@@ -8780,6 +8887,7 @@ impl App {
             self.set_space_axis(ax);
         }
         let mut floor_req: Option<f64> = None;
+        let mut place_toggle: Option<LayerId> = None;
         let (mut ref_toggle, mut ref_clear) = (false, false);
         let mut ref_metres: Option<f64> = None;
         let sp = &self.doc.spaces[i];
@@ -8837,6 +8945,14 @@ impl App {
                     }
                     None => {}
                 }
+                // AR-style placing: the selected layer stands where the floor is clicked
+                let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked).map(|l| l.id);
+                if let Some(lid) = placeable {
+                    let armed = self.space_place == Some(lid);
+                    if ui.selectable_label(armed, "바닥에 세우기").on_hover_text("선택한 레이어 · 사진 속 바닥 클릭").clicked() {
+                        place_toggle = Some(lid);
+                    }
+                }
             }
             Err(e) => {
                 ui.small(egui::RichText::new(e).color(INK_2()));
@@ -8891,7 +9007,7 @@ impl App {
             mask_clear = ui.add_enabled(has_mask, egui::Button::new("마스크 해제")).clicked();
         });
         let walls: Vec<(u64, String)> = sp.walls.iter().map(|w| (w.id, w.name.clone())).collect();
-        let (mut wall_pick, mut wall_add) = (None, false);
+        let (mut wall_pick, mut wall_add, mut wall_base) = (None, false, false);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             ui.label("벽");
@@ -8905,6 +9021,7 @@ impl App {
                 .selectable_label(self.wall_new, "+ 벽")
                 .on_hover_text("끌어서 사각형 → 네 모서리를 사진 속 평면에 맞춤 · 넣은 레이어는 벽 좌표로 이동")
                 .clicked();
+            wall_base = ui.selectable_label(self.wall_base_new, "+ 밑선 벽").on_hover_text("바닥 위 벽 밑선을 끌기 → 그 선에 선 수직 벽").clicked();
         });
         let mut wall_edit: Option<(f64, bool, bool)> = None;
         if let Some(w) = self.wall_sel.and_then(|id| sp.walls.iter().find(|w| w.id == id)) {
@@ -8942,6 +9059,14 @@ impl App {
         if let Some(f) = floor_req {
             s.floor = f.max(1.0);
             ch = true;
+        }
+        if let Some(lid) = place_toggle {
+            self.space_place = if self.space_place == Some(lid) { None } else { Some(lid) };
+            if self.space_place.is_some() {
+                self.space_ref_draw = false;
+                self.space_mask_draw = false;
+                self.status = "바닥을 클릭해 세우기".into();
+            }
         }
         if let (Some(m), Some(r)) = (ref_metres, s.ref_line.as_mut()) {
             r.metres = m;
@@ -8993,6 +9118,13 @@ impl App {
         if let Some(id) = wall_pick {
             self.wall_sel = Some(id);
             self.wall_new = false;
+        }
+        if wall_base {
+            self.wall_base_new = !self.wall_base_new;
+            if self.wall_base_new {
+                self.wall_new = false;
+                self.status = "바닥 위 벽 밑선 끌기".into();
+            }
         }
         if wall_add {
             self.wall_new = !self.wall_new;
