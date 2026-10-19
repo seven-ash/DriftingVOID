@@ -482,7 +482,23 @@ pub fn draw_doc(
         if masking {
             painter.add(crate::glass::mask_begin(painter.clip_rect()));
         }
-        draw_one(painter, ctx, doc, layer, xf, cache, skip_text, view_w, ppp, &cams);
+        match group_of(layer).filter(|_| crate::glass::gl_ok()) {
+            Some((mode, op)) => {
+                // drawn opaque twice (over black, over white), then put back once
+                // with its opacity and blend mode
+                let region = painter.clip_rect();
+                let mut solid = layer.clone();
+                solid.opacity = 1.0;
+                painter.add(crate::glass::group_begin(region));
+                draw_one(painter, ctx, doc, &solid, xf, cache, skip_text, view_w, ppp, &cams);
+                painter.add(crate::glass::group_flip(region));
+                draw_one(painter, ctx, doc, &solid, xf, cache, skip_text, view_w, ppp, &cams);
+                for sh in crate::glass::group_end(region, mode.code(), op) {
+                    painter.add(sh);
+                }
+            }
+            None => draw_one(painter, ctx, doc, layer, xf, cache, skip_text, view_w, ppp, &cams),
+        }
         if let (true, Some(m)) = (masking, mask) {
             if let LayerKind::Raster(r) = &m.kind {
                 let mut tiles = Vec::new();
@@ -500,6 +516,24 @@ pub fn draw_doc(
             }
         }
     }
+}
+
+/// A layer that has to be drawn as one group: (blend code, opacity). Thick
+/// layers (overlapping sides and cap must not show through each other), placed
+/// text with a blend mode (the placed path has no blend of its own) and brush
+/// layers with a blend mode.
+pub fn group_of(layer: &Layer) -> Option<(crate::doc::Blend, f32)> {
+    let op = layer.opacity.clamp(0.0, 1.0);
+    let blend = match &layer.kind {
+        LayerKind::Text(t) if layer.place.is_some() => t.blend,
+        LayerKind::Raster(r) if layer.mask_of.is_none() => r.blend,
+        _ => crate::doc::Blend::Normal,
+    };
+    if blend != crate::doc::Blend::Normal {
+        return Some((blend, op));
+    }
+    let thick = layer.place.as_ref().is_some_and(|pl| pl.thick > 0.0);
+    (thick && op < 0.999).then_some((crate::doc::Blend::Normal, op))
 }
 
 /// One layer as it shows on the canvas.

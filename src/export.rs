@@ -91,6 +91,20 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
             out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             continue;
         }
+        if let Some((mode, op)) = crate::canvas::group_of(layer) {
+            // drawn alone at full strength, then put down once (as on the canvas)
+            let mut one = layer.clone();
+            one.opacity = 1.0;
+            match &mut one.kind {
+                LayerKind::Text(t) => t.blend = Blend::Normal,
+                LayerKind::Raster(r) => r.blend = Blend::Normal,
+                _ => {}
+            }
+            let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
+            let tmp = render_band(&mini, full, scale, None, y0, h, flat)?;
+            blend_onto(&mut out, &tmp, mode, op, bg);
+            continue;
+        }
         if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
             // content -> canvas -> output pixels
             let s = scale as f64;
@@ -738,6 +752,21 @@ mod ss_tests {
         // the fill shows in both
         let px = |p: &Pixmap| p.pixel(50, 40).unwrap();
         assert!(px(&three).blue() > 200 && px(&one).blue() > 200);
+    }
+
+    #[test]
+    fn brush_layers_blend() {
+        let mut doc = Document::default();
+        let red = crate::doc::ShapeLayer { kind: crate::doc::ShapeKind::Rect, a: egui::pos2(0.0, 0.0), b: egui::pos2(40.0, 40.0), color: Color32::RED, width: 0.0, fill: Some(Color32::RED), rotation: 0.0 };
+        doc.insert("r".into(), LayerKind::Shape(red), None);
+        let mut r = crate::raster::RasterLayer { blend: Blend::Multiply, ..Default::default() };
+        r.fill_rect(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 40.0)), true);
+        doc.insert("b".into(), LayerKind::Raster(r), None);
+        let region = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 40.0));
+        let pm = render(&doc, region, 1.0, Some(Color32::WHITE)).unwrap();
+        // white multiplied onto red leaves red (a normal brush would paint it white)
+        let p = pm.pixel(20, 20).unwrap();
+        assert!(p.red() > 240 && p.green() < 10, "{p:?}");
     }
 
     #[test]

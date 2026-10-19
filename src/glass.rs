@@ -199,6 +199,12 @@ struct Res {
     comp: glow::Program,
     blend: glow::Program,
     mask: glow::Program,
+    group: glow::Program,
+    /// A layer drawn as a group: the screen before it, and the layer drawn
+    /// over black and over white (colour and coverage from the difference).
+    gb: Option<Tex>,
+    g0: Option<Tex>,
+    g1: Option<Tex>,
     /// What was on screen right before a masked layer.
     mdst: Option<Tex>,
     /// Uploaded text pixmaps for the blend pass, by cache key.
@@ -437,6 +443,145 @@ void main() {
 }
 "#;
 
+const FS_GROUP: &str = r#"
+uniform sampler2D u_b;     // screen before the layer
+uniform sampler2D u_0;     // the layer over black
+uniform sampler2D u_1;     // the layer over white
+uniform int u_mode;
+uniform float u_op;
+uniform vec3 u_void;
+in vec2 v_uv;
+out vec4 o;
+void main() {
+    ivec2 q = ivec2(floor(gl_FragCoord.xy));
+    vec3 cd = texelFetch(u_b, q, 0).rgb;
+    vec3 f0 = texelFetch(u_0, q, 0).rgb;
+    vec3 f1 = texelFetch(u_1, q, 0).rgb;
+    // over black: premultiplied colour; over white: that plus (1 - a)
+    vec3 d = f1 - f0;
+    float a = clamp(1.0 - (d.r + d.g + d.b) / 3.0, 0.0, 1.0);
+    if (a <= 0.0) { o = vec4(cd, 1.0); return; }
+    vec3 cs = clamp(f0 / a, 0.0, 1.0);
+    vec3 b = cs;
+    if (u_mode == 1) b = min(cd + cs, 1.0);
+    else if (u_mode == 2) b = max(cd - cs, 0.0);
+    else if (u_mode == 3) b = cd * cs;
+    else if (u_mode == 4) b = min(cd / max(cs, vec3(1.0 / 255.0)), 1.0);
+    else if (u_mode == 5) b = abs(cd - cs);
+    else if (u_mode == 6) b = u_void;
+    o = vec4(mix(cd, b, a * u_op), 1.0);
+}
+"#;
+
+/// GL pixel box of a screen rect (points), clamped to the screen.
+fn gl_box(r: Rect, ppp: f32, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
+    let x0 = ((r.min.x * ppp).floor() as i32).clamp(0, sw);
+    let x1 = ((r.max.x * ppp).ceil() as i32).clamp(0, sw);
+    let y0 = (sh - (r.max.y * ppp).ceil() as i32).clamp(0, sh);
+    let y1 = (sh - (r.min.y * ppp).floor() as i32).clamp(0, sh);
+    (x0, y0, x1, y1)
+}
+
+/// One step of a group: copies the screen in `region` into slot `which`
+/// (0: before, 1: over black, 2: over white), then clears the region to
+/// `clear` (black or white) for the next drawing of the layer.
+fn group_step(region: Rect, which: u8, clear: Option<f32>) -> Shape {
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe {
+            let gl = painter.gl();
+            if !ready(gl) {
+                return;
+            }
+            let mut guard = RES.lock().unwrap();
+            let Some(res) = guard.as_mut() else { return };
+            let [sw, sh] = info.screen_size_px;
+            let (sw, sh) = (sw as i32, sh as i32);
+            let (x0, y0, x1, y1) = gl_box(region, info.pixels_per_point, sw, sh);
+            if x1 <= x0 || y1 <= y0 {
+                return;
+            }
+            let slot = match which {
+                0 => &mut res.gb,
+                1 => &mut res.g0,
+                _ => &mut res.g1,
+            };
+            if ensure(gl, slot, sw, sh).is_none() {
+                return;
+            }
+            let t = slot.as_ref().unwrap();
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(t.fbo));
+            gl.blit_framebuffer(x0, y0, x1, y1, x0, y0, x1, y1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if let Some(v) = clear {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(x0, y0, x1 - x0, y1 - y0);
+                gl.clear_color(v, v, v, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+        }
+    });
+    Shape::Callback(egui::PaintCallback { rect: region, callback: std::sync::Arc::new(cb) })
+}
+
+/// Starts a layer drawn as one group (opacity applied once, blend modes):
+/// draw the layer, call `group_flip`, draw it again, then `group_end`.
+pub fn group_begin(region: Rect) -> Shape {
+    group_step(region, 0, Some(0.0))
+}
+
+pub fn group_flip(region: Rect) -> Shape {
+    group_step(region, 1, Some(1.0))
+}
+
+/// Puts the group back over what was under it with `mode` and `opacity`.
+pub fn group_end(region: Rect, mode: i32, opacity: f32) -> [Shape; 2] {
+    let cb = egui_glow::CallbackFn::new(move |info, painter| {
+        // SAFETY: called by egui_glow on the GL thread with its context current.
+        unsafe {
+            let gl = painter.gl();
+            let guard = RES.lock().unwrap();
+            let Some(res) = guard.as_ref() else { return };
+            let (Some(b), Some(t0), Some(t1)) = (res.gb.as_ref(), res.g0.as_ref(), res.g1.as_ref()) else { return };
+            let ppp = info.pixels_per_point;
+            let [sw, sh] = info.screen_size_px;
+            let (sw, sh) = (sw as i32, sh as i32);
+            let (x0, y0, x1, y1) = gl_box(region, ppp, sw, sh);
+            if x1 <= x0 || y1 <= y0 {
+                return;
+            }
+            gl.viewport(0, 0, sw, sh);
+            gl.disable(glow::BLEND);
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(x0, y0, x1 - x0, y1 - y0);
+            gl.use_program(Some(res.group));
+            gl.bind_vertex_array(Some(res.vao));
+            let u = |n: &str| gl.get_uniform_location(res.group, n);
+            let (fx0, fy0, fx1, fy1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+            // corners TL TR BR BL in GL pixels
+            gl.uniform_2_f32_slice(u("u_p").as_ref(), &[fx0, fy1, fx1, fy1, fx1, fy0, fx0, fy0]);
+            gl.uniform_2_f32(u("u_screen").as_ref(), sw as f32, sh as f32);
+            gl.uniform_1_i32(u("u_mode").as_ref(), mode);
+            gl.uniform_1_f32(u("u_op").as_ref(), opacity);
+            let v = crate::theme::VOID();
+            gl.uniform_3_f32(u("u_void").as_ref(), v.r() as f32 / 255.0, v.g() as f32 / 255.0, v.b() as f32 / 255.0);
+            for (i, (t, name)) in [(b, "u_b"), (t0, "u_0"), (t1, "u_1")].into_iter().enumerate() {
+                gl.active_texture(glow::TEXTURE0 + i as u32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(t.tex));
+                gl.uniform_1_i32(u(name).as_ref(), i as i32);
+            }
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_vertex_array(None);
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_ALPHA, glow::ONE_MINUS_DST_ALPHA, glow::ONE);
+        }
+    });
+    [group_step(region, 2, None), Shape::Callback(egui::PaintCallback { rect: region, callback: std::sync::Arc::new(cb) })]
+}
+
 unsafe fn ready(gl: &glow::Context) -> bool {
     unsafe {
         if FAILED.load(Ordering::Relaxed) {
@@ -670,8 +815,9 @@ unsafe fn init(gl: &glow::Context) -> Option<Res> {
         let comp = compile(gl, &header, VS_QUAD, FS_COMP).map_err(|e| eprintln!("glass comp: {e}")).ok()?;
         let blend = compile(gl, &header, VS_BLEND, FS_BLEND).map_err(|e| eprintln!("glass blend: {e}")).ok()?;
         let mask = compile(gl, &header, VS_BLEND, FS_MASK).map_err(|e| eprintln!("glass mask: {e}")).ok()?;
+        let group = compile(gl, &header, VS_BLEND, FS_GROUP).map_err(|e| eprintln!("glass group: {e}")).ok()?;
         let vao = gl.create_vertex_array().ok()?;
-        Some(Res { blur, comp, blend, mask, mdst: None, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
+        Some(Res { blur, comp, blend, mask, group, gb: None, g0: None, g1: None, mdst: None, texts: Default::default(), bdst: None, vao, cur: None, small: None, small1: None, half: None, tmp: None, scene: None, scene_frame: u64::MAX, ov: None, ov_frame: u64::MAX })
     }
 }
 

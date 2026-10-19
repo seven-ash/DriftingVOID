@@ -36,6 +36,8 @@ pub struct RasterLayer {
     /// before the first of them; `tiles` stays the final picture.
     pub recs: Vec<Arc<BrushRec>>,
     pub rec_base: Option<TileMap>,
+    /// How the layer mixes with what is under it.
+    pub blend: crate::doc::Blend,
 }
 
 /// One recorded brush (or eraser) stroke: input points (local x, y, pressure) with
@@ -78,7 +80,7 @@ impl RasterLayer {
                 return Some(l.clone());
             }
         }
-        let mut l = RasterLayer { offset: self.offset, tiles: base.clone(), ..Default::default() };
+        let mut l = RasterLayer { offset: self.offset, tiles: base.clone(), blend: self.blend, ..Default::default() };
         for r in &self.recs {
             let local = (t - r.start) as f32;
             if local < 0.0 {
@@ -340,7 +342,7 @@ pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<Raster
         .post_translate(c.x - nx0, c.y - ny0);
     let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
     out.draw_pixmap(0, 0, pm.as_ref(), &paint, ts, None);
-    let mut n = RasterLayer { offset: Vec2::new(nx0, ny0), ..Default::default() };
+    let mut n = RasterLayer { offset: Vec2::new(nx0, ny0), blend: src.blend, ..Default::default() };
     let data = out.data();
     for y in 0..nh as i32 {
         for x in 0..nw as i32 {

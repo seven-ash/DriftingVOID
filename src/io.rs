@@ -124,6 +124,8 @@ enum FileKind {
     Raster {
         offset: [f32; 2],
         tiles: Vec<[i32; 2]>,
+        #[serde(default)]
+        blend: Blend,
         /// Recorded brush strokes and the pixels from before them (`tiles_base/`).
         #[serde(default)]
         recs: Vec<crate::raster::BrushRec>,
@@ -245,7 +247,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                         }
                         None => None,
                     };
-                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
+                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, blend: r.blend, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
                 }
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose });
@@ -312,8 +314,8 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 offset: vec2(offset[0], offset[1]),
                 strokes: strokes.into_iter().map(|s| Arc::new(VStroke::new(s.pts, a2c(s.color)).with_rec(s.rec))).collect(),
             }),
-            FileKind::Raster { offset, tiles, recs, base_tiles } => {
-                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), recs: recs.into_iter().map(Arc::new).collect(), ..Default::default() };
+            FileKind::Raster { offset, tiles, blend, recs, base_tiles } => {
+                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), recs: recs.into_iter().map(Arc::new).collect(), blend, ..Default::default() };
                 if let Some(bk) = base_tiles {
                     let mut base = crate::doc::TileMap::default();
                     for [x, y] in bk {

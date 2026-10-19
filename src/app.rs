@@ -1145,6 +1145,17 @@ impl App {
                             app.put_in_wall(t2, id, wid);
                         }
                     }
+                    // DV_OPACITY / DV_BLEND (Blend::ALL index) on both texts
+                    for t in [t1, t2] {
+                        if let Some(l) = app.doc.get_mut(t) {
+                            if let Some(op) = std::env::var("DV_OPACITY").ok().and_then(|v| v.parse::<f32>().ok()) {
+                                l.opacity = op;
+                            }
+                            if let (Some(b), LayerKind::Text(tx)) = (std::env::var("DV_BLEND").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| Blend::ALL.get(i).copied()), &mut l.kind) {
+                                tx.blend = b;
+                            }
+                        }
+                    }
                     if let Some(th) = std::env::var("DV_THICK").ok().and_then(|v| v.parse::<f64>().ok()) {
                         for t in [t1, t2] {
                             if let Some(pl) = app.doc.get_mut(t).and_then(|l| l.place.as_mut()) {
@@ -6910,6 +6921,7 @@ impl App {
                     changed = true;
                 }
             }
+            let is_mask = l.mask_of.is_some();
             match &mut l.kind {
                 LayerKind::Image(im) => {
                     if let Some(v) = &mut im.video {
@@ -7102,6 +7114,25 @@ impl App {
                     if ui.button("모두 지우기").clicked() {
                         r.tiles.clear();
                         changed = true;
+                    }
+                    if !is_mask {
+                        ui.horizontal(|ui| {
+                            ui.label("혼합");
+                            egui::ComboBox::from_id_salt("raster_blend").truncate()
+                                .selected_text(r.blend.label())
+                                .width(110.0)
+                                .popup_style(theme::glass_popup_style(false))
+                                .show_ui(ui, |ui| {
+                                    theme::glass_popup(ui, |ui| {
+                                        for b in Blend::ALL {
+                                            if ui.selectable_label(r.blend == b, b.label()).clicked() {
+                                                r.blend = b;
+                                                changed = true;
+                                            }
+                                        }
+                                    })
+                                });
+                        });
                     }
                 }
             }
