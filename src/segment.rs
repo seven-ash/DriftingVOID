@@ -402,6 +402,24 @@ pub fn grabcut(img: &[[f64; 3]], w: usize, h: usize, labels: &mut [u8], iters: u
 mod tests {
     use super::*;
 
+    /// DV_SPLIT_IMG=path: the box picture as GrabCut sees it (scaled to ~90k
+    /// cells); prints what `split_box` does and writes the hidden part beside it.
+    #[test]
+    #[ignore]
+    fn split_on_a_picture() {
+        let Some(path) = std::env::var_os("DV_SPLIT_IMG") else { return };
+        let im = image::open(&path).unwrap().to_rgb8();
+        let step = (((im.width() * im.height()) as f64 / 90_000.0).sqrt().ceil() as u32).max(1);
+        let (w, h) = ((im.width() / step) as usize, (im.height() / step) as usize);
+        let img: Vec<[f64; 3]> = (0..w * h).map(|i| im.get_pixel((i % w) as u32 * step, (i / w) as u32 * step).0.map(|v| v as f64)).collect();
+        let r = split_box(&img, w, h, &vec![false; w * h]);
+        eprintln!("{w}x{h}: {:?}", r.as_ref().map(|m| m.iter().filter(|&&x| x).count()));
+        if let Some(m) = r {
+            let out = image::GrayImage::from_fn(w as u32, h as u32, |x, y| image::Luma([if m[y as usize * w + x as usize] { 255 } else { 0 }]));
+            out.save(std::path::Path::new(&path).with_extension("split.png")).unwrap();
+        }
+    }
+
     #[test]
     fn box_across_an_edge_takes_the_larger_side() {
         // a box over a diagonal edge: the dark side holds two thirds of it
