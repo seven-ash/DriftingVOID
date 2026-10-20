@@ -970,6 +970,29 @@ pub struct App {
     show_log: bool,
 }
 
+/// Darkens `area` outside the convex quad `q` (screen corners in order).
+fn canvas_dim_outside(painter: &egui::Painter, area: Rect, q: [Pos2; 4], col: Color32) {
+    // a ring between a rect around both and the quad, clipped to the area
+    let outer = Rect::from_points(&q).union(area).expand(8.0);
+    let o = [outer.left_top(), outer.right_top(), outer.right_bottom(), outer.left_bottom()];
+    // the quad's corners in the same turning order as the outer rect's
+    let area2 = |p: &[Pos2; 4]| (0..4).map(|i| p[i].x * p[(i + 1) % 4].y - p[(i + 1) % 4].x * p[i].y).sum::<f32>();
+    let q = if area2(&q) * area2(&o) < 0.0 { [q[0], q[3], q[2], q[1]] } else { q };
+    // pair each outer corner with the nearest quad corner
+    let start = (0..4).min_by(|a, b| q[*a].distance_sq(o[0]).total_cmp(&q[*b].distance_sq(o[0]))).unwrap();
+    let q = [q[start], q[(start + 1) % 4], q[(start + 2) % 4], q[(start + 3) % 4]];
+    let mut mesh = egui::Mesh::default();
+    for p in o.iter().chain(q.iter()) {
+        mesh.colored_vertex(*p, col);
+    }
+    for k in 0..4u32 {
+        let n = (k + 1) % 4;
+        mesh.add_triangle(k, n, 4 + n);
+        mesh.add_triangle(k, 4 + n, 4 + k);
+    }
+    painter.with_clip_rect(area).add(Shape::mesh(mesh));
+}
+
 fn is_paint_layer(k: &LayerKind) -> bool {
     matches!(k, LayerKind::Raster(_) | LayerKind::Vector(_))
 }
@@ -1568,6 +1591,30 @@ impl App {
 
     fn xf(&self) -> Xf {
         Xf { min: self.canvas_rect.min, pan: self.pan, zoom: self.zoom }
+    }
+
+    /// What the playback cache films: the region last picked for a video
+    /// export, else the selected camera, the first camera, the export frame;
+    /// the view when there is none (Ash, 10-21).
+    fn cache_target(&self, view: crate::playcache::View) -> crate::playcache::Target {
+        use crate::playcache::Target;
+        let cam_ok = |id: u64| self.doc.cameras.iter().any(|c| c.id == id);
+        let picked = self.vexport.as_ref().or(self.vexport_last.as_ref()).map(|d| d.region);
+        match picked {
+            Some(ExportRegion::Camera(id)) if cam_ok(id) => return Target::Camera(id),
+            Some(ExportRegion::Frame) if self.doc.export_frame.is_some() => return Target::Frame(self.doc.export_frame.unwrap()),
+            _ => {}
+        }
+        if let Some(id) = self.cam_sel.filter(|id| cam_ok(*id)) {
+            return Target::Camera(id);
+        }
+        if let Some(c) = self.doc.cameras.first() {
+            return Target::Camera(c.id);
+        }
+        if let Some(r) = self.doc.export_frame {
+            return Target::Frame(r);
+        }
+        Target::View(view)
     }
 
     fn mark(&mut self) {
@@ -9138,9 +9185,10 @@ impl App {
         // playback cache: the canvas as framed now, rendered ahead
         let ppp = ctx.pixels_per_point();
         let view = crate::playcache::View { center: xf.s2w(rect.center()), size: rect.size() / self.zoom, scale: self.zoom * ppp };
+        let target = self.cache_target(view);
         let editing = self.changed || self.drag.is_some();
         if self.doc.timeline.on && !editing {
-            self.pcache.sync(self.doc_rev, &self.doc, view);
+            self.pcache.sync(self.doc_rev, &self.doc, target);
         }
         let playing = self.tl_play.is_some() && self.tl_arm.is_none();
         let idle = !playing && !editing && self.doc.timeline.on && self.now - self.last_input > 1.5;
@@ -9149,11 +9197,28 @@ impl App {
         }
         let t_draw = std::time::Instant::now();
         let cached = (playing && !editing).then(|| self.pcache.texture(&ctx, self.doc.timeline.time)).flatten();
-        match cached {
-            Some(tex) => {
-                painter.image(tex, rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+        // a region (camera or export frame) while playing: where its frame sits now
+        let region_quad = match target {
+            crate::playcache::Target::View(_) => None,
+            _ if !playing => None,
+            t => crate::playcache::placement(&self.doc, t, self.pcache.size()).map(|(c, s, rot)| {
+                let r = Rect::from_center_size(c, s);
+                [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].map(|p| xf.w2s(crate::doc::rot_about(p, c, rot)))
+            }),
+        };
+        let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+        match (cached, region_quad) {
+            (Some(tex), Some(q)) => {
+                painter.add(Shape::mesh(canvas::image_mesh(tex, q, uv, Color32::WHITE)));
             }
-            None => canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None),
+            (Some(tex), None) => {
+                painter.image(tex, rect, uv, Color32::WHITE);
+            }
+            _ => canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None),
+        }
+        if let Some(q) = region_quad {
+            // a preview monitor: what lies outside the region is dimmed while playing
+            canvas_dim_outside(&painter, rect, q, Color32::from_black_alpha(190));
         }
         if playing && std::env::var_os("DV_TIMING").is_some() {
             let ms = t_draw.elapsed().as_secs_f64() * 1e3;

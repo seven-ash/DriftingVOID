@@ -1,12 +1,14 @@
 //! Playback cache (render overhaul phase 4, docs/updates/wgpu-renderer.md).
 //!
-//! Frames of the canvas as it is framed now (screen pixels), keyed by frame
-//! number, rendered ahead by a worker thread on the GPU export renderer from the
-//! last committed document. While the timeline plays, a cached frame is shown
-//! in place of drawing the document live; frames that aren't cached yet are
-//! drawn live as before. Filled ahead of the playhead while playing, and around
-//! it after a short idle. RAM: as much as needed, up to 75 % of physical memory,
-//! given back when less than 1 GB is free (Ash, 10-20).
+//! Frames of the export region (a camera or the export frame, at its own pixels,
+//! the long side at most 3840), or of the canvas view when there is no region,
+//! keyed by frame number, rendered ahead by a worker thread on the GPU export
+//! renderer from the last committed document. A region's frames survive
+//! panning and zooming. While the timeline plays, a cached frame is shown in
+//! place of drawing the document live; frames that aren't cached yet are drawn
+//! live as before. Filled ahead of the playhead while playing, and around it
+//! after a short idle. RAM: as much as needed, up to 75 % of physical memory,
+//! given back when less than 1 GB is free (Ash, 10-20 and 10-21).
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -26,10 +28,25 @@ pub struct View {
     pub scale: f32,
 }
 
+/// What the cache films.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Target {
+    /// The canvas view (no region): lost on every pan or zoom.
+    View(View),
+    /// A canvas camera, wherever its keys take it.
+    Camera(u64),
+    /// The export frame.
+    Frame(egui::Rect),
+}
+
+/// The long side of a region's frames.
+const MAX_SIDE: f32 = 3840.0;
+
 struct Job {
     epoch: u64,
     doc: Arc<Document>,
-    view: View,
+    target: Target,
+    size: (u32, u32),
     fps: f64,
     frames: Vec<u64>,
 }
@@ -52,7 +69,9 @@ pub struct PlayCache {
     bytes: usize,
     /// Bumped whenever cached frames stop being valid as a whole (view, fps).
     epoch: u64,
-    view: Option<View>,
+    target: Option<Target>,
+    /// Frame size in pixels.
+    size: (u32, u32),
     fps: f64,
     duration: f64,
     /// Per layer: (fingerprint, the time span it shows in).
@@ -78,7 +97,8 @@ impl PlayCache {
             frames: BTreeMap::new(),
             bytes: 0,
             epoch: 0,
-            view: None,
+            target: None,
+            size: (0, 0),
             fps: 0.0,
             duration: 0.0,
             revs: HashMap::new(),
@@ -103,17 +123,19 @@ impl PlayCache {
     }
 
     /// Follows the committed document (`rev` changes on every commit, undo and
-    /// load) and the view: changed layers drop the frames of their time span; a
-    /// new view, fps or space drops everything.
-    pub fn sync(&mut self, rev: u64, committed: &Document, view: View) {
+    /// load) and what is filmed: changed layers drop the frames of their time
+    /// span; a new target or size, fps, space or camera drops everything.
+    pub fn sync(&mut self, rev: u64, committed: &Document, target: Target) {
         if self.off {
             return;
         }
         let tl = &committed.timeline;
-        if self.view != Some(view) || self.fps != tl.fps {
-            self.view = Some(view);
+        if self.target != Some(target) || self.fps != tl.fps {
+            self.target = Some(target);
             self.fps = tl.fps;
             self.clear();
+            // the size comes with the document pass below
+            self.doc_rev = None;
         }
         self.duration = tl.duration;
         if self.doc_rev == Some(rev) {
@@ -121,6 +143,11 @@ impl PlayCache {
         }
         self.doc_rev = Some(rev);
         self.doc = Some(Arc::new(committed.clone()));
+        let size = frame_size(committed, target);
+        if size != self.size {
+            self.size = size;
+            self.clear();
+        }
         let (revs, global) = fingerprints(committed);
         if global != self.global {
             self.global = global;
@@ -176,7 +203,7 @@ impl PlayCache {
     /// Takes finished frames and keeps the worker busy: ahead of the playhead
     /// while `playing`, around it when `idle`, else resting.
     pub fn pump(&mut self, ctx: &egui::Context, playing: bool, idle: bool, playhead: f64) {
-        if self.off || self.view.is_none() || self.doc.is_none() {
+        if self.off || self.target.is_none() || self.doc.is_none() || self.size.0 < 2 || self.size.1 < 2 {
             return;
         }
         if self.tx.is_none() {
@@ -256,8 +283,8 @@ impl PlayCache {
                 }
             }
         }
-        let (Some(tx), Some(doc), Some(view)) = (&self.tx, &self.doc, self.view) else { return };
-        let _ = tx.send(Job { epoch: self.epoch, doc: doc.clone(), view, fps, frames: list.clone() });
+        let (Some(tx), Some(doc), Some(target)) = (&self.tx, &self.doc, self.target) else { return };
+        let _ = tx.send(Job { epoch: self.epoch, doc: doc.clone(), target, size: self.size, fps, frames: list.clone() });
         self.out = if list.is_empty() { None } else { Some((self.epoch, mode, head)) };
     }
 
@@ -295,9 +322,47 @@ impl PlayCache {
         self.fps
     }
 
+    /// Frame size in pixels (a region's aspect).
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
     pub fn bytes(&self) -> usize {
         self.bytes
     }
+}
+
+/// Frame size for a target: the view's pixels, or the region's own pixels
+/// (at time 0 for a camera) with the long side at most `MAX_SIDE`.
+fn frame_size(doc: &Document, target: Target) -> (u32, u32) {
+    let region = match target {
+        Target::View(v) => return ((v.size.x * v.scale).round().max(1.0) as u32, (v.size.y * v.scale).round().max(1.0) as u32),
+        Target::Frame(r) => r.size(),
+        Target::Camera(id) => {
+            let mut d = doc.clone();
+            d.timeline.on = true;
+            d.timeline.time = 0.0;
+            crate::anim::evaluate(&mut d);
+            match d.cameras.iter().find(|c| c.id == id) {
+                Some(c) => c.rect.size(),
+                None => return (0, 0),
+            }
+        }
+    };
+    let k = (MAX_SIDE / region.x.max(region.y).max(1.0)).min(1.0);
+    ((region.x * k).round().max(2.0) as u32, (region.y * k).round().max(2.0) as u32)
+}
+
+/// Where a region's frame sits on the canvas at the posed document's time:
+/// centre, size (canvas units), turn.
+pub fn placement(doc: &Document, target: Target, size: (u32, u32)) -> Option<(Pos2, Vec2, f32)> {
+    let (rect, rot) = match target {
+        Target::View(v) => return Some((v.center, v.size, 0.0)),
+        Target::Frame(r) => (r, 0.0),
+        Target::Camera(id) => doc.cameras.iter().find(|c| c.id == id).map(|c| (c.rect, c.rot))?,
+    };
+    let r = crate::vexport::fit_aspect(rect, size.0 as f32 / size.1.max(1) as f32);
+    Some((r.center(), r.size(), rot))
 }
 
 fn frame_bytes(f: &ColorImage) -> usize {
@@ -358,6 +423,8 @@ fn fingerprints(doc: &Document) -> (HashMap<LayerId, (u64, Option<[f64; 2]>)>, u
     }
     let mut g = std::collections::hash_map::DefaultHasher::new();
     json(&doc.spaces).hash(&mut g);
+    json(&doc.cameras).hash(&mut g);
+    json(&doc.export_frame).hash(&mut g);
     (out, g.finish())
 }
 
@@ -393,8 +460,13 @@ fn worker(rx: mpsc::Receiver<Job>, tx: mpsc::Sender<Msg>, ctx: egui::Context) {
         let idx = j.frames.remove(0);
         let t = idx as f64 / j.fps;
         let d = crate::vexport::pose_at(&j.doc, t, &mut feeds);
-        let v = j.view;
-        let r = crate::gpu::with_gpu(|g| g.render_ss(&d, v.center, v.size, 0.0, v.scale, None, 1));
+        let Some((center, size, rot)) = placement(&d, j.target, j.size) else {
+            let _ = tx.send(Msg::Done { epoch: j.epoch, ok: true });
+            job = None;
+            continue;
+        };
+        let scale = j.size.0 as f32 / size.x.max(1e-3);
+        let r = crate::gpu::with_gpu(|g| g.render_ss(&d, center, size, rot, scale, None, 1));
         match r {
             Some(Ok(pm)) => {
                 let img = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
@@ -444,26 +516,37 @@ mod tests {
         let view = View { center: pos2(0.0, 0.0), size: vec2(100.0, 100.0), scale: 1.0 };
         let mut c = PlayCache::new();
         c.off = false;
-        c.sync(1, &doc, view);
+        c.sync(1, &doc, Target::View(view));
         filled(&mut c, 100);
         // the playhead moving (keys evaluated at another time) is not an edit
         doc.timeline.time = 5.0;
-        c.sync(2, &doc, view);
+        c.sync(2, &doc, Target::View(view));
         assert_eq!(c.frames.len(), 100);
         // a change to the first shape drops 2–4 s (with a frame either side)
         if let Some(LayerKind::Shape(s)) = doc.get_mut(a).map(|l| &mut l.kind) {
             s.fill = Some(Color32::BLUE);
         }
-        c.sync(3, &doc, view);
+        c.sync(3, &doc, Target::View(view));
         assert!(!c.frames.contains_key(&30) && !c.frames.contains_key(&19) && !c.frames.contains_key(&41));
         assert!(c.frames.contains_key(&10) && c.frames.contains_key(&50) && c.frames.contains_key(&70));
         // a new layer with no span reaches everywhere
         shape(&mut doc, 90.0, None);
-        c.sync(4, &doc, view);
+        c.sync(4, &doc, Target::View(view));
         assert!(c.frames.is_empty());
         // another view starts over
         filled(&mut c, 5);
-        c.sync(4, &doc, View { scale: 2.0, ..view });
+        c.sync(4, &doc, Target::View(View { scale: 2.0, ..view }));
         assert!(c.frames.is_empty());
+        // an export frame doesn't care about the view; its frames are its own
+        // pixels, the long side at most 3840
+        let fr = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(1080.0, 1920.0));
+        c.sync(5, &doc, Target::Frame(fr));
+        assert_eq!(c.size(), (1080, 1920));
+        filled(&mut c, 5);
+        c.sync(5, &doc, Target::Frame(fr));
+        assert_eq!(c.frames.len(), 5);
+        let big = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(7680.0, 4320.0));
+        c.sync(6, &doc, Target::Frame(big));
+        assert_eq!(c.size(), (3840, 2160));
     }
 }
