@@ -26,6 +26,8 @@ const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 enum Node {
     /// A picture at `off` (target pixels) put over the target.
     Over { img: Img, off: [i32; 2], opacity: f32 },
+    /// A photo or video frame through `inv` (target pixel -> source pixel).
+    Image { img: Img, inv: [[f32; 3]; 2], rect: [i32; 4], opacity: f32, nearest: bool, px_per_src: f32 },
     /// A flattened layer through `hi` (inverse homography, target -> canvas).
     Warp { img: Img, hi: [[f32; 3]; 3], src: [f32; 3], rect: [i32; 4], opacity: f32, shade: f32 },
     /// Text with a blend mode.
@@ -65,6 +67,7 @@ pub struct Gpu {
     mask: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
     tri: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
     pub max_side: u32,
     pub adapter: String,
@@ -218,6 +221,7 @@ impl Gpu {
         let blend = pipe("fs_blend", None);
         let mask = pipe("fs_mask", Some(over_blend));
         let down = pipe("fs_down", None);
+        let image = pipe("fs_image", Some(over_blend));
         let tri = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sides"),
             layout: Some(&pl),
@@ -263,6 +267,7 @@ impl Gpu {
             mask,
             down,
             tri,
+            image,
             dummy,
             max_side: limits.max_texture_dimension_2d,
             adapter: info.name,
@@ -475,6 +480,7 @@ impl Gpu {
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
     fn prepare(&mut self, d: Draw, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         match d {
+            Draw::Flat(layer) if matches!(layer.kind, crate::doc::LayerKind::Image(_)) => self.image(layer, v, jobs, out),
             Draw::Flat(layer) => {
                 let opacity = layer.opacity;
                 if let Some((img, off)) = self.raster(layer, bounds, v, jobs) {
@@ -528,6 +534,107 @@ impl Gpu {
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
+    }
+
+    /// A photo or video frame: its pixels (cropped, adjusted, premultiplied, as
+    /// `export::image_pixmap`) uploaded once and sampled on the GPU.
+    fn image(&mut self, layer: Layer, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
+        let crate::doc::LayerKind::Image(im) = &layer.kind else { return };
+        let target = im.scale * v.s;
+        // source pixels -> canvas: as export::draw_image (logical size k, and a
+        // smaller copy when shown under half size)
+        let (iw, ih) = (im.src.rgba.width() as f32, im.src.rgba.height() as f32);
+        let k = iw / im.src.size().x.max(1.0);
+        let ts = target / k;
+        let crop_px = [
+            ((im.crop.min.x * k).round()).clamp(0.0, iw - 1.0),
+            ((im.crop.min.y * k).round()).clamp(0.0, ih - 1.0),
+        ];
+        let cw0 = ((im.crop.max.x * k).round()).clamp(crop_px[0] + 1.0, iw) - crop_px[0];
+        let ch0 = ((im.crop.max.y * k).round()).clamp(crop_px[1] + 1.0, ih) - crop_px[1];
+        let (sw, sh, factor) = if ts < 0.5 {
+            let nw = ((cw0 * ts * 1.5).round()).max(1.0);
+            let nh = ((ch0 * ts * 1.5).round()).max(1.0);
+            (nw, nh, (1.0 / k) * (cw0 / nw))
+        } else {
+            (cw0, ch0, 1.0 / k)
+        };
+        // source pixel -> target pixel
+        let (sn, cs) = im.rotation.sin_cos();
+        let (cw, ch) = (sw * factor, sh * factor);
+        let place = Transform::from_row(cs * im.scale, sn * im.scale, -sn * im.scale, cs * im.scale, im.center.x, im.center.y).pre_translate(-cw / 2.0, -ch / 2.0).pre_scale(factor, factor);
+        let base = Transform::from_translate(-v.full.min.x, -v.full.min.y).post_scale(v.s, v.s);
+        let m = place.post_concat(base);
+        let Some(inv) = m.invert() else { return };
+        let corners = [(0.0, 0.0), (sw, 0.0), (sw, sh), (0.0, sh)].map(|(x, y)| {
+            let mut p = [tiny_skia::Point::from_xy(x, y)];
+            m.map_points(&mut p);
+            Pos2::new(p[0].x, p[0].y)
+        });
+        let bb = Rect::from_points(&corners);
+        let rect = [
+            (bb.min.x.floor() as i32 - 1).max(0),
+            (bb.min.y.floor() as i32 - 1).max(0),
+            (bb.max.x.ceil() as i32 + 1).min(v.tw as i32),
+            (bb.max.y.ceil() as i32 + 1).min(v.th as i32),
+        ];
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            return;
+        }
+        let nearest = (im.scale * v.s / v.k - 1.0).abs() < 1e-4 && im.rotation == 0.0;
+        let px_per_src = (m.sx * m.sy - m.kx * m.ky).abs().sqrt();
+        let content = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (im.src.id, im.adjust.key(), sw as u32, sh as u32).hash(&mut h);
+            for x in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y] {
+                x.to_bits().hash(&mut h);
+            }
+            h.finish()
+        };
+        let key = Key { id: layer.id, content, rect: [0; 4], view: [0; 4] };
+        let img = match self.rasters.get_mut(&key) {
+            Some(e) => {
+                e.1 = self.frame;
+                Img::Ready(e.0.clone())
+            }
+            None => {
+                let mut one = im.clone();
+                one.center = Pos2::ZERO;
+                let whole = crop_px == [0.0, 0.0] && cw0 == iw && ch0 == ih && ts >= 0.5 && im.adjust.is_identity();
+                let job: Raster = Box::new(move || {
+                    if whole {
+                        // the usual video frame: no crop, no adjustment, no smaller
+                        // copy; premultiplied in parallel strips (opaque pixels as is)
+                        let (w, h) = one.src.rgba.dimensions();
+                        let mut data = one.src.rgba.as_raw().clone();
+                        let strip = (data.len() / 4 / 8).max(1) * 4;
+                        std::thread::scope(|sc| {
+                            for part in data.chunks_mut(strip) {
+                                sc.spawn(move || {
+                                    for px in part.chunks_exact_mut(4) {
+                                        let a = px[3] as u32;
+                                        if a < 255 {
+                                            for c in &mut px[..3] {
+                                                *c = ((*c as u32 * a + 127) / 255) as u8;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        return Some((data, w, h));
+                    }
+                    let (pm, _) = crate::export::image_pixmap(&one, ts * k)?;
+                    let (w, h) = (pm.width(), pm.height());
+                    Some((pm.take(), w, h))
+                });
+                jobs.push((job, Some(key)));
+                Img::Job(jobs.len() - 1)
+            }
+        };
+        let inv = [[inv.sx, inv.kx, inv.tx], [inv.ky, inv.sy, inv.ty]];
+        out.push(Node::Image { img, inv, rect, opacity: layer.opacity, nearest, px_per_src });
     }
 
     /// A mask's keep values (1 − hidden) over `rect`.
@@ -711,6 +818,15 @@ impl Gpu {
                 u.tsize[2] = *opacity;
                 u.p0 = [off[0] as f32, off[1] as f32, 0.0, 0.0];
                 self.pass(enc, &self.over, target, &u, &t, &self.dummy);
+            }
+            Node::Image { img, inv, rect, opacity, nearest, px_per_src } => {
+                let t = Self::img(img, ready);
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.tsize[2] = *opacity;
+                u.h0 = [inv[0][0], inv[0][1], inv[0][2], 0.0];
+                u.h1 = [inv[1][0], inv[1][1], inv[1][2], 0.0];
+                u.p1 = [*px_per_src, *nearest as u8 as f32, 0.0, 0.0];
+                self.pass(enc, &self.image, target, &u, &t, &self.dummy);
             }
             Node::Warp { img, hi, src, rect, opacity, shade } => {
                 let t = Self::img(img, ready);

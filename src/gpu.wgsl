@@ -209,3 +209,55 @@ fn vs_tri(@location(0) p: vec2f, @location(1) c: vec4f) -> TriOut {
 fn fs_tri(i: TriOut) -> @location(0) vec4f {
     return i.col;
 }
+
+fn mitchell(x: f32) -> f32 {
+    // B = C = 1/3, as tiny-skia's bicubic filter
+    let a = abs(x);
+    let b = 1.0 / 3.0;
+    let c = 1.0 / 3.0;
+    if a < 1.0 {
+        return ((12.0 - 9.0 * b - 6.0 * c) * a * a * a + (-18.0 + 12.0 * b + 6.0 * c) * a * a + (6.0 - 2.0 * b)) / 6.0;
+    }
+    if a < 2.0 {
+        return ((-b - 6.0 * c) * a * a * a + (6.0 * b + 30.0 * c) * a * a + (-12.0 * b - 48.0 * c) * a + (8.0 * b + 24.0 * c)) / 6.0;
+    }
+    return 0.0;
+}
+
+fn clamped(p: vec2i) -> vec4f {
+    let d = vec2i(textureDimensions(tex0));
+    return textureLoad(tex0, clamp(p, vec2i(0), d - 1), 0);
+}
+
+// A photo or video frame: target pixel -> source pixel by an affine (h0, h1),
+// sampled nearest (p1.y = 1, pixel for pixel) or bicubic, edges padded; the
+// rectangle's edge is anti-aliased over p1.x target pixels per source pixel.
+@fragment
+fn fs_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let q = vec3f(pos.xy, 1.0);
+    let sp = vec2f(dot(u.h0.xyz, q), dot(u.h1.xyz, q));
+    let d = vec2f(textureDimensions(tex0));
+    let edge = min(min(sp.x, d.x - sp.x), min(sp.y, d.y - sp.y)) * u.p1.x;
+    let cov = clamp(edge + 0.5, 0.0, 1.0);
+    if cov <= 0.0 {
+        discard;
+    }
+    var c: vec4f;
+    if u.p1.y > 0.5 {
+        c = clamped(vec2i(floor(sp)));
+    } else {
+        let s = sp - 0.5;
+        let i = vec2i(floor(s));
+        let f = s - floor(s);
+        c = vec4f(0.0);
+        for (var y = -1; y <= 2; y++) {
+            let wy = mitchell(f32(y) - f.y);
+            for (var x = -1; x <= 2; x++) {
+                c += clamped(i + vec2i(x, y)) * (mitchell(f32(x) - f.x) * wy);
+            }
+        }
+        let a = clamp(c.a, 0.0, 1.0);
+        c = vec4f(clamp(c.rgb, vec3f(0.0), vec3f(a)), a);
+    }
+    return c * (cov * u.tsize.z);
+}

@@ -651,4 +651,34 @@ mod tests {
         }
         eprintln!("total {:.2} s, ss {ss}, gpu {gpu}: {:?}", t.elapsed().as_secs_f64(), p.result.lock().unwrap());
     }
+
+    /// DV_BENCH_CLIP=path: one video layer filling a frame of its own size,
+    /// exported at its fps for 5 s (DV_BENCH_SS, default 2), with DV_TIMING.
+    #[test]
+    #[ignore]
+    fn bench_video_export() {
+        let Some(path) = std::env::var_os("DV_BENCH_CLIP") else { return };
+        let p = PathBuf::from(path);
+        let info = crate::video::probe(&p).unwrap();
+        let size = info.preview_size(crate::video::PREVIEW_SIDE);
+        let img = crate::video::frame_at(&p, 0.0, size).unwrap();
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]) };
+        let (w, h) = (info.width as f32, info.height as f32);
+        let im = crate::doc::ImageLayer { src, center: egui::pos2(w / 2.0, h / 2.0), scale: 1.0, rotation: 0.0, crop: Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h)), adjust: Default::default(), video: None };
+        let mut doc = Document::default();
+        let id = doc.insert("v".into(), LayerKind::Image(im), None);
+        if let Some(LayerKind::Image(im)) = doc.get_mut(id).map(|l| &mut l.kind) {
+            im.video = Some(crate::doc::VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, mute: true, volume: 1.0, slot: next_rev() });
+        }
+        let ss: u8 = std::env::var("DV_BENCH_SS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+        let out = std::env::temp_dir().join("dv_bench_clip.mp4");
+        let region = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
+        let job = Job { doc, region: Region::Fixed(region), size: (info.width, info.height), fps: info.fps, t0: 0.0, t1: 5.0f64.min(info.duration), codec: Codec::H264, quality: 23, mbps: None, gpu: true, bg: None, audio: vec![], ss, out };
+        let t = std::time::Instant::now();
+        let p = start(job);
+        while p.result.lock().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        eprintln!("total {:.2} s, ss {ss}: {:?}", t.elapsed().as_secs_f64(), p.result.lock().unwrap());
+    }
 }
