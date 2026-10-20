@@ -141,6 +141,9 @@ fn march(w: i32, h: i32, alpha: &impl Fn(i32, i32) -> f32) -> Vec<Vec<Pos2>> {
         pos2(c(x) + (c(x1) - c(x)) * t, c(y) + (c(y1) - c(y)) * t)
     };
     let mut next: HashMap<Key, Key> = HashMap::new();
+    // loops start at their first segment in scan order (a HashMap's order changes
+    // from run to run, and the start point shapes the simplified outline)
+    let mut order: Vec<Key> = Vec::new();
     for y in -1..h {
         for x in -1..w {
             let v = [alpha(x, y), alpha(x + 1, y), alpha(x + 1, y + 1), alpha(x, y + 1)];
@@ -179,11 +182,15 @@ fn march(w: i32, h: i32, alpha: &impl Fn(i32, i32) -> f32) -> Vec<Vec<Pos2>> {
             };
             for (l, e) in pairs {
                 next.insert(side[l], side[e]);
+                order.push(side[l]);
             }
         }
     }
     let mut loops = Vec::new();
-    while let Some(&start) = next.keys().next() {
+    for start in order {
+        if !next.contains_key(&start) {
+            continue;
+        }
         let mut lp = Vec::new();
         let mut k = start;
         loop {

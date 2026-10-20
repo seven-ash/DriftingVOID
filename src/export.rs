@@ -9,6 +9,7 @@ use tiny_skia::{
 };
 
 use crate::doc::{Blend, Document, ImageLayer, Layer, LayerKind, ShapeKind};
+use crate::scene::{Draw, Projected, Scene};
 
 pub const MAX_SIDE: u32 = 32000;
 pub const MAX_PIXELS: u64 = 400_000_000;
@@ -83,8 +84,7 @@ pub fn mask_hide(mask: &Layer, map: Option<MaskMap>, p: Pos2) -> f32 {
 }
 
 /// Hides what a mask covers (both in canvas space).
-pub fn apply_mask(pm: &mut Pixmap, doc: &Document, m: &Layer, region: Rect, scale: f32) {
-    let map = mask_map(doc, m);
+pub fn apply_mask(pm: &mut Pixmap, m: &Layer, map: Option<MaskMap>, region: Rect, scale: f32) {
     let w = pm.width() as usize;
     let data = pm.data_mut();
     for (i, px) in data.chunks_exact_mut(4).enumerate() {
@@ -107,7 +107,7 @@ pub fn apply_mask(pm: &mut Pixmap, doc: &Document, m: &Layer, region: Rect, scal
 /// transform as the whole picture moved up by whole pixels, so bands put
 /// together match a single render exactly.
 #[allow(clippy::too_many_arguments)]
-fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0: u32, h: u32, flat: &FlatCache, side_cache: &SideCache) -> Result<Pixmap, String> {
+fn render_band(scene: &Scene, region: Rect, scale: f32, bg: Option<Color32>, y0: u32, h: u32, flat: &FlatCache, side_cache: &SideCache) -> Result<Pixmap, String> {
     let (w, _) = output_size(region, scale);
     let full = region;
     // the band's own world rect (a pixel of margin for culling and source windows)
@@ -115,100 +115,119 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
         egui::pos2(full.min.x, full.min.y + y0 as f32 / scale),
         egui::pos2(full.max.x, (full.min.y + (y0 + h) as f32 / scale).min(full.max.y)),
     );
-    let cull = region.expand(2.0 / scale);
     let dy = y0 as f32;
+    let band = Band {
+        full,
+        region,
+        cull: region.expand(2.0 / scale),
+        scale,
+        dy,
+        w,
+        h,
+        bg,
+        base: Transform::from_translate(-full.min.x, -full.min.y).post_scale(scale, scale).post_translate(0.0, -dy),
+        flat,
+        side_cache,
+    };
     let mut out = Pixmap::new(w, h).ok_or("이미지 버퍼를 만들 수 없음")?;
     if let Some(bg) = bg {
         let [r, g, b, a] = bg.to_srgba_unmultiplied();
         out.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
     }
-    let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(scale, scale).post_translate(0.0, -dy);
-    let cams = crate::persp::cameras(&doc.spaces);
-    for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
-        let timed = crate::anim::layer_at_time(doc, layer);
-        let layer = timed.as_ref().unwrap_or(layer);
-        if layer.mask_of.is_some() || !layer.shown_bounds(&cams).is_some_and(|b| b.intersects(cull)) {
-            continue;
-        }
-        if let Some(m) = mask_for(doc, layer.id) {
-            let mut one = layer.clone();
-            one.mask_of = None;
-            let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
-            let mut pm = render_band(&mini, full, scale, None, y0, h, flat, side_cache)?;
-            apply_mask(&mut pm, doc, m, region, scale);
-            out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-            continue;
-        }
-        if let Some((mode, op)) = crate::canvas::group_of(layer) {
-            // drawn alone at full strength, then put down once (as on the canvas)
-            let mut one = layer.clone();
-            one.opacity = 1.0;
-            match &mut one.kind {
-                LayerKind::Text(t) => t.blend = Blend::Normal,
-                LayerKind::Raster(r) => r.blend = Blend::Normal,
-                _ => {}
-            }
-            let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
-            let tmp = render_band(&mini, full, scale, None, y0, h, flat, side_cache)?;
-            blend_onto(&mut out, &tmp, mode, op, bg);
-            continue;
-        }
-        if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl, c))) {
-            // content -> canvas -> output pixels
-            let s = scale as f64;
-            let out_m = [[s, 0.0, -full.min.x as f64 * s], [0.0, s, -full.min.y as f64 * s - dy as f64], [0.0, 0.0, 1.0]];
-            let h = crate::persp::mul_mm(&out_m, &pl.homography(cam));
-            let res = magnification(&h, layer.bounds().unwrap_or(region)).clamp(0.05, 4.0);
-            let clip = doc.spaces.iter().find(|s| s.id == pl.space).map(|sp| {
-                let m = sp.clip();
-                Rect::from_min_max(((m.min - full.min) * scale).to_pos2(), ((m.max - full.min) * scale).to_pos2()).translate(egui::vec2(0.0, -dy))
-            });
-            let light = doc.spaces.iter().find(|s| s.id == pl.space).and_then(|s| s.light).filter(|_| pl.thick > 0.0);
-            // flattened once per export and shared by every band
-            if let Some(fl) = flat.get(layer, pl, res) {
-                let (src, rect, res) = (&fl.0, fl.1, fl.2);
-                if pl.thick <= 0.0 {
-                    warp_onto(&mut out, src, rect, res, &h, layer.opacity, clip, 1.0);
-                } else {
-                    let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
-                    if let Some(edges) = &fl.3 {
-                        // the sides in full-image pixels, once per render
-                        let sides = {
-                            let mut m = side_cache.map.lock().unwrap();
-                            m.entry(layer.id)
-                                .or_insert_with(|| {
-                                    let to_full = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * scale, (p.y - full.min.y) * scale));
-                                    std::sync::Arc::new(crate::extrude::sides(edges, pl, &to_full, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE))
-                                })
-                                .clone()
-                        };
-                        fill_sides(&mut out, &sides, layer.opacity, clip, dy);
-                    }
-                    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
-                    let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
-                    warp_onto(&mut out, src, rect, res, &hc, layer.opacity, clip, light.map_or(1.0, |l| l.shade(n)));
-                }
-            }
-            continue;
-        }
-        if let LayerKind::Text(t) = &layer.kind {
-            if t.blend != Blend::Normal {
-                let mut tmp = Pixmap::new(w, h).ok_or("임시 버퍼를 만들 수 없음")?;
-                draw_layer(&mut tmp, layer, base, cull, scale);
-                blend_onto(&mut out, &tmp, t.blend, layer.opacity, bg);
-                continue;
-            }
-        }
-        if layer.opacity < 0.999 {
-            let mut tmp = Pixmap::new(w, h).ok_or("임시 버퍼를 만들 수 없음")?;
-            draw_layer(&mut tmp, layer, base, cull, scale);
-            let paint = PixmapPaint { opacity: layer.opacity, ..Default::default() };
-            out.draw_pixmap(0, 0, tmp.as_ref(), &paint, Transform::identity(), None);
-        } else {
-            draw_layer(&mut out, layer, base, cull, scale);
-        }
+    for item in scene.items.iter().filter(|it| it.bounds.intersects(band.cull)) {
+        draw_item(&mut out, &item.draw, &band)?;
     }
     Ok(out)
+}
+
+/// What one band draws with: the whole picture's region and the band's.
+struct Band<'a> {
+    full: Rect,
+    region: Rect,
+    cull: Rect,
+    scale: f32,
+    dy: f32,
+    w: u32,
+    h: u32,
+    bg: Option<Color32>,
+    base: Transform,
+    flat: &'a FlatCache,
+    side_cache: &'a SideCache,
+}
+
+impl Band<'_> {
+    fn blank(&self) -> Result<Pixmap, String> {
+        Pixmap::new(self.w, self.h).ok_or_else(|| "임시 버퍼를 만들 수 없음".into())
+    }
+}
+
+fn draw_item(out: &mut Pixmap, d: &Draw, b: &Band) -> Result<(), String> {
+    match d {
+        Draw::Masked { inner, mask, map } => {
+            let mut pm = b.blank()?;
+            draw_item(&mut pm, inner, b)?;
+            apply_mask(&mut pm, mask, *map, b.region, b.scale);
+            out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        }
+        Draw::Group { inner, mode, opacity } => {
+            // drawn alone at full strength, then put down once (as on the canvas)
+            let mut pm = b.blank()?;
+            draw_item(&mut pm, inner, b)?;
+            blend_onto(out, &pm, *mode, *opacity, b.bg);
+        }
+        Draw::Projected(p) => draw_projected(out, p, b),
+        Draw::Blend(layer, mode) => {
+            let mut pm = b.blank()?;
+            draw_layer(&mut pm, layer, b.base, b.cull, b.scale);
+            blend_onto(out, &pm, *mode, layer.opacity, b.bg);
+        }
+        Draw::Flat(layer) => {
+            if layer.opacity < 0.999 {
+                let mut pm = b.blank()?;
+                draw_layer(&mut pm, layer, b.base, b.cull, b.scale);
+                let paint = PixmapPaint { opacity: layer.opacity, ..Default::default() };
+                out.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::identity(), None);
+            } else {
+                draw_layer(out, layer, b.base, b.cull, b.scale);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_projected(out: &mut Pixmap, p: &Projected, b: &Band) {
+    let (layer, pl, cam, full, scale, dy) = (&p.layer, &p.pl, &p.cam, b.full, b.scale, b.dy);
+    // content -> canvas -> output pixels
+    let s = scale as f64;
+    let out_m = [[s, 0.0, -full.min.x as f64 * s], [0.0, s, -full.min.y as f64 * s - dy as f64], [0.0, 0.0, 1.0]];
+    let h = crate::persp::mul_mm(&out_m, &pl.homography(cam));
+    let res = magnification(&h, layer.bounds().unwrap_or(b.region)).clamp(0.05, 4.0);
+    let clip = p.clip.map(|m| Rect::from_min_max(((m.min - full.min) * scale).to_pos2(), ((m.max - full.min) * scale).to_pos2()).translate(egui::vec2(0.0, -dy)));
+    let light = p.light;
+    // flattened once per export and shared by every band
+    let Some(fl) = b.flat.get(layer, pl, res) else { return };
+    let (src, rect, res) = (&fl.0, fl.1, fl.2);
+    if pl.thick <= 0.0 {
+        warp_onto(out, src, rect, res, &h, layer.opacity, clip, 1.0);
+        return;
+    }
+    let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+    if let Some(edges) = &fl.3 {
+        // the sides in full-image pixels, once per render
+        let sides = {
+            let mut m = b.side_cache.map.lock().unwrap();
+            m.entry(layer.id)
+                .or_insert_with(|| {
+                    let to_full = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * scale, (p.y - full.min.y) * scale));
+                    std::sync::Arc::new(crate::extrude::sides(edges, pl, &to_full, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE))
+                })
+                .clone()
+        };
+        fill_sides(out, &sides, layer.opacity, clip, dy);
+    }
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
+    warp_onto(out, src, rect, res, &hc, layer.opacity, clip, light.map_or(1.0, |l| l.shade(n)));
 }
 
 /// Flattened 3D layers (and their extrusion outlines), shared by an export's
@@ -348,13 +367,15 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     if w > MAX_SIDE || h > MAX_SIDE || w as u64 * h as u64 > MAX_PIXELS {
         return Err(format!("너무 큼: {w}×{h}px"));
     }
+    let scene = crate::scene::build(doc);
+    let scene = &scene;
     let flat = FRAME_CACHE.with(|c| c.borrow().clone()).unwrap_or_default();
     let flat = &*flat;
     let side_cache = SideCache::default();
     let side_cache = &side_cache;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads == 1 || (w as u64 * h as u64) < 600_000 {
-        return render_band(doc, region, scale, bg, 0, h, flat, side_cache);
+        return render_band(scene, region, scale, bg, 0, h, flat, side_cache);
     }
     let n = (threads * 3).min(h as usize).max(1);
     let bh = h.div_ceil(n as u32);
@@ -371,7 +392,7 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
                     if y0 >= h {
                         break;
                     }
-                    let r = render_band(doc, region, scale, bg, y0, bh.min(h - y0), flat, side_cache);
+                    let r = render_band(scene, region, scale, bg, y0, bh.min(h - y0), flat, side_cache);
                     bands.lock().unwrap().push((y0, r));
                 }
             });
@@ -960,7 +981,7 @@ mod ss_tests {
             doc.insert(format!("s{i}"), LayerKind::Shape(sh), None);
         }
         let region = Rect::from_min_size(egui::pos2(0.3, 0.7), egui::vec2(1000.0, 800.0));
-        let one = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, output_size(region, 1.0).1, &FlatCache::default(), &SideCache::default()).unwrap();
+        let one = render_band(&crate::scene::build(&doc), region, 1.0, Some(Color32::WHITE), 0, output_size(region, 1.0).1, &FlatCache::default(), &SideCache::default()).unwrap();
         let par = render(&doc, region, 1.0, Some(Color32::WHITE)).unwrap();
         assert_eq!((one.width(), one.height()), (par.width(), par.height()));
         // tiny-skia's edge coverage depends a little on where a path is clipped, so
@@ -990,7 +1011,7 @@ mod ss_tests {
         }
         let region = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(3840.0, 2160.0));
         let t = std::time::Instant::now();
-        let _ = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, 2160, &FlatCache::default(), &SideCache::default()).unwrap();
+        let _ = render_band(&crate::scene::build(&doc), region, 1.0, Some(Color32::WHITE), 0, 2160, &FlatCache::default(), &SideCache::default()).unwrap();
         let one = t.elapsed();
         let t = std::time::Instant::now();
         let _ = render(&doc, region, 1.0, Some(Color32::WHITE)).unwrap();

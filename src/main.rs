@@ -12,12 +12,15 @@ mod export;
 mod extrude;
 mod fontdb;
 mod glass;
+#[cfg(test)]
+mod golden;
 mod okhsv;
 mod penhook;
 mod persp;
 mod theme;
 mod io;
 mod raster;
+mod scene;
 mod segment;
 mod selftest;
 mod text;
