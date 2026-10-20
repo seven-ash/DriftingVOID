@@ -1014,6 +1014,28 @@ struct CanvasGpu {
     zoom: (f32, f64),
 }
 
+/// `export::render` on the canvas's GPU renderer when there is one (its
+/// photos, masks and 3D layers are already there), else on the CPU.
+fn render_region(cg: &mut Option<CanvasGpu>, doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> Result<tiny_skia::Pixmap, String> {
+    if let Some(cg) = cg.as_mut() {
+        if std::env::var_os("DV_CPU_EXPORT").is_none() {
+            let g = &mut cg.gpu;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.render_aside(doc, region, scale, bg)));
+            if let Ok(Ok(pm)) = r {
+                return Ok(pm);
+            }
+        }
+    }
+    crate::export::render(doc, region, scale, bg)
+}
+
+/// The colour at a canvas point (as `export::sample`), on the GPU when there is one.
+fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<Color32> {
+    let pm = render_region(cg, doc, Rect::from_min_size(p.floor(), vec2(1.0, 1.0)), 1.0, None).ok()?;
+    let c = pm.pixel(0, 0)?.demultiply();
+    (c.alpha() > 0).then(|| Color32::from_rgb(c.red(), c.green(), c.blue()))
+}
+
 impl CanvasGpu {
     /// The target texture at `w`×`h` pixels (made, or remade at a new size).
     fn target(&mut self, w: u32, h: u32) -> (eframe::wgpu::Texture, egui::TextureId) {
@@ -2533,7 +2555,7 @@ impl App {
         let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
+        let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as i32, pm.height() as i32);
         let px = pm.data();
         let rgb = |x: i32, y: i32| {
@@ -2639,13 +2661,13 @@ impl App {
     }
 
     /// A live wire seeded at `at` (a 768 px window of what lies under the masked layer).
-    fn scissor_wire(&self, mid: LayerId, at: Pos2) -> Option<crate::segment::LiveWire> {
+    fn scissor_wire(&mut self, mid: LayerId, at: Pos2) -> Option<crate::segment::LiveWire> {
         let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
         let reg = Rect::from_center_size(at, vec2(768.0, 768.0));
         let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let pm = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)).ok()?;
+        let pm = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)).ok()?;
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         let px = pm.data();
         let lum: Vec<f32> = (0..pw * ph).map(|i| (0.299 * px[i * 4] as f32 + 0.587 * px[i * 4 + 1] as f32 + 0.114 * px[i * 4 + 2] as f32) / 255.0).collect();
@@ -2740,7 +2762,7 @@ impl App {
         let reg = Rect::from_min_max(b.min - vec2(PAD as f32, PAD as f32), b.max + vec2(PAD as f32, PAD as f32));
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
+        let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         let px = pm.data();
         let (qw, qh) = (poly.width() as i32, poly.height() as i32);
@@ -2821,7 +2843,7 @@ impl App {
         }
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let Ok(pm) = crate::export::render(&d, reg, 1.0, Some(Color32::BLACK)) else { return };
+        let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         let px = pm.data();
         // the cut runs on a copy of at most ~90k pixels
@@ -4914,7 +4936,7 @@ impl App {
             return;
         }
         if self.tool == Tool::Picker {
-            if let Some(c) = crate::export::sample(&self.doc, w) {
+            if let Some(c) = sample_region(&mut self.cgpu, &self.doc, w) {
                 self.s.color = c;
                 self.remember_color(c);
                 self.status = format!("색 선택: #{:02X}{:02X}{:02X}", c.r(), c.g(), c.b());
@@ -5802,7 +5824,7 @@ impl App {
             if self.edge_tex.as_ref().is_none_or(|(_, k)| *k != key2) {
                 let region = Rect::from_center_size(target, vec2(2.0 * r / zoom2, 2.0 * r / zoom2));
                 let m = zoom2 * ppp;
-                if let Ok(pm) = crate::export::render(&self.doc, region, m, None) {
+                if let Ok(pm) = render_region(&mut self.cgpu, &self.doc, region, m, None) {
                     let (w, h) = (pm.width() as usize, pm.height() as usize);
                     let mut px = pm.data().to_vec();
                     let e = crate::edges::canny(&crate::edges::luminance(&px), w, h, (m * 0.8).clamp(1.0, 4.0), 0.85);
@@ -5837,7 +5859,7 @@ impl App {
         let key = [target.x, target.y, zoom];
         if self.loupe_tex.as_ref().is_none_or(|(_, k)| *k != key) {
             let region = Rect::from_center_size(target, vec2(2.0 * r / zoom, 2.0 * r / zoom));
-            if let Ok(pm) = crate::export::render(&self.doc, region, zoom * ppp, None) {
+            if let Ok(pm) = render_region(&mut self.cgpu, &self.doc, region, zoom * ppp, None) {
                 let ci = egui::ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
                 let opts = egui::TextureOptions::NEAREST;
                 match &mut self.loupe_tex {
@@ -7280,7 +7302,8 @@ impl App {
     }
 
     fn copy_region(&mut self, r: Rect, scale: f32, bg: Option<Color32>) {
-        match crate::export::render(&self.export_doc(), r, scale, bg) {
+        let doc = self.export_doc();
+        match render_region(&mut self.cgpu, &doc, r, scale, bg) {
             Ok(pm) => {
                 let img = crate::export::to_rgba(&pm);
                 let res = arboard::Clipboard::new().and_then(|mut cb| {

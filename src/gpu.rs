@@ -159,6 +159,8 @@ pub struct Gpu {
     /// by tile as they change (painting re-uploads only the touched tiles).
     atlases: HashMap<LayerId, Atlas>,
     frame: u64,
+    /// A picture drawn between the canvas's frames (`render_aside`).
+    aside: bool,
 }
 
 static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
@@ -411,6 +413,7 @@ impl Gpu {
             atlases: HashMap::new(),
             sides: HashMap::new(),
             frame: 0,
+            aside: false,
         }
     }
 
@@ -508,6 +511,22 @@ impl Gpu {
         }
     }
 
+    /// As `export::render`, on the canvas's renderer between its frames (the
+    /// loupe, the eyedropper, copying, the auto-selection tools' input): what
+    /// the canvas keeps is neither dropped nor aged, so its photos, masks and
+    /// 3D layers are reused, and the targets made for this picture are let go.
+    pub fn render_aside(&mut self, doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> Result<Pixmap, String> {
+        let had: std::collections::HashSet<(u32, u32, usize)> = self.pool.keys().copied().collect();
+        self.aside = true;
+        let p = self.submit(doc, region.center(), region.size(), 0.0, scale, bg, 1, false);
+        self.aside = false;
+        self.pool.retain(|k, _| had.contains(k));
+        match self.finish(p?)? {
+            Frame::Rgba(pm) => Ok(pm),
+            Frame::Nv12(..) => Err("NV12".into()),
+        }
+    }
+
     /// Prepares and queues one picture on the GPU without waiting for it; `nv12`
     /// reads it back as NV12 (video) instead of RGBA. `finish` collects it, so
     /// the next frame can be prepared while the GPU draws this one.
@@ -542,13 +561,15 @@ impl Gpu {
             return Err(format!("GPU 한도 초과: {tw}×{th}px"));
         }
         let (fw, fh) = (big.0 / k, big.1 / k);
-        self.frame += 1;
-        let g = self.frame;
-        self.rasters.retain(|_, v| v.1 + 1 >= g);
-        self.sources.retain(|_, v| v.1 + 1 >= g);
-        self.flats.retain(|_, v| v.2 + 1 >= g);
-        self.sides.retain(|_, v| v.1 + 1 >= g);
-        self.flat.sweep();
+        if !self.aside {
+            self.frame += 1;
+            let g = self.frame;
+            self.rasters.retain(|_, v| v.1 + 1 >= g);
+            self.sources.retain(|_, v| v.1 + 1 >= g);
+            self.flats.retain(|_, v| v.2 + 1 >= g);
+            self.sides.retain(|_, v| v.1 + 1 >= g);
+            self.flat.sweep();
+        }
 
         // 1. what to draw, with the rasterizing left as jobs
         let t0 = std::time::Instant::now();

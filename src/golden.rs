@@ -236,6 +236,38 @@ fn gpu_parity() {
     assert!(fails.is_empty(), "GPU differs from the CPU reference: {fails:?}");
 }
 
+/// The loupe, the eyedropper and copying draw on the canvas's renderer
+/// between its frames (`render_aside`): small regions at a high scale and a
+/// single pixel must match the CPU, and drawing aside must leave the caches
+/// as they were (a second picture reuses them).
+#[test]
+fn aside_matches_cpu() {
+    let doc = room_doc(false, 0.0);
+    let im = doc.layers.iter().find_map(|l| match &l.kind {
+        LayerKind::Image(im) => Some(im.clone()),
+        _ => None,
+    }).unwrap();
+    let c = im.center;
+    let regions = [(Rect::from_center_size(c, vec2(24.0, 24.0)), 6.0), (Rect::from_center_size(c + vec2(-150.0, 40.0), vec2(40.0, 30.0)), 4.0), (Rect::from_min_size(c.floor(), vec2(1.0, 1.0)), 1.0)];
+    let r = crate::gpu::with_gpu(|g| {
+        let mut out = Vec::new();
+        for (reg, sc) in regions {
+            let cpu = render(&doc, reg, sc, None).unwrap();
+            let gpu = g.render_aside(&doc, reg, sc, None).unwrap();
+            out.push(diff(&cpu, &gpu));
+        }
+        out
+    });
+    let Some(r) = r else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    for (i, (big, mean, worst)) in r.into_iter().enumerate() {
+        eprintln!("region {i}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
+        assert!(big < 0.01 && mean < 1.0, "region {i} differs");
+    }
+}
+
 /// DV_WRITE_FLAT=path.void: saves the flat golden scene (brush layer, masks,
 /// blend modes) as a project, to open it in the app for canvas captures.
 #[test]
