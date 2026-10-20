@@ -129,6 +129,8 @@ pub struct Gpu {
     down: wgpu::RenderPipeline,
     sides_layout: wgpu::BindGroupLayout,
     sides_pipe: wgpu::RenderPipeline,
+    path_layout: wgpu::BindGroupLayout,
+    path_pipe: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
     y_plane: wgpu::RenderPipeline,
     uv_plane: wgpu::RenderPipeline,
@@ -165,6 +167,9 @@ pub struct Gpu {
     frame: u64,
     /// A picture drawn between the canvas's frames (`render_aside`).
     aside: bool,
+    /// Glyph outlines (font units), and their copy on the GPU (by `rev`).
+    glyphs: crate::gpu_paths::Glyphs,
+    glyph_bufs: Option<(u64, [Arc<wgpu::Buffer>; 3])>,
 }
 
 static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
@@ -394,6 +399,53 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
+        let path_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("paths"), source: wgpu::ShaderSource::Wgsl(include_str!("paths.wgsl").into()) });
+        let storage = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
+        let path_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                storage(1),
+                storage(2),
+                storage(3),
+            ],
+        });
+        let path_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&path_layout)], immediate_size: 0 });
+        let path_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("paths"),
+            layout: Some(&path_pl),
+            vertex: wgpu::VertexState {
+                module: &path_module,
+                entry_point: Some("vs_path"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: crate::gpu_paths::INST_BYTES,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Uint32x4],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &path_module,
+                entry_point: Some("fs_path"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: FMT, blend: Some(over_blend), write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let dummy = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -415,6 +467,8 @@ impl Gpu {
             down,
             sides_layout,
             sides_pipe,
+            path_layout,
+            path_pipe,
             image,
             y_plane,
             uv_plane,
@@ -437,6 +491,8 @@ impl Gpu {
             edge_bufs: HashMap::new(),
             frame: 0,
             aside: false,
+            glyphs: Default::default(),
+            glyph_bufs: None,
         }
     }
 
@@ -914,6 +970,12 @@ impl Gpu {
             e.1 = self.frame;
             return Some((Img::Ready(e.0.clone()), off));
         }
+        if crate::gpu_paths::handles(&layer) && std::env::var_os("DV_CPU_2D").is_none() {
+            // text and shapes: filled on the GPU from their outlines
+            let t = self.raster_paths(&layer, rect, v)?;
+            self.rasters.insert(key, (t.clone(), self.frame));
+            return Some((Img::Ready(t), off));
+        }
         let (full, s) = (v.full, v.s);
         let job: Raster = Box::new(move || {
             let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
@@ -925,6 +987,72 @@ impl Gpu {
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
+    }
+
+    /// Text or a shape drawn into its box (target pixels `rect`) on the GPU:
+    /// glyphs from the kept outlines, shape outlines made for this drawing.
+    fn raster_paths(&mut self, layer: &Layer, rect: [i32; 4], v: &View) -> Option<Arc<wgpu::Texture>> {
+        use crate::gpu_paths::inst_bytes;
+        let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
+        let (full, s) = (v.full, v.s);
+        let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(s, s).post_translate(-rect[0] as f32, -rect[1] as f32);
+        let d = crate::gpu_paths::drawing(&mut self.glyphs, layer, base, s)?;
+        let tex = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let mut u = Uniform::new([0.0; 4], w, h);
+        u.tsize = [w as f32, h as f32, 0.0, 0.0];
+        let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: &u.bytes()[16..32], usage: wgpu::BufferUsages::UNIFORM });
+        let storage = |dev: &wgpu::Device, bytes: &[u8]| {
+            // never empty (a binding needs a size)
+            let pad = [0u8; 16];
+            let bytes = if bytes.is_empty() { &pad[..] } else { bytes };
+            Arc::new(dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytes, usage: wgpu::BufferUsages::STORAGE }))
+        };
+        let set_bufs = |dev: &wgpu::Device, set: &crate::gpu_paths::PathSet| -> [Arc<wgpu::Buffer>; 3] {
+            [storage(dev, f32_bytes(set.edges.as_flattened())), storage(dev, u32_bytes(set.bands.as_flattened())), storage(dev, u32_bytes(&set.idx))]
+        };
+        if !d.glyphs.is_empty() && self.glyph_bufs.as_ref().is_none_or(|g| g.0 != self.glyphs.rev) {
+            self.glyph_bufs = Some((self.glyphs.rev, set_bufs(&self.device, &self.glyphs.set)));
+        }
+        let bind = |dev: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &[Arc<wgpu::Buffer>; 3]| {
+            dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: b[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: b[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: b[2].as_entire_binding() },
+                ],
+            })
+        };
+        // a text's background, then its glyphs; a shape's fill, then its stroke
+        let mut draws: Vec<(wgpu::BindGroup, wgpu::Buffer, u32)> = Vec::new();
+        if !d.shapes.is_empty() {
+            let b = set_bufs(&self.device, &d.local);
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: inst_bytes(&d.shapes), usage: wgpu::BufferUsages::VERTEX });
+            draws.push((bind(&self.device, &self.path_layout, &b), vb, d.shapes.len() as u32));
+        }
+        if let (false, Some((_, b))) = (d.glyphs.is_empty(), &self.glyph_bufs) {
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: inst_bytes(&d.glyphs), usage: wgpu::BufferUsages::VERTEX });
+            draws.push((bind(&self.device, &self.path_layout, b), vb, d.glyphs.len() as u32));
+        }
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let view = tex.create_view(&Default::default());
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } })],
+                ..Default::default()
+            });
+            rp.set_pipeline(&self.path_pipe);
+            for (bg, vb, n) in &draws {
+                rp.set_bind_group(0, bg, &[]);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.draw(0..6, 0..*n);
+            }
+        }
+        self.queue.submit([enc.finish()]);
+        Some(Arc::new(tex))
     }
 
     /// A photo or video frame: uploaded once as it came, then cropped, adjusted,
@@ -1214,33 +1342,44 @@ impl Gpu {
         let h = crate::persp::mul_mm(&out_m, &pl.homography(&cam));
         let res = crate::export::magnification(&h, layer.bounds().unwrap_or(full)).clamp(0.05, 4.0);
         let clip = clip.map(|m| Rect::from_min_max(((m.min - full.min) * v.s).to_pos2(), ((m.max - full.min) * v.s).to_pos2()));
-        // (not when it has got much too coarse: past half the scale needed, one
-        // new picture is made even while zooming)
-        let fl = match v.zooming {
-            true => self.flat.peek(&layer, &pl, res).or_else(|| {
-                // the one it has, while the sharp one is made on a worker
-                let near = self.flat.nearest(&layer, &pl);
-                if near.is_some() {
-                    self.flat.request(&layer, &pl, res);
-                }
-                near
-            }),
+        // flat text and shapes: drawn flat on the GPU from their outlines (no
+        // CPU picture, so turning and zooming make nothing on the CPU)
+        let gpu_flat = match pl.thick <= 0.0 && crate::gpu_paths::handles(&layer) && std::env::var_os("DV_CPU_2D").is_none() {
+            true => self.flat_paths(&layer, res),
             false => None,
         };
-        let Some(fl) = fl.or_else(|| self.flat.get(&layer, &pl, res)) else { return };
-        let ptr = Arc::as_ptr(&fl) as usize;
-        let tex = match self.flats.get_mut(&ptr) {
-            Some(e) => {
-                e.2 = self.frame;
-                e.1.clone()
-            }
+        let (tex, rect, fres, edges) = match gpu_flat {
+            Some((t, r, f)) => (t, r, f, None),
             None => {
-                let t = self.upload(fl.0.data(), fl.0.width(), fl.0.height());
-                self.flats.insert(ptr, (fl.clone(), t.clone(), self.frame));
-                t
+            // (not when it has got much too coarse: past half the scale needed, one
+            // new picture is made even while zooming)
+            let fl = match v.zooming {
+                true => self.flat.peek(&layer, &pl, res).or_else(|| {
+                    // the one it has, while the sharp one is made on a worker
+                    let near = self.flat.nearest(&layer, &pl);
+                    if near.is_some() {
+                        self.flat.request(&layer, &pl, res);
+                    }
+                    near
+                }),
+                false => None,
+            };
+            let Some(fl) = fl.or_else(|| self.flat.get(&layer, &pl, res)) else { return };
+            let ptr = Arc::as_ptr(&fl) as usize;
+            let tex = match self.flats.get_mut(&ptr) {
+                Some(e) => {
+                    e.2 = self.frame;
+                    e.1.clone()
+                }
+                None => {
+                    let t = self.upload(fl.0.data(), fl.0.width(), fl.0.height());
+                    self.flats.insert(ptr, (fl.clone(), t.clone(), self.frame));
+                    t
+                }
+            };
+                (tex, fl.1, fl.2, fl.3.clone())
             }
         };
-        let (rect, fres) = (fl.1, fl.2);
         let warp = |h: &crate::persp::M3, shade: f32| -> Option<Node> {
             let hi = crate::persp::invert(h)?;
             let q = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].iter().map(|p| crate::persp::apply_h(h, *p)).collect::<Option<Vec<_>>>()?;
@@ -1268,7 +1407,7 @@ impl Gpu {
             return;
         }
         let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
-        if let Some(edges) = &fl.3 {
+        if let Some(edges) = &edges {
             if let Some(n) = self.sides(edges, &layer, &pl, &cam, light.as_ref(), &out_m, rect, clip, v) {
                 out.push(n);
             }
@@ -1276,6 +1415,26 @@ impl Gpu {
         let (off, n) = crate::extrude::visible_cap(&pl, &to_eye);
         let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(&cam, off)) };
         out.extend(warp(&hc, light.map_or(1.0, |l| l.shade(n))));
+    }
+
+    /// A flat (thin) text or shape layer in a 3D space drawn flat on the GPU at
+    /// `res` texels per unit (steps of 2^(1/8), as `FlatCache`), over its bounds
+    /// and a unit of margin, as `export::flatten_layer` makes it on the CPU.
+    fn flat_paths(&mut self, layer: &Layer, res: f32) -> Option<(Arc<wgpu::Texture>, Rect, f32)> {
+        let b = layer.bounds()?.expand(1.0);
+        let res = 2f32.powf((res.max(1e-3).log2() * 8.0).ceil() / 8.0);
+        let res = res.min(8192.0f32.min(self.max_side as f32) / b.width().max(b.height()).max(1.0));
+        let w = (b.width() * res).ceil().max(1.0) as u32;
+        let h = (b.height() * res).ceil().max(1.0) as u32;
+        let key = Key { id: layer.id, content: crate::canvas::content_key(layer), rect: [w as i32, h as i32, 0, 0], view: [2, res.to_bits(), b.min.x.to_bits(), b.min.y.to_bits()] };
+        if let Some(e) = self.rasters.get_mut(&key) {
+            e.1 = self.frame;
+            return Some((e.0.clone(), b, res));
+        }
+        let v = View { full: Rect::from_min_size(b.min, vec2(w as f32, h as f32) / res), s: res, tw: w, th: h, k: 1.0, origin: None, zooming: false };
+        let t = self.raster_paths(layer, [0, 0, w as i32, h as i32], &v)?;
+        self.rasters.insert(key, (t.clone(), self.frame));
+        Some((t, b, res))
     }
 
     /// A thick layer's sides: its outline (uploaded once) and this frame's
@@ -1660,6 +1819,16 @@ impl View {
         }
         Some([r[0] - ox, r[1] - oy, r[2] - ox, r[3] - oy])
     }
+}
+
+fn f32_bytes(v: &[f32]) -> &[u8] {
+    // plain f32s
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+fn u32_bytes(v: &[u32]) -> &[u8] {
+    // plain u32s
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
 /// Bytes per outline edge instance (`sides.wgsl` `In`): five f32 pairs, two

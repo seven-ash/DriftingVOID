@@ -14,6 +14,7 @@ mod fontdb;
 mod glass;
 mod glass_gpu;
 mod gpu;
+mod gpu_paths;
 #[cfg(test)]
 mod golden;
 mod okhsv;

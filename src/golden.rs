@@ -185,6 +185,9 @@ fn diff(a: &Pixmap, b: &Pixmap) -> (f64, f64, u32) {
 /// little; anything structural fails). A photo shown small is resampled
 /// differently (the CPU makes a smaller copy, the GPU blends mip levels): the
 /// checkerboard's edges differ a little more there, under 4 % and 1.5 levels.
+/// Text and shapes on the GPU are filled with exact area coverage, the CPU
+/// supersamples shapes 4×4 and draws turned text as a resampled picture (the
+/// GPU outlines it turned, sharper): the flat scenes allow 1.5 % / 0.5.
 #[test]
 fn gpu_parity() {
     let cases: Vec<(&str, Document, egui::Pos2, egui::Vec2, f32, f32, Option<Color32>, u8)> = {
@@ -228,7 +231,13 @@ fn gpu_parity() {
         crate::export::to_rgba(&cpu).save(dir.join(format!("{name}.cpu.got.png"))).unwrap();
         let (big, mean, worst) = diff(&cpu, &gpu);
         eprintln!("{name}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
-        let (big_max, mean_max) = if name.contains("small") || name.contains("tiny") { (0.04, 1.5) } else { (0.005, 0.5) };
+        let (big_max, mean_max) = if name.contains("small") || name.contains("tiny") {
+            (0.04, 1.5)
+        } else if name.starts_with("flat") {
+            (0.015, 0.5)
+        } else {
+            (0.005, 0.5)
+        };
         if big > big_max || mean > mean_max {
             fails.push(name);
         }
@@ -265,6 +274,35 @@ fn aside_matches_cpu() {
     for (i, (big, mean, worst)) in r.into_iter().enumerate() {
         eprintln!("region {i}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
         assert!(big < 0.01 && mean < 1.0, "region {i} differs");
+    }
+}
+
+/// Upright text filled on the GPU from its outlines matches ab_glyph's own
+/// rasterizing closely (the same area coverage), at several sizes and
+/// sub-pixel positions, with a background. What differs is the curves: ab_glyph
+/// flattens them coarsely at small sizes, the GPU's outlines are finer (same
+/// ink to 1 %, centres within 0.1 px).
+#[test]
+fn gpu_text_matches_cpu() {
+    let mut doc = Document::default();
+    for (k, (sz, x)) in [(13.0, 3.3), (31.0, 7.71), (72.0, 0.5)].into_iter().enumerate() {
+        let mut t = text(pos2(x, 10.0 + 90.0 * k as f32), "Drifting gÅ 곱하기", sz, Color32::from_rgb(20, 40, 200));
+        if k == 1 {
+            t.bg = Some(Color32::from_rgba_unmultiplied(250, 200, 60, 200));
+        }
+        doc.insert("t".into(), LayerKind::Text(t), None);
+    }
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 300.0));
+    for scale in [1.0, 2.37] {
+        let cpu = render(&doc, region, scale, Some(Color32::WHITE)).unwrap();
+        let Some(gpu) = crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, scale, Some(Color32::WHITE), 1)) else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let gpu = gpu.unwrap();
+        let (big, mean, worst) = diff(&cpu, &gpu);
+        eprintln!("text ×{scale}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
+        assert!(big < 0.015 && mean < 0.3, "text differs at ×{scale}");
     }
 }
 
