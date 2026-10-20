@@ -60,7 +60,10 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true)
             .with_icon(window_icon()),
         multisampling: 4,
-        renderer: eframe::Renderer::Glow,
+        // glow until the canvas moves onto the new renderer (phase 3 of
+        // docs/updates/wgpu-renderer.md): masks, groups, blends and glass are GL
+        // callbacks. DV_WGPU=1 runs eframe on wgpu to try it (those effects off).
+        renderer: if std::env::var_os("DV_WGPU").is_some() { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow },
         ..Default::default()
     };
     eframe::run_native("Drifting VOID", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))))

@@ -39,6 +39,12 @@ pub fn set_shadow(on: bool) {
 }
 
 /// GL glass path works (independent of the glass on/off setting).
+/// Not running on glow (wgpu): no GL callbacks, so glass, masks, groups and blends
+/// take their CPU/opaque paths.
+pub fn no_gl() {
+    FAILED.store(true, Ordering::Relaxed);
+}
+
 pub fn gl_ok() -> bool {
     READY.load(Ordering::Relaxed) || !FAILED.load(Ordering::Relaxed)
 }

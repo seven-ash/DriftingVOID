@@ -964,6 +964,9 @@ fn is_paint_layer(k: &LayerKind) -> bool {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         crate::glass::load_settings();
+        if cc.gl.is_none() {
+            crate::glass::no_gl();
+        }
         cc.egui_ctx.set_fonts(theme::font_defs());
         theme::apply_visuals(&cc.egui_ctx);
         let scrub_ch = std::sync::mpsc::channel();
