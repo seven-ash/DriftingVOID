@@ -101,8 +101,6 @@ pub struct Settings {
     /// Mask edge: guided-filter radius (0 = hard edge) and grow (+) / shrink (-) in px.
     pub mask_refine: f32,
     pub mask_grow: f32,
-    /// The edge (wire) map in the loupe's edge view (Shift while dragging).
-    pub edge_lines: bool,
 }
 
 impl Default for Settings {
@@ -136,7 +134,6 @@ impl Default for Settings {
             wand_tol: 24.0,
             mask_refine: 2.0,
             mask_grow: 1.0,
-            edge_lines: true,
         }
     }
 }
@@ -5411,22 +5408,21 @@ impl App {
         let zoom = (self.zoom * 6.0).max(4.0);
         let ppp = ctx.pixels_per_point();
         // Shift while dragging: the edge view instead (a third of the magnification,
-        // so nine times the area; levels stretched; Canny edges on a dimmed picture
-        // when 경계선 is on). DV_LOUPE=edge holds it for captures.
+        // so nine times the area; levels stretched; Canny edges on a dimmed
+        // picture). DV_LOUPE=edge holds it for captures.
         let edge_view = ctx.input(|i| i.modifiers.shift) || std::env::var("DV_LOUPE").is_ok_and(|v| v == "edge");
         if edge_view {
             let zoom2 = zoom / 3.0;
-            let lines_on = self.s.edge_lines;
-            let key2 = [target.x, target.y, zoom2, if lines_on { 1.0 } else { 0.0 }];
+            let key2 = [target.x, target.y, zoom2, 1.0];
             if self.edge_tex.as_ref().is_none_or(|(_, k)| *k != key2) {
                 let region = Rect::from_center_size(target, vec2(2.0 * r / zoom2, 2.0 * r / zoom2));
                 let m = zoom2 * ppp;
                 if let Ok(pm) = crate::export::render(&self.doc, region, m, None) {
                     let (w, h) = (pm.width() as usize, pm.height() as usize);
                     let mut px = pm.data().to_vec();
-                    let edges = lines_on.then(|| crate::edges::canny(&crate::edges::luminance(&px), w, h, (m * 0.8).clamp(1.0, 4.0), 0.85));
+                    let e = crate::edges::canny(&crate::edges::luminance(&px), w, h, (m * 0.8).clamp(1.0, 4.0), 0.85);
                     crate::edges::levels(&mut px);
-                    if let Some(e) = edges {
+                    {
                         for (k, p) in px.chunks_exact_mut(4).enumerate() {
                             if e[k] {
                                 p.copy_from_slice(&[255, 226, 120, 255]);
@@ -9256,14 +9252,6 @@ impl App {
         }
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
         let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
-        // the loupe's edge view (Shift while dragging a line end or corner)
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label("루페 Shift");
-            if ui.selectable_label(self.s.edge_lines, "경계선").on_hover_text("끄는 중 Shift: 넓게 · 자동 레벨 · 경계선").clicked() {
-                self.s.edge_lines = !self.s.edge_lines;
-            }
-        });
         let mut ch = ui.checkbox(&mut grid, "격자").changed();
         let mut light = sp.light;
         let mut lon = light.is_some();
