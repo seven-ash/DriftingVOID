@@ -161,3 +161,60 @@ fn golden_room_timeline() {
     let region = doc.content_bounds().unwrap();
     check("room_t1", &render(&doc, region, 1.0, None).unwrap());
 }
+
+/// Difference statistics between two pictures: share of pixels off by more than
+/// 8 levels, mean difference, worst.
+fn diff(a: &Pixmap, b: &Pixmap) -> (f64, f64, u32) {
+    assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+    let n = (a.width() * a.height()) as f64;
+    let (mut big, mut sum, mut worst) = (0usize, 0u64, 0u32);
+    for (x, y) in a.data().chunks(4).zip(b.data().chunks(4)) {
+        let d = x.iter().zip(y).map(|(p, q)| (*p as i32 - *q as i32).unsigned_abs()).max().unwrap();
+        worst = worst.max(d);
+        sum += d as u64;
+        if d > 8 {
+            big += 1;
+        }
+    }
+    (big as f64 / n, sum as f64 / n, worst)
+}
+
+/// The GPU export against the CPU reference on the golden scenes (skipped
+/// without a GPU). Tolerances: under 0.5 % of pixels off by more than 8 levels,
+/// mean difference under 0.5 level (resampling and edge coverage differ a
+/// little; anything structural fails).
+#[test]
+fn gpu_parity() {
+    let cases: Vec<(&str, Document, egui::Pos2, egui::Vec2, f32, f32, Option<Color32>, u8)> = {
+        let flat = flat_doc();
+        let fr = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let room = room_doc(false, 0.0);
+        let rr = room.content_bounds().unwrap();
+        let room_t = room_doc(true, 1.0);
+        vec![
+            ("flat", flat.clone(), fr.center(), fr.size(), 0.0, 1.0, Some(Color32::WHITE), 1),
+            ("flat_ss2", flat.clone(), fr.center(), fr.size(), 0.0, 1.0, Some(Color32::WHITE), 2),
+            ("flat_rot", flat, fr.center(), vec2(300.0, 200.0), 0.35, 1.5, None, 1),
+            ("room", room.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
+            ("room_ss2", room, rr.center(), rr.size(), 0.0, 0.75, None, 2),
+            ("room_t1", room_t, rr.center(), rr.size(), 0.0, 1.0, None, 1),
+        ]
+    };
+    let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"));
+    let mut fails = Vec::new();
+    for (name, doc, c, size, rot, scale, bg, k) in cases {
+        let cpu = render_ss(&doc, c, size, rot, scale, bg, k).unwrap();
+        let Some(gpu) = crate::gpu::with_gpu(|g| g.render_ss(&doc, c, size, rot, scale, bg, k)) else {
+            eprintln!("no GPU: parity skipped");
+            return;
+        };
+        let gpu = gpu.unwrap();
+        crate::export::to_rgba(&gpu).save(dir.join(format!("{name}.gpu.got.png"))).unwrap();
+        let (big, mean, worst) = diff(&cpu, &gpu);
+        eprintln!("{name}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
+        if big > 0.005 || mean > 0.5 {
+            fails.push(name);
+        }
+    }
+    assert!(fails.is_empty(), "GPU differs from the CPU reference: {fails:?}");
+}

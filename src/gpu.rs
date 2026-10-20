@@ -1,0 +1,894 @@
+//! GPU export (render overhaul phase 2, docs/updates/wgpu-renderer.md).
+//!
+//! Draws a frame description (`scene.rs`) on a headless wgpu device. Each 2D
+//! layer is still rasterized by the CPU code (tiny-skia, `export::draw_layer`),
+//! but only into its own box, aligned to the output pixels, and kept on the GPU
+//! across frames while it doesn't change. Projection warps, extrusion caps,
+//! compositing, blend modes, masks and supersampling run on the GPU. The CPU
+//! export (`export.rs`) stays as the reference (golden images, parity tests,
+//! `DV_CPU_EXPORT=1`).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use eframe::wgpu;
+use egui::{Color32, Pos2, Rect, vec2};
+use tiny_skia::{Pixmap, Transform};
+use wgpu::util::DeviceExt;
+
+use crate::doc::{Blend, Document, Layer};
+use crate::export::{FlatCache, MaskMap, output_size};
+use crate::scene::{Draw, Projected};
+
+const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// One picture to draw, prepared on the CPU side.
+enum Node {
+    /// A picture at `off` (target pixels) put over the target.
+    Over { img: Img, off: [i32; 2], opacity: f32 },
+    /// A flattened layer through `hi` (inverse homography, target -> canvas).
+    Warp { img: Img, hi: [[f32; 3]; 3], src: [f32; 3], rect: [i32; 4], opacity: f32, shade: f32 },
+    /// Text with a blend mode.
+    Blend { img: Img, off: [i32; 2], mode: Blend, opacity: f32 },
+    /// Drawn alone into a target of its own, then blended down once.
+    Group { inner: Vec<Node>, rect: [i32; 4], mode: Blend, opacity: f32 },
+    /// Extrusion side triangles (x, y, premultiplied rgba; pixels of `rect`'s
+    /// box), drawn multisampled then put over the target; `scissor` in box pixels.
+    Sides { verts: Vec<[f32; 6]>, rect: [i32; 4], scissor: [u32; 4] },
+    /// Drawn alone, then multiplied by a mask's keep values.
+    Masked { inner: Vec<Node>, keep: Img, off: [i32; 2], rect: [i32; 4], outside: f32 },
+}
+
+/// A texture: cached, or still to be rasterized (index into the job list).
+enum Img {
+    Ready(Arc<wgpu::Texture>),
+    Job(usize),
+}
+
+type Raster = Box<dyn FnOnce() -> Option<(Vec<u8>, u32, u32)> + Send>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Key {
+    id: u64,
+    content: u64,
+    rect: [i32; 4],
+    view: [u32; 4],
+}
+
+pub struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    layout: wgpu::BindGroupLayout,
+    over: wgpu::RenderPipeline,
+    warp: wgpu::RenderPipeline,
+    blend: wgpu::RenderPipeline,
+    mask: wgpu::RenderPipeline,
+    down: wgpu::RenderPipeline,
+    tri: wgpu::RenderPipeline,
+    dummy: wgpu::Texture,
+    pub max_side: u32,
+    pub adapter: String,
+    /// Flattened 3D layers, kept across a job's frames.
+    flat: Arc<FlatCache>,
+    /// Rasterized 2D layers and mask keep images, by content and placement.
+    rasters: HashMap<Key, (Arc<wgpu::Texture>, u64)>,
+    /// Textures of flattened 3D layers (the entry is kept so its address stays unique).
+    flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>, Arc<wgpu::Texture>, u64)>,
+    /// Full-size targets: (w, h, slot).
+    pool: HashMap<(u32, u32, usize), wgpu::Texture>,
+    frame: u64,
+}
+
+static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
+
+thread_local! {
+    /// DV_TIMING: milliseconds spent preparing (scene, flattening), rasterizing
+    /// and on the GPU (draw and read back), summed over a job's frames.
+    static TIMING: std::cell::Cell<bool> = std::cell::Cell::new(std::env::var_os("DV_TIMING").is_some());
+    static STATS: std::cell::Cell<[f64; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+}
+
+/// The summed stage times (ms) since the last call, and resets them.
+pub fn take_stats() -> [f64; 3] {
+    STATS.with(|c| c.replace([0.0; 3]))
+}
+
+/// Runs `f` with the shared GPU device (made on first use). None: no usable GPU,
+/// or `DV_CPU_EXPORT` is set.
+pub fn with_gpu<R>(f: impl FnOnce(&mut Gpu) -> R) -> Option<R> {
+    if std::env::var_os("DV_CPU_EXPORT").is_some() {
+        return None;
+    }
+    let mut g = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        *g = Some(match Gpu::new() {
+            Ok(gpu) => Some(gpu),
+            Err(e) => {
+                eprintln!("GPU export unavailable: {e}");
+                None
+            }
+        });
+    }
+    let gpu = g.as_mut().unwrap().as_mut()?;
+    // a GPU error (device lost, a driver fault) must not take the export down:
+    // the GPU is switched off for this run and the caller uses the CPU
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(gpu))) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            eprintln!("GPU export failed; using the CPU from now on");
+            *g = Some(None);
+            None
+        }
+    }
+}
+
+/// An export picture (`export::render_ss`) on the GPU when there is one, else on
+/// the CPU. `keep`: the layers stay cached for the next frame (video export);
+/// otherwise they are dropped afterwards.
+#[allow(clippy::too_many_arguments)]
+pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8, keep: bool) -> Result<Pixmap, String> {
+    let r = with_gpu(|g| {
+        let r = g.render_ss(doc, center, size, rot, scale, bg, k);
+        if !keep {
+            g.clear();
+        }
+        r
+    });
+    match r {
+        Some(Ok(pm)) => Ok(pm),
+        _ => crate::export::render_ss(doc, center, size, rot, scale, bg, k),
+    }
+}
+
+/// Drops what the GPU keeps between frames (start and end of a video export).
+pub fn end_job() {
+    if let Ok(mut g) = GPU.lock() {
+        if let Some(Some(g)) = g.as_mut() {
+            g.clear();
+        }
+    }
+}
+
+impl Gpu {
+    fn new() -> Result<Gpu, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|e| e.to_string())?;
+        let info = adapter.get_info();
+        if info.device_type == wgpu::DeviceType::Cpu {
+            return Err("software adapter".into());
+        }
+        let limits = adapter.limits();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("export"),
+            required_limits: wgpu::Limits { max_texture_dimension_2d: limits.max_texture_dimension_2d, ..wgpu::Limits::downlevel_defaults() },
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("export"), source: wgpu::ShaderSource::Wgsl(include_str!("gpu.wgsl").into()) });
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                tex_entry(1),
+                tex_entry(2),
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let over_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+        };
+        let pipe = |entry: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format: FMT, blend, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let over = pipe("fs_over", Some(over_blend));
+        let warp = pipe("fs_warp", Some(over_blend));
+        let blend = pipe("fs_blend", None);
+        let mask = pipe("fs_mask", Some(over_blend));
+        let down = pipe("fs_down", None);
+        let tri = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sides"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_tri"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 24,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_tri"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: FMT, blend: Some(over_blend), write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState { count: 4, ..Default::default() },
+            multiview_mask: None,
+            cache: None,
+        });
+        let dummy = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        Ok(Gpu {
+            device,
+            queue,
+            layout,
+            over,
+            warp,
+            blend,
+            mask,
+            down,
+            tri,
+            dummy,
+            max_side: limits.max_texture_dimension_2d,
+            adapter: info.name,
+            flat: Arc::default(),
+            rasters: HashMap::new(),
+            flats: HashMap::new(),
+            pool: HashMap::new(),
+            frame: 0,
+        })
+    }
+
+    /// Drops everything kept between frames (after a job).
+    pub fn clear(&mut self) {
+        self.flat = Arc::default();
+        self.rasters.clear();
+        self.flats.clear();
+        self.pool.clear();
+    }
+
+    fn texture(&self, w: u32, h: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            usage,
+            view_formats: &[],
+        })
+    }
+
+    fn upload(&self, data: &[u8], w: u32, h: u32) -> Arc<wgpu::Texture> {
+        let t = self.texture(w, h, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        Arc::new(t)
+    }
+
+    fn pooled(&mut self, w: u32, h: u32, slot: usize) -> wgpu::Texture {
+        self.pool
+            .entry((w, h, slot))
+            .or_insert_with(|| {
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: FMT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            })
+            .clone()
+    }
+
+    /// As `export::render_ss`: the picture of `size` (canvas units) about
+    /// `center`, turned `rot`, at `scale` output pixels per unit, supersampled
+    /// `k`×. Err when it doesn't fit the GPU (the caller uses the CPU).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_ss(&mut self, doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8) -> Result<Pixmap, String> {
+        let mut k = k.clamp(1, 4) as u32;
+        let rotated = rot.abs() >= 1e-6;
+        // the picture drawn (the box round a turned frame) at s = scale·k
+        let geom = |k: u32| {
+            let s = scale * k as f32;
+            if rotated {
+                let (sn, cs) = rot.sin_cos();
+                let h = size * 0.5;
+                let ext = vec2((h.x * cs).abs() + (h.y * sn).abs(), (h.x * sn).abs() + (h.y * cs).abs());
+                let bb = Rect::from_center_size(center, ext * 2.0 + vec2(4.0, 4.0) / s);
+                let big = ((size.x * s).round().max(1.0) as u32, (size.y * s).round().max(1.0) as u32);
+                (s, bb, output_size(bb, s), big)
+            } else {
+                let r = Rect::from_center_size(center, size);
+                let d = output_size(r, s);
+                (s, r, d, d)
+            }
+        };
+        while k > 1 && {
+            let (_, _, (w, h), _) = geom(k);
+            w > self.max_side || h > self.max_side
+        } {
+            k -= 1;
+        }
+        let (s, full, (tw, th), big) = geom(k);
+        if tw > self.max_side || th > self.max_side {
+            return Err(format!("GPU 한도 초과: {tw}×{th}px"));
+        }
+        let (fw, fh) = (big.0 / k, big.1 / k);
+        self.frame += 1;
+        let g = self.frame;
+        self.rasters.retain(|_, v| v.1 + 1 >= g);
+        self.flats.retain(|_, v| v.2 + 1 >= g);
+        self.flat.sweep();
+
+        // 1. what to draw, with the rasterizing left as jobs
+        let t0 = std::time::Instant::now();
+        let scene = crate::scene::build(doc);
+        let view = View { full, s, tw, th, k: k as f32 };
+        let cull = full.expand(2.0 / s);
+        let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
+        let mut nodes = Vec::new();
+        for item in scene.items.into_iter().filter(|it| it.bounds.intersects(cull)) {
+            let b = item.bounds;
+            self.prepare(item.draw, b, &view, &mut jobs, &mut nodes);
+        }
+
+        // 2. rasterize on every core, then upload
+        let t1 = std::time::Instant::now();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let n = jobs.len();
+        let (rasters, keys): (Vec<Raster>, Vec<Option<Key>>) = jobs.into_iter().unzip();
+        let queue: Mutex<Vec<(usize, Raster)>> = Mutex::new(rasters.into_iter().enumerate().rev().collect());
+        let done: Mutex<Vec<Option<(Vec<u8>, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
+        std::thread::scope(|sc| {
+            for _ in 0..threads.min(n) {
+                sc.spawn(|| {
+                    crate::export::set_ss(view.k);
+                    loop {
+                        let Some((i, job)) = queue.lock().unwrap().pop() else { break };
+                        let r = job();
+                        done.lock().unwrap()[i] = r;
+                    }
+                });
+            }
+        });
+        let mut ready: Vec<Arc<wgpu::Texture>> = Vec::with_capacity(n);
+        for (r, key) in done.into_inner().unwrap().into_iter().zip(keys) {
+            let t = match r {
+                Some((data, w, h)) => self.upload(&data, w, h),
+                None => Arc::new(self.texture(1, 1, wgpu::TextureUsages::TEXTURE_BINDING)),
+            };
+            if let Some(key) = key {
+                self.rasters.insert(key, (t.clone(), g));
+            }
+            ready.push(t);
+        }
+
+        // 3. draw
+        let t2 = std::time::Instant::now();
+        let target = self.pooled(tw, th, 0);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let clear = bg.map_or(wgpu::Color::TRANSPARENT, |c| {
+            let [r, gg, b, a] = c.to_srgba_unmultiplied().map(|v| v as f64 / 255.0);
+            wgpu::Color { r: r * a, g: gg * a, b: b * a, a }
+        });
+        self.clear_to(&mut enc, &target, clear);
+        let bgp = bg.map(|c| {
+            let [r, gg, b, a] = c.to_srgba_unmultiplied().map(|v| v as f32 / 255.0);
+            [r * a, gg * a, b * a, a]
+        });
+        for nd in &nodes {
+            self.run(&mut enc, nd, &target, 0, &ready, &view, bgp);
+        }
+        // 4. down to the output size (and turned), then read back
+        let out = self.texture(fw, fh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let mut u = Uniform::new([0.0, 0.0, fw as f32, fh as f32], fw, fh);
+        u.p1[3] = k as f32;
+        if rotated {
+            let (sn, cs) = rot.sin_cos();
+            u.rot = [cs, sn, big.0 as f32 * 0.5, big.1 as f32 * 0.5];
+            u.rot2 = [(full.min.x - center.x) * s, (full.min.y - center.y) * s, 0.0, 0.0];
+        } else {
+            u.rot = [1.0, 0.0, 0.0, 0.0];
+        }
+        self.pass(&mut enc, &self.down, &out, &u, &target, &self.dummy);
+        let bpr = (fw * 4).div_ceil(256) * 256;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bpr as u64 * fh as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(fh) } },
+            wgpu::Extent3d { width: fw, height: fh, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        let mut data = Vec::with_capacity((fw * fh * 4) as usize);
+        {
+            let m = slice.get_mapped_range().map_err(|e| e.to_string())?;
+            for row in m.chunks(bpr as usize).take(fh as usize) {
+                data.extend_from_slice(&row[..(fw * 4) as usize]);
+            }
+        }
+        buf.unmap();
+        if TIMING.with(|c| c.get()) {
+            let t3 = std::time::Instant::now();
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
+            STATS.with(|c| {
+                let mut v = c.get();
+                for (i, x) in [ms(t0, t1), ms(t1, t2), ms(t2, t3)].into_iter().enumerate() {
+                    v[i] += x;
+                }
+                c.set(v);
+            });
+        }
+        Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(fw, fh).ok_or("크기 오류")?).ok_or_else(|| "이미지 버퍼를 만들 수 없음".into())
+    }
+
+    /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
+    fn prepare(&mut self, d: Draw, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
+        match d {
+            Draw::Flat(layer) => {
+                let opacity = layer.opacity;
+                if let Some((img, off)) = self.raster(layer, bounds, v, jobs) {
+                    out.push(Node::Over { img, off, opacity });
+                }
+            }
+            Draw::Blend(layer, mode) => {
+                let opacity = layer.opacity;
+                if let Some((img, off)) = self.raster(layer, bounds, v, jobs) {
+                    out.push(Node::Blend { img, off, mode, opacity });
+                }
+            }
+            Draw::Group { inner, mode, opacity } => {
+                let mut nodes = Vec::new();
+                self.prepare(*inner, bounds, v, jobs, &mut nodes);
+                if let Some(rect) = v.px(bounds) {
+                    out.push(Node::Group { inner: nodes, rect, mode, opacity });
+                }
+            }
+            Draw::Masked { inner, mask, map } => {
+                let mut nodes = Vec::new();
+                self.prepare(*inner, bounds, v, jobs, &mut nodes);
+                let Some(rect) = v.px(bounds) else { return };
+                let strength = mask.opacity.clamp(0.0, 1.0);
+                let outside = 1.0 - if mask.mask_invert { strength } else { 0.0 };
+                let keep = self.keep(mask, map, rect, v, jobs);
+                out.push(Node::Masked { inner: nodes, keep, off: [rect[0], rect[1]], rect, outside });
+            }
+            Draw::Projected(p) => self.projected(*p, v, out),
+        }
+    }
+
+    /// A 2D layer rasterized into its box (target pixels), from the cache when
+    /// it hasn't changed.
+    fn raster(&mut self, layer: Layer, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>) -> Option<(Img, [i32; 2])> {
+        let rect = v.px(bounds)?;
+        let key = Key { id: layer.id, content: crate::canvas::content_key(&layer), rect, view: v.key() };
+        let off = [rect[0], rect[1]];
+        if let Some(e) = self.rasters.get_mut(&key) {
+            e.1 = self.frame;
+            return Some((Img::Ready(e.0.clone()), off));
+        }
+        let (full, s) = (v.full, v.s);
+        let job: Raster = Box::new(move || {
+            let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
+            let mut pm = Pixmap::new(w, h)?;
+            let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(s, s).post_translate(-rect[0] as f32, -rect[1] as f32);
+            let world = Rect::from_min_max(full.min + vec2(rect[0] as f32, rect[1] as f32) / s, full.min + vec2(rect[2] as f32, rect[3] as f32) / s);
+            crate::export::draw_layer(&mut pm, &layer, base, world.expand(2.0 / s), s);
+            Some((pm.take(), w, h))
+        });
+        jobs.push((job, Some(key)));
+        Some((Img::Job(jobs.len() - 1), off))
+    }
+
+    /// A mask's keep values (1 − hidden) over `rect`.
+    fn keep(&mut self, mask: Layer, map: Option<MaskMap>, rect: [i32; 4], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>) -> Img {
+        let mut hm = std::collections::hash_map::DefaultHasher::new();
+        {
+            use std::hash::Hash;
+            (crate::canvas::content_key(&mask), mask.opacity.to_bits(), mask.mask_invert).hash(&mut hm);
+            if let Some(m) = map {
+                for x in [m.last.x, m.last.y, m.c.x, m.c.y, m.th, m.s] {
+                    x.to_bits().hash(&mut hm);
+                }
+            }
+        }
+        let key = Key { id: mask.id, content: std::hash::Hasher::finish(&hm), rect, view: v.key() };
+        if let Some(e) = self.rasters.get_mut(&key) {
+            e.1 = self.frame;
+            return Img::Ready(e.0.clone());
+        }
+        let (full, s) = (v.full, v.s);
+        let job: Raster = Box::new(move || {
+            let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
+            let mut data = vec![0u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let p = full.min + vec2((rect[0] as f32 + x as f32 + 0.5) / s, (rect[1] as f32 + y as f32 + 0.5) / s);
+                    let hide = crate::export::mask_hide(&mask, map, p);
+                    let a = (255.0 * (1.0 - hide)).round() as u8;
+                    let i = ((y * w + x) * 4) as usize;
+                    data[i..i + 4].copy_from_slice(&[a, a, a, 255]);
+                }
+            }
+            Some((data, w, h))
+        });
+        jobs.push((job, Some(key)));
+        Img::Job(jobs.len() - 1)
+    }
+
+    fn projected(&mut self, p: Projected, v: &View, out: &mut Vec<Node>) {
+        let Projected { layer, pl, cam, clip, light } = p;
+        let (full, s) = (v.full, v.s as f64);
+        let out_m = [[s, 0.0, -full.min.x as f64 * s], [0.0, s, -full.min.y as f64 * s], [0.0, 0.0, 1.0]];
+        let h = crate::persp::mul_mm(&out_m, &pl.homography(&cam));
+        let res = crate::export::magnification(&h, layer.bounds().unwrap_or(full)).clamp(0.05, 4.0);
+        let clip = clip.map(|m| Rect::from_min_max(((m.min - full.min) * v.s).to_pos2(), ((m.max - full.min) * v.s).to_pos2()));
+        let Some(fl) = self.flat.get(&layer, &pl, res) else { return };
+        let ptr = Arc::as_ptr(&fl) as usize;
+        let tex = match self.flats.get_mut(&ptr) {
+            Some(e) => {
+                e.2 = self.frame;
+                e.1.clone()
+            }
+            None => {
+                let t = self.upload(fl.0.data(), fl.0.width(), fl.0.height());
+                self.flats.insert(ptr, (fl.clone(), t.clone(), self.frame));
+                t
+            }
+        };
+        let (rect, fres) = (fl.1, fl.2);
+        let warp = |h: &crate::persp::M3, shade: f32| -> Option<Node> {
+            let hi = crate::persp::invert(h)?;
+            let q = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].iter().map(|p| crate::persp::apply_h(h, *p)).collect::<Option<Vec<_>>>()?;
+            let mut bb = Rect::from_points(&q);
+            if let Some(c) = clip {
+                bb = bb.intersect(c);
+                if !bb.is_positive() {
+                    return None;
+                }
+            }
+            let r = [
+                (bb.min.x.floor() as i32 - 1).max(0),
+                (bb.min.y.floor() as i32 - 1).max(0),
+                (bb.max.x.ceil() as i32 + 1).min(v.tw as i32),
+                (bb.max.y.ceil() as i32 + 1).min(v.th as i32),
+            ];
+            if r[2] <= r[0] || r[3] <= r[1] {
+                return None;
+            }
+            let hi = hi.map(|row| row.map(|x| x as f32));
+            Some(Node::Warp { img: Img::Ready(tex.clone()), hi, src: [rect.min.x, rect.min.y, fres], rect: r, opacity: layer.opacity, shade })
+        };
+        if pl.thick <= 0.0 {
+            out.extend(warp(&h, 1.0));
+            return;
+        }
+        let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+        if let Some(edges) = &fl.3 {
+            let to_full = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * v.s, (p.y - full.min.y) * v.s));
+            let sides = crate::extrude::sides(edges, &pl, &to_full, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE);
+            let pts: Vec<Pos2> = sides.iter().flat_map(|sd| sd.q).collect();
+            if !pts.is_empty() {
+                let bb = Rect::from_points(&pts).expand(2.0);
+                let r = [(bb.min.x.floor() as i32).max(0), (bb.min.y.floor() as i32).max(0), (bb.max.x.ceil() as i32).min(v.tw as i32), (bb.max.y.ceil() as i32).min(v.th as i32)];
+                let boxr = Rect::from_min_max(egui::pos2(r[0] as f32, r[1] as f32), egui::pos2(r[2] as f32, r[3] as f32));
+                let sc = clip.map_or(boxr, |c| c.intersect(boxr));
+                if r[2] > r[0] && r[3] > r[1] && sc.is_positive() {
+                    let (ox, oy) = (r[0] as f32, r[1] as f32);
+                    let (bw, bh) = ((r[2] - r[0]) as u32, (r[3] - r[1]) as u32);
+                    let sx0 = ((sc.min.x.floor() - ox).max(0.0) as u32).min(bw - 1);
+                    let sy0 = ((sc.min.y.floor() - oy).max(0.0) as u32).min(bh - 1);
+                    let sx1 = ((sc.max.x.ceil() - ox).max(0.0) as u32).min(bw);
+                    let sy1 = ((sc.max.y.ceil() - oy).max(0.0) as u32).min(bh);
+                    let scissor = [sx0, sy0, sx1.saturating_sub(sx0).max(1), sy1.saturating_sub(sy0).max(1)];
+                    let alpha = (layer.opacity.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+                    let col = |c: [f32; 3]| {
+                        let c8 = c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) / 255.0);
+                        [c8[0] * alpha, c8[1] * alpha, c8[2] * alpha, alpha]
+                    };
+                    let mut verts = Vec::with_capacity(sides.len() * 6);
+                    for sd in &sides {
+                        // as fill_sides: each quad stretched a little along its edge
+                        let [a, b, c, d] = sd.q.map(|p| egui::pos2(p.x - ox, p.y - oy));
+                        let grow = |p: Pos2, q: Pos2| {
+                            let w = q - p;
+                            let l = w.length();
+                            if l > 1e-3 { p - w / l * 0.35 } else { p }
+                        };
+                        let (a, d) = (grow(a, b), grow(d, c));
+                        let (b, c) = (grow(b, a), grow(c, d));
+                        let (ca, cb) = (col(sd.ca), col(sd.cb));
+                        let vx = |p: Pos2, c: [f32; 4]| [p.x, p.y, c[0], c[1], c[2], c[3]];
+                        verts.extend([vx(a, ca), vx(b, cb), vx(c, cb), vx(a, ca), vx(c, cb), vx(d, ca)]);
+                    }
+                    out.push(Node::Sides { verts, rect: r, scissor });
+                }
+            }
+        }
+        let (off, n) = crate::extrude::visible_cap(&pl, &to_eye);
+        let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(&cam, off)) };
+        out.extend(warp(&hc, light.map_or(1.0, |l| l.shade(n))));
+    }
+
+    fn clear_to(&self, enc: &mut wgpu::CommandEncoder, t: &wgpu::Texture, c: wgpu::Color) {
+        let view = t.create_view(&Default::default());
+        let _ = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(c), store: wgpu::StoreOp::Store } })],
+            ..Default::default()
+        });
+    }
+
+    /// One rectangle drawn with `pipe` onto `target`.
+    fn pass(&self, enc: &mut wgpu::CommandEncoder, pipe: &wgpu::RenderPipeline, target: &wgpu::Texture, u: &Uniform, t0: &wgpu::Texture, t1: &wgpu::Texture) {
+        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
+        let (v0, v1) = (t0.create_view(&Default::default()), t1.create_view(&Default::default()));
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&v0) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v1) },
+            ],
+        });
+        let view = target.create_view(&Default::default());
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            ..Default::default()
+        });
+        rp.set_pipeline(pipe);
+        rp.set_bind_group(0, &bg, &[]);
+        rp.draw(0..6, 0..1);
+    }
+
+    fn img(i: &Img, ready: &[Arc<wgpu::Texture>]) -> wgpu::Texture {
+        match i {
+            Img::Ready(t) => (**t).clone(),
+            Img::Job(j) => (*ready[*j]).clone(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], v: &View, bgp: Option<[f32; 4]>) {
+        let (tw, th) = (v.tw, v.th);
+        match nd {
+            Node::Over { img, off, opacity } => {
+                let t = Self::img(img, ready);
+                let r = [off[0] as f32, off[1] as f32, (off[0] + t.width() as i32) as f32, (off[1] + t.height() as i32) as f32];
+                let mut u = Uniform::new(clamp_rect(r, tw, th), tw, th);
+                u.tsize[2] = *opacity;
+                u.p0 = [off[0] as f32, off[1] as f32, 0.0, 0.0];
+                self.pass(enc, &self.over, target, &u, &t, &self.dummy);
+            }
+            Node::Warp { img, hi, src, rect, opacity, shade } => {
+                let t = Self::img(img, ready);
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.tsize[2] = *opacity;
+                u.tsize[3] = *shade;
+                u.h0 = [hi[0][0], hi[0][1], hi[0][2], 0.0];
+                u.h1 = [hi[1][0], hi[1][1], hi[1][2], 0.0];
+                u.h2 = [hi[2][0], hi[2][1], hi[2][2], 0.0];
+                u.p1 = [src[0], src[1], src[2], 0.0];
+                self.pass(enc, &self.warp, target, &u, &t, &self.dummy);
+            }
+            Node::Blend { img, off, mode, opacity } => {
+                let t = Self::img(img, ready);
+                let r = [off[0] as f32, off[1] as f32, (off[0] + t.width() as i32) as f32, (off[1] + t.height() as i32) as f32];
+                let back = self.backdrop(enc, target, depth, tw, th);
+                let mut u = Uniform::new(clamp_rect(r, tw, th), tw, th);
+                u.tsize[2] = *opacity;
+                u.p0 = [off[0] as f32, off[1] as f32, mode_code(*mode), 0.0];
+                u.p1[0] = bgp.is_some() as u8 as f32;
+                u.bg = bgp.unwrap_or_default();
+                self.pass(enc, &self.blend, target, &u, &t, &back);
+            }
+            Node::Group { inner, rect, mode, opacity } => {
+                let g = self.pooled(tw, th, 2 + depth * 2);
+                self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
+                for n in inner {
+                    self.run(enc, n, &g, depth + 1, ready, v, bgp);
+                }
+                let back = self.backdrop(enc, target, depth, tw, th);
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.tsize[2] = *opacity;
+                u.p0 = [0.0, 0.0, mode_code(*mode), 0.0];
+                u.p1[0] = bgp.is_some() as u8 as f32;
+                u.bg = bgp.unwrap_or_default();
+                self.pass(enc, &self.blend, target, &u, &g, &back);
+            }
+            Node::Sides { verts, rect, scissor } => {
+                let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
+                let ms = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: FMT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let res = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+                let flat: Vec<f32> = verts.iter().flatten().copied().collect();
+                let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: f32_bytes(&flat), usage: wgpu::BufferUsages::VERTEX });
+                let u = Uniform::new([0.0, 0.0, w as f32, h as f32], w, h);
+                let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
+                let dv = self.dummy.create_view(&Default::default());
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dv) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dv) },
+                    ],
+                });
+                {
+                    let (msv, rv) = (ms.create_view(&Default::default()), res.create_view(&Default::default()));
+                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &msv,
+                            depth_slice: None,
+                            resolve_target: Some(&rv),
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+                        })],
+                        ..Default::default()
+                    });
+                    rp.set_pipeline(&self.tri);
+                    rp.set_bind_group(0, &bg, &[]);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+                    rp.draw(0..verts.len() as u32, 0..1);
+                }
+                let r = [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32];
+                let mut u = Uniform::new(r, tw, th);
+                u.p0 = [rect[0] as f32, rect[1] as f32, 0.0, 0.0];
+                self.pass(enc, &self.over, target, &u, &res, &self.dummy);
+            }
+            Node::Masked { inner, keep, off, rect, outside } => {
+                let g = self.pooled(tw, th, 2 + depth * 2);
+                self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
+                for n in inner {
+                    self.run(enc, n, &g, depth + 1, ready, v, bgp);
+                }
+                let k = Self::img(keep, ready);
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.p0 = [off[0] as f32, off[1] as f32, 0.0, *outside];
+                self.pass(enc, &self.mask, target, &u, &g, &k);
+            }
+        }
+    }
+
+    /// A copy of `target` as it is now (blend modes read what is below).
+    fn backdrop(&mut self, enc: &mut wgpu::CommandEncoder, target: &wgpu::Texture, depth: usize, tw: u32, th: u32) -> wgpu::Texture {
+        let b = self.pooled(tw, th, 3 + depth * 2);
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &b, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+        );
+        b
+    }
+}
+
+/// The drawn picture: its canvas rect, target pixels per unit and size, and the
+/// supersampling factor.
+#[derive(Clone, Copy)]
+struct View {
+    full: Rect,
+    s: f32,
+    tw: u32,
+    th: u32,
+    k: f32,
+}
+
+impl View {
+    /// A canvas rect in whole target pixels (a pixel of margin), None when off.
+    fn px(&self, r: Rect) -> Option<[i32; 4]> {
+        let a = (r.min - self.full.min) * self.s;
+        let b = (r.max - self.full.min) * self.s;
+        let p = [
+            (a.x.floor() as i32 - 1).max(0),
+            (a.y.floor() as i32 - 1).max(0),
+            (b.x.ceil() as i32 + 1).min(self.tw as i32),
+            (b.y.ceil() as i32 + 1).min(self.th as i32),
+        ];
+        (p[2] > p[0] && p[3] > p[1]).then_some(p)
+    }
+
+    fn key(&self) -> [u32; 4] {
+        [self.full.min.x.to_bits(), self.full.min.y.to_bits(), self.s.to_bits(), self.k.to_bits()]
+    }
+}
+
+fn f32_bytes(v: &[f32]) -> &[u8] {
+    // plain f32s
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+fn clamp_rect(r: [f32; 4], tw: u32, th: u32) -> [f32; 4] {
+    [r[0].max(0.0), r[1].max(0.0), r[2].min(tw as f32), r[3].min(th as f32)]
+}
+
+fn mode_code(m: Blend) -> f32 {
+    Blend::ALL.iter().position(|b| *b == m).unwrap_or(0) as f32
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Uniform {
+    rect: [f32; 4],
+    tsize: [f32; 4],
+    h0: [f32; 4],
+    h1: [f32; 4],
+    h2: [f32; 4],
+    p0: [f32; 4],
+    p1: [f32; 4],
+    bg: [f32; 4],
+    rot: [f32; 4],
+    rot2: [f32; 4],
+}
+
+impl Uniform {
+    fn new(rect: [f32; 4], tw: u32, th: u32) -> Self {
+        Uniform { rect, tsize: [tw as f32, th as f32, 1.0, 1.0], rot: [1.0, 0.0, 0.0, 0.0], ..Default::default() }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // plain f32 arrays, no padding
+        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, std::mem::size_of::<Self>()) }
+    }
+}

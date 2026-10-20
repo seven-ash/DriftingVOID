@@ -842,7 +842,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drifting-void"
-version = "0.58.2"
+version = "0.59.0"
 dependencies = [
  "ab_glyph",
  "arboard",
@@ -851,6 +851,7 @@ dependencies = [
  "egui",
  "image",
  "memmap2",
+ "pollster 0.4.0",
  "raw-window-handle",
  "rfd",
  "serde",

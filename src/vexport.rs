@@ -334,6 +334,11 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     let timing = std::env::var_os("DV_TIMING").is_some();
     // flattened 3D layers kept across frames (re-made only when they change)
     let flat = Arc::new(crate::export::FlatCache::default());
+    crate::gpu::end_job();
+    let gpu_render = crate::gpu::with_gpu(|_| ()).is_some();
+    if timing {
+        eprintln!("export renderer: {}", crate::gpu::with_gpu(|g| g.adapter.clone()).unwrap_or_else(|| "CPU".into()));
+    }
     let mut tm = [0f64; 2];
     let mut clock = std::time::Instant::now();
     let mut lap = |k: usize, clock: &mut std::time::Instant| {
@@ -381,7 +386,9 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let bg = if job.codec.alpha() { job.bg } else { Some(job.bg.unwrap_or(Color32::BLACK)) };
         lap(0, &mut clock);
         flat.sweep();
-        let pm = match crate::export::with_frame_cache(&flat, || crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss)) {
+        // on the GPU (layers kept across frames), else on the CPU
+        let on_gpu = if gpu_render { crate::gpu::with_gpu(|g| g.render_ss(&d, r.center(), size, rot, scale, bg, job.ss)).and_then(|r| r.ok()) } else { None };
+        let pm = match on_gpu.map_or_else(|| crate::export::with_frame_cache(&flat, || crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss)), Ok) {
             Ok(pm) => pm,
             Err(e) => return fail(&mut child, e),
         };
@@ -397,6 +404,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         pr.done.store(i + 1, Ordering::Relaxed);
     }
     drop(tx);
+    crate::gpu::end_job();
     let spent = match writer.join() {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
@@ -407,6 +415,10 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     };
     if timing {
         eprintln!("export timing (s): prepare {:.2} render {:.2} (convert + write {:.2}, overlapped) for {total} frames", tm[0], tm[1], spent);
+        let g = crate::gpu::take_stats();
+        if g.iter().any(|x| *x > 0.0) {
+            eprintln!("  GPU path (ms): scene + flatten {:.0}, rasterize {:.0}, GPU draw + read back {:.0}", g[0], g[1], g[2]);
+        }
     }
     if let Some(mut c) = child {
         drop(c.stdin.take());

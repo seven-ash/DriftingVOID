@@ -223,7 +223,7 @@ fn draw_projected(out: &mut Pixmap, p: &Projected, b: &Band) {
                 })
                 .clone()
         };
-        fill_sides(out, &sides, layer.opacity, clip, dy);
+        fill_sides(out, &sides, layer.opacity, clip, 0.0, dy);
     }
     let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
     let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
@@ -269,7 +269,11 @@ impl FlatCache {
     }
 
     #[allow(clippy::type_complexity)]
-    fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>> {
+    pub(crate) fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>> {
+        // in steps of 2^(1/8), rounded up: a layer turning or moving in depth keeps
+        // its flattened picture (and outline) for a while instead of re-making
+        // them every frame, and never gets less sharp than asked
+        let res = 2f32.powf((res.max(1e-3).log2() * 8.0).ceil() / 8.0);
         let key = (layer.id, res.to_bits(), crate::canvas::content_key(layer), pl.segs.clamp(1, 4), pl.thick > 0.0);
         let g = self.frame.load(std::sync::atomic::Ordering::Relaxed);
         let mut m = self.map.lock().unwrap();
@@ -296,7 +300,7 @@ impl FlatCache {
 /// Extrusion side quads (output pixels, far to near) filled with their colours.
 /// Each quad is stretched a little along its edge so neighbours overlap instead
 /// of leaving anti-aliasing seams.
-fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, clip: Option<Rect>, dy: f32) {
+pub(crate) fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, clip: Option<Rect>, dx: f32, dy: f32) {
     let band_h = out.height() as f32;
     let mask = clip.and_then(|c| {
         let mut m = tiny_skia::Mask::new(out.width(), out.height())?;
@@ -306,7 +310,7 @@ fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, cl
     });
     for sd in sides {
         // full-image pixels to this band; sides outside it are skipped
-        let [a, b, c, d] = sd.q.map(|p| egui::pos2(p.x, p.y - dy));
+        let [a, b, c, d] = sd.q.map(|p| egui::pos2(p.x - dx, p.y - dy));
         let (ylo, yhi) = [a.y, b.y, c.y, d.y].iter().fold((f32::MAX, f32::MIN), |m, y| (m.0.min(*y), m.1.max(*y)));
         if yhi < -2.0 || ylo > band_h + 2.0 {
             continue;
@@ -331,7 +335,7 @@ fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, cl
         let (ca, cb) = (to8(sd.ca), to8(sd.cb));
         // colours (and smooth shading) change along the edge: a gradient from end a
         // to end b, as the canvas mesh interpolates them
-        let sh = |p: Pos2| egui::pos2(p.x, p.y - dy);
+        let sh = |p: Pos2| egui::pos2(p.x - dx, p.y - dy);
         let (ma, mb) = (sh(sd.q[0]).lerp(sh(sd.q[3]), 0.5), sh(sd.q[1]).lerp(sh(sd.q[2]), 0.5));
         let grad = (ca != cb && ma.distance(mb) > 0.5)
             .then(|| {
@@ -411,6 +415,12 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
 thread_local! {
     /// The supersampling factor of the render in progress on this thread (1: none).
     static SS_K: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Sets the supersampling factor of the render in progress on this thread (the
+/// GPU export rasterizes layers on worker threads).
+pub(crate) fn set_ss(k: f32) {
+    SS_K.with(|c| c.set(k));
 }
 
 fn srgb_to_lin(c: f32) -> f32 {
@@ -563,7 +573,7 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg:
     }
 }
 
-fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
+pub(crate) fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
     match &layer.kind {
         LayerKind::Audio(_) => {}
         LayerKind::Image(im) => draw_image(pm, im, base, scale, region),

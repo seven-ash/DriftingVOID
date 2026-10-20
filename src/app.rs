@@ -7169,7 +7169,7 @@ impl App {
                     let (scale, ss, q) = (d.scale, d.ss, d.jpeg_quality);
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
-                        let res = crate::export::render_ss(&doc, r.center(), r.size(), rot, scale, bg, ss)
+                        let res = crate::gpu::render_ss(&doc, r.center(), r.size(), rot, scale, bg, ss, false)
                             .and_then(|pm| crate::export::save(&pm, &path, q).map(|_| (pm.width(), pm.height())))
                             .map(|(w, h)| format!("내보냄: {} ({w}×{h})", path.file_name().and_then(|n| n.to_str()).unwrap_or("")))
                             .unwrap_or_else(|e| format!("내보내기 실패: {e}"));

@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.58.2"
+version = "0.59.0"
 edition = "2024"
 
 [[bin]]
@@ -15,6 +15,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "gl
 egui = { version = "0.36.2", default-features = false, features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 memmap2 = "0.9.11"
+pollster = "0.4"
 raw-window-handle = "0.6"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

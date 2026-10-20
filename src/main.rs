@@ -12,6 +12,7 @@ mod export;
 mod extrude;
 mod fontdb;
 mod glass;
+mod gpu;
 #[cfg(test)]
 mod golden;
 mod okhsv;
