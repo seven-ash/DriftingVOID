@@ -18,6 +18,7 @@ mod golden;
 mod okhsv;
 mod penhook;
 mod persp;
+mod playcache;
 mod theme;
 mod io;
 mod raster;

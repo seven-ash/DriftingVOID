@@ -184,7 +184,7 @@ pub fn start(job: Job) -> Arc<Progress> {
 }
 
 /// Sequential full-resolution frames of one video layer.
-struct Feed {
+pub(crate) struct Feed {
     path: PathBuf,
     fps: f64,
     size: (u32, u32),
@@ -202,6 +202,51 @@ struct Feed {
 enum FeedFrame {
     Rgba(Arc<image::RgbaImage>),
     Nv12(Arc<crate::doc::Nv12>),
+}
+
+/// One decoder per video layer of `doc` (NV12 when the GPU draws and the size
+/// is even).
+pub(crate) fn feeds_for(doc: &Document, gpu: bool) -> std::collections::HashMap<LayerId, Feed> {
+    // NVDEC through CUDA on NVIDIA (measured fastest there), else ffmpeg's pick
+    let hwaccel = if gpu && crate::gpu::with_gpu(|g| g.vendor) == Some(0x10de) { "cuda" } else { "auto" };
+    let mut feeds = std::collections::HashMap::new();
+    for l in &doc.layers {
+        if let LayerKind::Image(im) = &l.kind {
+            if let Some(v) = &im.video {
+                let use_nv12 = gpu && v.info.width % 2 == 0 && v.info.height % 2 == 0;
+                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None });
+            }
+        }
+    }
+    feeds
+}
+
+/// `doc` as it shows at `t`: keys applied, walls synced, video layers showing
+/// their frame at `t` (from `feeds`).
+pub(crate) fn pose_at(doc: &Document, t: f64, feeds: &mut std::collections::HashMap<LayerId, Feed>) -> Document {
+    let mut d = doc.clone();
+    d.timeline.on = true;
+    d.timeline.time = t;
+    crate::anim::evaluate(&mut d);
+    crate::persp::sync_walls(&mut d);
+    let alive: Vec<bool> = d.layers.iter().map(|l| d.alive(l)).collect();
+    for (l, alive) in d.layers.iter_mut().zip(alive) {
+        if !alive {
+            continue;
+        }
+        let anim = l.anim.clone();
+        if let LayerKind::Image(im) = &mut l.kind {
+            if let (Some(v), Some(feed)) = (im.video.as_ref(), feeds.get_mut(&l.id)) {
+                let vt = crate::anim::video_time(anim.as_ref(), v.speed, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
+                match feed.frame(vt) {
+                    Some(FeedFrame::Rgba(img)) => im.src = ImageSource { id: next_rev(), rgba: img, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None },
+                    Some(FeedFrame::Nv12(f)) => im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: Some(f) },
+                    None => {}
+                }
+            }
+        }
+    }
+    d
 }
 
 impl Feed {
@@ -314,19 +359,8 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         child = Some(no_window(&mut cmd).spawn().map_err(|e| e.to_string())?);
     }
     let gpu_render = crate::gpu::with_gpu(|_| ()).is_some();
-    // NVDEC through CUDA on NVIDIA (measured fastest there), else ffmpeg's pick
-    let hwaccel = if crate::gpu::with_gpu(|g| g.vendor) == Some(0x10de) { "cuda" } else { "auto" };
     // video layers: one sequential decoder each
-    let mut feeds: std::collections::HashMap<LayerId, Feed> = std::collections::HashMap::new();
-    for l in &job.doc.layers {
-        if let LayerKind::Image(im) = &l.kind {
-            if let Some(v) = &im.video {
-                // NV12 straight to the GPU when it draws (even sizes)
-                let use_nv12 = gpu_render && v.info.width % 2 == 0 && v.info.height % 2 == 0;
-                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None });
-            }
-        }
-    }
+    let mut feeds = feeds_for(&job.doc, gpu_render);
     let png_base = job.out.with_extension("");
     let fail = |child: &mut Option<std::process::Child>, msg: String| {
         if let Some(c) = child.as_mut() {
@@ -422,29 +456,8 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             return fail(&mut child, "취소됨".into());
         }
         let t = job.t0 + i as f64 / job.fps;
-        let mut d = job.doc.clone();
-        d.timeline.on = true;
-        d.timeline.time = t;
-        crate::anim::evaluate(&mut d);
-        crate::persp::sync_walls(&mut d);
         // video frames at full resolution
-        let alive: Vec<bool> = d.layers.iter().map(|l| d.alive(l)).collect();
-        for (l, alive) in d.layers.iter_mut().zip(alive) {
-            if !alive {
-                continue;
-            }
-            let anim = l.anim.clone();
-            if let LayerKind::Image(im) = &mut l.kind {
-                if let (Some(v), Some(feed)) = (im.video.as_ref(), feeds.get_mut(&l.id)) {
-                    let vt = crate::anim::video_time(anim.as_ref(), v.speed, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
-                    match feed.frame(vt) {
-                        Some(FeedFrame::Rgba(img)) => im.src = ImageSource { id: next_rev(), rgba: img, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None },
-                        Some(FeedFrame::Nv12(f)) => im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: Some(f) },
-                        None => {}
-                    }
-                }
-            }
-        }
+        let d = pose_at(&job.doc, t, &mut feeds);
         let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
                 Some(c) => (c.rect, c.rot),

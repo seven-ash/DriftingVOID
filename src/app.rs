@@ -910,6 +910,16 @@ pub struct App {
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
+    /// Frames of the canvas rendered ahead for playback (phase 4).
+    pcache: crate::playcache::PlayCache,
+    /// Bumped on every commit, undo/redo and load (the cache follows it).
+    doc_rev: u64,
+    /// When the pointer or keyboard last did something (the cache fills after a
+    /// short rest).
+    last_input: f64,
+    /// DV_TIMING while playing: (since, cached frames, live frames, ms drawing
+    /// cached, ms drawing live), printed every 2 s.
+    cache_stats: (f64, u32, u32, f64, f64),
     /// Pre-roll: wall time the play button was pressed, while the video decoders
     /// fill up; the clock waits at its start until every one has a frame.
     tl_arm: Option<f64>,
@@ -1062,6 +1072,10 @@ impl App {
             col_h: [200.0; 3],
             tl_h: 120.0,
             tl_play: None,
+            pcache: crate::playcache::PlayCache::new(),
+            doc_rev: 0,
+            last_input: 0.0,
+            cache_stats: (0.0, 0, 0, 0.0, 0.0),
             tl_arm: None,
             warm: HashMap::new(),
             warm_moved: 0.0,
@@ -1602,6 +1616,7 @@ impl App {
                 self.fix_sel();
             }
             let prev = std::mem::replace(&mut self.committed, self.doc.clone());
+            self.doc_rev += 1;
             let (sel, extra, sub) = std::mem::replace(&mut self.committed_sel, (self.sel, self.extra_sel.clone(), self.sub.clone()));
             let cost = prev.bytes_not_in(&self.doc);
             self.undo.push(Snap { doc: prev, sel, extra, sub, cost });
@@ -1637,6 +1652,7 @@ impl App {
             cost,
         };
         self.committed = self.doc.clone();
+        self.doc_rev += 1;
         self.committed_sel = (self.sel, self.extra_sel.clone(), self.sub.clone());
         self.modified = true;
         self.fix_sel();
@@ -1786,6 +1802,7 @@ impl App {
         self.editing = None;
         self.doc = doc;
         self.committed = self.doc.clone();
+        self.doc_rev += 1;
         self.undo.clear();
         self.redo.clear();
         self.committed_sel = Default::default();
@@ -3128,6 +3145,12 @@ impl App {
             let x = x_of(f as f64 / fps);
             p.line_segment([pos2(x, rect.top() + ruler_h - 5.0), pos2(x, rect.top() + ruler_h)], tick);
             f += every;
+        }
+        // cached frames (playback cache): a line along the ruler's foot
+        let cfps = self.pcache.fps().max(1.0);
+        for (a, b) in self.pcache.ranges() {
+            let (x0, x1) = (x_of(a as f64 / cfps), x_of((b + 1) as f64 / cfps));
+            p.rect_filled(Rect::from_min_max(pos2(x0, rect.top() + ruler_h - 2.0), pos2(x1.max(x0 + 1.0), rect.top() + ruler_h)), 0.0, ACCENT.gamma_multiply(0.8));
         }
         let mut t = 0.0;
         while t <= dur + 1e-9 {
@@ -9112,7 +9135,53 @@ impl App {
         // background box look final); only rotated text is hidden for the upright editor
         // constraints again after this frame's input, so a following camera never trails
         crate::anim::apply_constraints(&mut self.doc);
-        canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None);
+        // playback cache: the canvas as framed now, rendered ahead
+        let ppp = ctx.pixels_per_point();
+        let view = crate::playcache::View { center: xf.s2w(rect.center()), size: rect.size() / self.zoom, scale: self.zoom * ppp };
+        let editing = self.changed || self.drag.is_some();
+        if self.doc.timeline.on && !editing {
+            self.pcache.sync(self.doc_rev, &self.doc, view);
+        }
+        let playing = self.tl_play.is_some() && self.tl_arm.is_none();
+        let idle = !playing && !editing && self.doc.timeline.on && self.now - self.last_input > 1.5;
+        if self.doc.timeline.on {
+            self.pcache.pump(&ctx, playing, idle, self.doc.timeline.time);
+        }
+        let t_draw = std::time::Instant::now();
+        let cached = (playing && !editing).then(|| self.pcache.texture(&ctx, self.doc.timeline.time)).flatten();
+        match cached {
+            Some(tex) => {
+                painter.image(tex, rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None),
+        }
+        if playing && std::env::var_os("DV_TIMING").is_some() {
+            let ms = t_draw.elapsed().as_secs_f64() * 1e3;
+            let st = &mut self.cache_stats;
+            if st.0 == 0.0 {
+                st.0 = self.now;
+            }
+            if cached.is_some() {
+                st.1 += 1;
+                st.3 += ms;
+            } else {
+                st.2 += 1;
+                st.4 += ms;
+            }
+            if self.now - st.0 >= 2.0 {
+                eprintln!(
+                    "canvas while playing, {:.1} s: {} cached frames ({:.2} ms each), {} live ({:.2} ms each); cache {} frames, {} MB",
+                    self.now - st.0,
+                    st.1,
+                    st.3 / st.1.max(1) as f64,
+                    st.2,
+                    st.4 / st.2.max(1) as f64,
+                    self.pcache.ranges().iter().map(|(a, b)| b - a + 1).sum::<u64>(),
+                    self.pcache.bytes() >> 20
+                );
+                *st = (self.now, 0, 0, 0.0, 0.0);
+            }
+        }
         // scissors outline in progress
         if let Some(sc) = &self.scissor {
             let hover = ctx.input(|i| i.pointer.hover_pos()).map(|p| xf.s2w(p));
@@ -10921,6 +10990,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving() || i.pointer.any_down()) {
+            self.last_input = self.now;
+        }
         self.drop_stale_ime(&ctx);
 
         // swap in the nicer UI face once the system font scan lands
