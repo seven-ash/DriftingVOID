@@ -3126,7 +3126,11 @@ impl App {
             if let Some(pp) = pointer {
                 let mut drag = TlDrag::Scrub;
                 let shift = ui.input(|i| i.modifiers.shift);
-                if shift && pp.y > rect.top() + ruler_h && pp.x >= tr.left() {
+                // Shift on the playhead drags it (snapping to keys); elsewhere it boxes keys
+                let on_head = (x_of(self.doc.timeline.time) - pp.x).abs() <= 5.0;
+                if shift && on_head {
+                    drag = TlDrag::Scrub;
+                } else if shift && pp.y > rect.top() + ruler_h && pp.x >= tr.left() {
                     drag = TlDrag::Marquee { start: pp };
                 } else if pp.y > rect.top() + ruler_h {
                     if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
@@ -3211,6 +3215,24 @@ impl App {
                     }
                 }
                 TlDrag::Scrub => {
+                    let mut t = t;
+                    // Shift: the nearest key on the shown rows within reach. The reach
+                    // is about 0.1 s in whole frames of the project rate (2–6 frames:
+                    // 24 fps → 2, 30 → 3, 60 → 6), and at least 6 px on screen.
+                    if ui.input(|i| i.modifiers.shift) {
+                        let fps = tl.fps.max(1.0);
+                        let reach = ((fps * 0.1).round().clamp(2.0, 6.0) / fps).max(6.0 / px_per_s.max(1e-9));
+                        let raw = t_of(pp.x);
+                        let near = hit_rows
+                            .iter()
+                            .filter_map(|(row, _)| self.row_anim(*row))
+                            .flat_map(|a| a.keys.iter().map(|k| k.t))
+                            .filter(|kt| (kt - raw).abs() <= reach)
+                            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()));
+                        if let Some(kt) = near {
+                            t = kt;
+                        }
+                    }
                     if (t - self.doc.timeline.time).abs() > 1e-9 {
                         new_time = Some(t);
                     }
@@ -7378,9 +7400,15 @@ impl App {
         let (tl_on, tt, tol) = (tl.on, tl.time, tl.frame_len() * 0.5);
         let an = self.doc.layers[idx].anim.clone();
         let km = |c: u16| tl_on.then(|| key_mark(an.as_ref(), tt, tol, c));
+        // keys of a value before / after the playhead (the < > beside its key mark)
+        let kn = |c: u16| {
+            let ks = an.as_ref().map_or(&[][..], |a| &a.keys[..]);
+            crate::dial::KeyNav { prev: ks.iter().any(|k| k.ch & c != 0 && k.t < tt - tol), next: ks.iter().any(|k| k.ch & c != 0 && k.t > tt + tol) }
+        };
         use crate::anim::ch;
-        // key buttons pressed, by value bit
+        // key buttons pressed, by value bit; key jumps asked for (-1/1), by value bit
         let mut kh = [false; 10];
+        let mut kv = [0i8; 10];
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -7397,7 +7425,7 @@ impl App {
                 });
             });
             if !matches!(l.kind, LayerKind::Audio(_)) {
-                changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).mixed(mxc(ch::OPA))).changed();
+                changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).nav(kn(ch::OPA), &mut kv[3]).mixed(mxc(ch::OPA))).changed();
             }
             if l.place.is_none() {
                 // 2D position (the centre); placed layers use the 3D fields below
@@ -7406,7 +7434,7 @@ impl App {
                 let mut mv = false;
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    crate::dial::label_cell(ui, "위치", km(ch::POS), &mut kh[0]);
+                    crate::dial::label_cell_nav(ui, "위치", km(ch::POS), &mut kh[0], Some((kn(ch::POS), &mut kv[0])));
                     ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
                     ui.spacing_mut().interact_size.x = 56.0;
                     let m = mxc(ch::POS);
@@ -7423,7 +7451,7 @@ impl App {
             let span = l.anim.as_ref().and_then(|a| a.span);
             match &mut l.kind {
                 LayerKind::Audio(a) => {
-                    changed |= ui.add(crate::dial::Dial::new(&mut a.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).mixed(mxc(ch::VOL))).changed();
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).nav(kn(ch::VOL), &mut kv[9]).mixed(mxc(ch::VOL))).changed();
                     changed |= ui.checkbox(&mut a.mute, "소리 끔").changed();
                     if let Some([s0, e0]) = span {
                         ui.small(egui::RichText::new(format!("{} ~ {} · 원본 {}", crate::video::timecode(s0), crate::video::timecode(e0), crate::video::timecode(a.len))).monospace().color(INK_3()));
@@ -7473,7 +7501,7 @@ impl App {
                             }
                         });
                         if v.info.audio {
-                            changed |= ui.add(crate::dial::Dial::new(&mut v.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).mixed(mxc(ch::VOL))).changed();
+                            changed |= ui.add(crate::dial::Dial::new(&mut v.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).nav(kn(ch::VOL), &mut kv[9]).mixed(mxc(ch::VOL))).changed();
                         }
                         ui.small(format!(
                             "{}×{} · {:.2} fps · {}{}",
@@ -7490,12 +7518,12 @@ impl App {
                     }
                     ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
                     let mut pct = im.scale * 100.0;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1]).nav(kn(ch::SIZE), &mut kv[1]).mixed(mxc(ch::SIZE))).changed() {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
                     let mut deg = im.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
                         im.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -7569,7 +7597,7 @@ impl App {
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
-                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed();
+                        changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).nav(kn(ch::SIZE), &mut kv[1]).mixed(mxc(ch::SIZE))).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         changed |= align_row(ui, &mut t.align);
                         ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
@@ -7605,7 +7633,7 @@ impl App {
                             });
                     });
                     let mut deg = t.rotation.to_degrees();
-                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
                         t.rotation = deg.to_radians();
                         changed = true;
                     }
@@ -7635,7 +7663,7 @@ impl App {
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         let mut deg = s.rotation.to_degrees();
-                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).mixed(mxc(ch::ROT))).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
                             s.rotation = deg.to_radians();
                             changed = true;
                         }
@@ -7728,26 +7756,26 @@ impl App {
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.pos[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(km(ch::P_POS), &mut kh[4]).mixed(mxc(ch::P_POS))).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -100000.0..=100000.0).step(10.0).text(format!("위치 {ax}")).default(0.0).key(km(ch::P_POS), &mut kh[4]).nav(kn(ch::P_POS), &mut kv[4]).mixed(mxc(ch::P_POS))).changed() {
                             pl.pos[i] = v as f64;
                             changed = true;
                         }
                     }
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
                         let mut v = pl.rot[i] as f32;
-                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(km(ch::P_ROT), &mut kh[5]).mixed(mxc(ch::P_ROT))).changed() {
+                        if ui.add(crate::dial::Dial::new(&mut v, -180.0..=180.0).step(1.0).text(format!("회전 {ax} °")).default(0.0).key(km(ch::P_ROT), &mut kh[5]).nav(kn(ch::P_ROT), &mut kv[5]).mixed(mxc(ch::P_ROT))).changed() {
                             pl.rot[i] = v as f64;
                             changed = true;
                         }
                     }
                     let mut pct = (pl.scale * 100.0) as f32;
-                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(km(ch::P_SCALE), &mut kh[6]).mixed(mxc(ch::P_SCALE))).changed() {
+                    if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=1000.0).step(2.0).text("크기 %").default(100.0).key(km(ch::P_SCALE), &mut kh[6]).nav(kn(ch::P_SCALE), &mut kv[6]).mixed(mxc(ch::P_SCALE))).changed() {
                         pl.scale = pct as f64 / 100.0;
                         changed = true;
                     }
                     let mut th = pl.thick as f32;
                     if ui
-                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]).mixed(mxc(ch::P_THICK)))
+                        .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]).nav(kn(ch::P_THICK), &mut kv[7]).mixed(mxc(ch::P_THICK)))
                         .on_hover_text("평면 뒤로 밀어낸 두께")
                         .changed()
                     {
@@ -7797,6 +7825,16 @@ impl App {
         if kc != 0 {
             for sid in self.selected_ids() {
                 self.key_layer(sid, kc);
+            }
+        }
+        // < >: the playhead jumps to that value's key before / after it
+        if let Some((bit, dir)) = kv.iter().enumerate().find(|x| *x.1 != 0).map(|(i, d)| (1u16 << i, *d)) {
+            let (t, tol) = (self.doc.timeline.time, self.doc.timeline.frame_len() * 0.5);
+            let ks = self.doc.get(id).and_then(|l| l.anim.as_ref()).map(|a| a.keys.clone()).unwrap_or_default();
+            let times = ks.iter().filter(|k| k.ch & bit != 0).map(|k| k.t);
+            let to = if dir < 0 { times.filter(|&kt| kt < t - tol).reduce(f64::max) } else { times.filter(|&kt| kt > t + tol).reduce(f64::min) };
+            if let Some(to) = to {
+                self.set_time(to);
             }
         }
         if let Some((t, c, at)) = pal_req {

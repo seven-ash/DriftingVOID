@@ -18,7 +18,16 @@ pub struct Dial<'a> {
     integer: bool,
     vertical: bool,
     key: Option<(KeyMark, &'a mut bool)>,
+    nav: Option<(KeyNav, &'a mut i8)>,
     mixed: bool,
+}
+
+/// Keys of a value before and after the playhead, for the < > beside its key
+/// mark (shown only when the value has keys).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct KeyNav {
+    pub prev: bool,
+    pub next: bool,
 }
 
 /// State of a keyable value at the playhead.
@@ -56,9 +65,23 @@ fn label_width(text: &str, key: bool) -> f32 {
 /// The label slot of a dial row (text, then the key button when keyable), for
 /// rows built from other widgets that should line up with the dials.
 pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool) {
+    label_cell_nav(ui, text, mark, hit, None);
+}
+
+/// Width of a < or > beside the key mark.
+const NAV_W: f32 = 8.0;
+
+/// `label_cell` with the key navigator: when the value has keys, a < just left
+/// of its key mark and a > in the gap after it jump the playhead to the key
+/// before or after (`go` turns -1 or 1). The row keeps its widths: the < takes
+/// the end of the label text's room, the > sits in the spacing before the ring.
+pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool, nav: Option<(KeyNav, &mut i8)>) {
     let w = label_width(text, mark.is_some());
     let (lr, lresp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
-    let text_r = if mark.is_some() { egui::Rect::from_min_max(lr.min, egui::pos2(lr.right() - KEY_W, lr.bottom())) } else { lr };
+    let keyed = mark.is_some_and(|m| m != KeyMark::None);
+    let nav = nav.filter(|_| keyed);
+    let text_right = lr.right() - if mark.is_some() { KEY_W } else { 0.0 } - if nav.is_some() { NAV_W } else { 0.0 };
+    let text_r = egui::Rect::from_min_max(lr.min, egui::pos2(text_right, lr.bottom()));
     ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
     if let Some(mark) = mark {
         let kr = egui::Rect::from_min_max(egui::pos2(lr.right() - KEY_W, lr.top()), lr.max);
@@ -69,6 +92,28 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
         draw_key(ui.painter(), kr.center(), mark, kresp.hovered());
         if kresp.on_hover_text("키 기록").clicked() {
             *hit = true;
+        }
+        if let Some((kn, go)) = nav {
+            let cy = kr.center().y;
+            for (dir, x0, on) in [(-1i8, kr.left() - NAV_W, kn.prev), (1, kr.right(), kn.next)] {
+                let r = egui::Rect::from_min_max(egui::pos2(x0, cy - 9.0), egui::pos2(x0 + NAV_W, cy + 9.0));
+                let resp = ui.interact(r, lresp.id.with(("nav", dir)), if on { Sense::click() } else { Sense::hover() });
+                let col = if !on {
+                    INK_3().gamma_multiply(0.35)
+                } else if resp.hovered() {
+                    INK()
+                } else {
+                    INK_3()
+                };
+                // a small chevron pointing the way it jumps
+                let c = r.center();
+                let (dx, h) = (2.2 * dir as f32, 3.6);
+                ui.painter().add(Shape::line(vec![c + vec2(-dx, -h), c + vec2(dx, 0.0), c + vec2(-dx, h)], Stroke::new(1.4, col)));
+                let tip = if dir < 0 { "이전 키로" } else { "다음 키로" };
+                if on && resp.on_hover_text(tip).clicked() {
+                    *go = dir;
+                }
+            }
         }
     }
 }
@@ -85,7 +130,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None, mixed: false }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None, nav: None, mixed: false }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -120,6 +165,13 @@ impl<'a> Dial<'a> {
     /// A key button before the ring; `hit` turns true when it is clicked.
     pub fn key(mut self, mark: Option<KeyMark>, hit: &'a mut bool) -> Self {
         self.key = mark.map(|m| (m, hit));
+        self
+    }
+
+    /// The key navigator beside the key mark (see `label_cell_nav`); `go` turns -1
+    /// or 1 when < or > is clicked.
+    pub fn nav(mut self, kn: KeyNav, go: &'a mut i8) -> Self {
+        self.nav = Some((kn, go));
         self
     }
 
@@ -186,7 +238,7 @@ impl Widget for Dial<'_> {
         if self.vertical {
             return vertical_ui(self, ui);
         }
-        let Dial { value, range, step, text, suffix, default, integer, key, mixed, .. } = self;
+        let Dial { value, range, step, text, suffix, default, integer, key, nav, mixed, .. } = self;
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
         // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
@@ -227,7 +279,7 @@ impl Widget for Dial<'_> {
                         Some((m, h)) => (Some(m), h),
                         None => (None, &mut dummy),
                     };
-                    label_cell(ui, &text, mark, hit);
+                    label_cell_nav(ui, &text, mark, hit, nav);
                 }
                 let value_w = 52.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
                 let pin_w = if default.is_some() { 16.0 } else { 0.0 };
