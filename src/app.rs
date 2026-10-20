@@ -101,6 +101,8 @@ pub struct Settings {
     /// Mask edge: guided-filter radius (0 = hard edge) and grow (+) / shrink (-) in px.
     pub mask_refine: f32,
     pub mask_grow: f32,
+    /// The edge (wire) map in the loupe's edge view (Shift while dragging).
+    pub edge_lines: bool,
 }
 
 impl Default for Settings {
@@ -134,6 +136,7 @@ impl Default for Settings {
             wand_tol: 24.0,
             mask_refine: 2.0,
             mask_grow: 1.0,
+            edge_lines: true,
         }
     }
 }
@@ -938,6 +941,8 @@ pub struct App {
     rec_pts: Vec<[f32; 3]>,
     /// Magnifier texture and the (target, scale) it was rendered for.
     loupe_tex: Option<(egui::TextureHandle, [f32; 3])>,
+    /// The edge loupe's picture: (texture, target x, y, zoom, edge map on).
+    edge_tex: Option<(egui::TextureHandle, [f32; 4])>,
     middle_moved: bool,
     input_log: std::collections::VecDeque<String>,
     show_log: bool,
@@ -1062,6 +1067,7 @@ impl App {
             rec_times: Vec::new(),
             rec_pts: Vec::new(),
             loupe_tex: None,
+            edge_tex: None,
             middle_moved: false,
             input_log: Default::default(),
             show_log: false,
@@ -5392,16 +5398,61 @@ impl App {
         let xf = self.xf();
         let ts = xf.w2s(target);
         let (r, gap) = (72.0f32, 36.0f32);
+        // the open canvas: right of the tool rail, left of the panels
+        let room = Rect::from_min_max(pos2(rect.left() + 72.0, rect.top()), pos2((rect.right() - self.right_reserve).max(rect.left() + 300.0), rect.bottom()));
         let mut c = ts - vec2(r + gap, r + gap);
-        if c.x - r < rect.left() + 8.0 {
+        if c.x - r < room.left() + 8.0 {
             c.x = ts.x + r + gap;
         }
-        if c.y - r < rect.top() + 8.0 {
+        if c.y - r < room.top() + 8.0 {
             c.y = ts.y + r + gap;
         }
         // the pixels around the target, rendered on the CPU and drawn as a round disc
         let zoom = (self.zoom * 6.0).max(4.0);
         let ppp = ctx.pixels_per_point();
+        // Shift while dragging: the edge view instead (a third of the magnification,
+        // so nine times the area; levels stretched; Canny edges on a dimmed picture
+        // when 경계선 is on). DV_LOUPE=edge holds it for captures.
+        let edge_view = ctx.input(|i| i.modifiers.shift) || std::env::var("DV_LOUPE").is_ok_and(|v| v == "edge");
+        if edge_view {
+            let zoom2 = zoom / 3.0;
+            let lines_on = self.s.edge_lines;
+            let key2 = [target.x, target.y, zoom2, if lines_on { 1.0 } else { 0.0 }];
+            if self.edge_tex.as_ref().is_none_or(|(_, k)| *k != key2) {
+                let region = Rect::from_center_size(target, vec2(2.0 * r / zoom2, 2.0 * r / zoom2));
+                let m = zoom2 * ppp;
+                if let Ok(pm) = crate::export::render(&self.doc, region, m, None) {
+                    let (w, h) = (pm.width() as usize, pm.height() as usize);
+                    let mut px = pm.data().to_vec();
+                    let edges = lines_on.then(|| crate::edges::canny(&crate::edges::luminance(&px), w, h, (m * 0.8).clamp(1.0, 4.0), 0.85));
+                    crate::edges::levels(&mut px);
+                    if let Some(e) = edges {
+                        for (k, p) in px.chunks_exact_mut(4).enumerate() {
+                            if e[k] {
+                                p.copy_from_slice(&[255, 226, 120, 255]);
+                            } else {
+                                for c in &mut p[..3] {
+                                    *c = (*c as f32 * 0.45) as u8;
+                                }
+                            }
+                        }
+                    }
+                    let ci = egui::ColorImage::from_rgba_premultiplied([w, h], &px);
+                    let opts = egui::TextureOptions::NEAREST;
+                    match &mut self.edge_tex {
+                        Some((t, k)) => {
+                            t.set(ci, opts);
+                            *k = key2;
+                        }
+                        None => self.edge_tex = Some((ctx.load_texture("edge_loupe", ci, opts), key2)),
+                    }
+                }
+            }
+            if let Some((t, _)) = &self.edge_tex {
+                loupe_disc(painter, t.id(), c, r, zoom2, target, line);
+            }
+            return;
+        }
         let key = [target.x, target.y, zoom];
         if self.loupe_tex.as_ref().is_none_or(|(_, k)| *k != key) {
             let region = Rect::from_center_size(target, vec2(2.0 * r / zoom, 2.0 * r / zoom));
@@ -5417,45 +5468,8 @@ impl App {
                 }
             }
         }
-        let Some((tex, _)) = &self.loupe_tex else { return };
-        painter.circle_filled(c, r, theme::VOID());
-        let mut m = egui::Mesh::with_texture(tex.id());
-        m.vertices.push(egui::epaint::Vertex { pos: c, uv: pos2(0.5, 0.5), color: Color32::WHITE });
-        let n = 72u32;
-        for i in 0..=n {
-            let a = i as f32 / n as f32 * std::f32::consts::TAU;
-            let d = vec2(a.cos(), a.sin());
-            m.vertices.push(egui::epaint::Vertex { pos: c + d * r, uv: pos2(0.5 + 0.5 * d.x, 0.5 + 0.5 * d.y), color: Color32::WHITE });
-        }
-        for i in 1..=n {
-            m.add_triangle(0, i, i + 1);
-        }
-        painter.add(Shape::mesh(m));
-        let to_l = |p: Pos2| c + (p - target) * zoom;
-        if let Some((a, b, col)) = line {
-            let lp = painter.with_clip_rect(Rect::from_center_size(c, vec2(2.0 * r, 2.0 * r)).intersect(painter.clip_rect()));
-            // clip the line to the disc
-            let (pa, pb) = (to_l(a), to_l(b));
-            let d = pb - pa;
-            let f = pa - c;
-            let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
-            let disc = qb * qb - 4.0 * qa * qc;
-            if qa > 0.0 && disc > 0.0 {
-                let sq = disc.sqrt();
-                let t0 = ((-qb - sq) / (2.0 * qa)).max(0.0);
-                let t1 = ((-qb + sq) / (2.0 * qa)).min(1.0);
-                if t1 > t0 {
-                    lp.line_segment([pa + d * t0, pa + d * t1], Stroke::new(1.0, col.gamma_multiply(0.9)));
-                }
-            }
-        }
-        painter.circle_stroke(c, r, Stroke::new(2.5, Color32::from_black_alpha(160)));
-        painter.circle_stroke(c, r, Stroke::new(1.2, INK_2()));
-        for d in [vec2(1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, -1.0)] {
-            let d = d.normalized();
-            let (p0, p1) = (c + d * 5.0, c + d * (r - 6.0));
-            painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_black_alpha(150)));
-            painter.line_segment([p0, p1], Stroke::new(0.8, Color32::WHITE));
+        if let Some((t, _)) = &self.loupe_tex {
+            loupe_disc(painter, t.id(), c, r, zoom, target, line);
         }
     }
 
@@ -9242,6 +9256,14 @@ impl App {
         }
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
         let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
+        // the loupe's edge view (Shift while dragging a line end or corner)
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label("루페 Shift");
+            if ui.selectable_label(self.s.edge_lines, "경계선").on_hover_text("끄는 중 Shift: 넓게 · 자동 레벨 · 경계선").clicked() {
+                self.s.edge_lines = !self.s.edge_lines;
+            }
+        });
         let mut ch = ui.checkbox(&mut grid, "격자").changed();
         let mut light = sp.light;
         let mut lon = light.is_some();
@@ -10491,6 +10513,50 @@ fn fixed_width<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
     let h = child.min_rect().height();
     ui.advance_cursor_after_rect(Rect::from_min_size(rect.min, vec2(w, h)));
     out
+}
+
+/// A round loupe at `c` (radius `r`) showing texture `tex` (the window around
+/// `target`, magnified `zoom` times), the line being placed, and a thin X reticle.
+fn loupe_disc(painter: &egui::Painter, tex: egui::TextureId, c: Pos2, r: f32, zoom: f32, target: Pos2, line: Option<(Pos2, Pos2, Color32)>) {
+    painter.circle_filled(c, r, theme::VOID());
+    let mut m = egui::Mesh::with_texture(tex);
+    m.vertices.push(egui::epaint::Vertex { pos: c, uv: pos2(0.5, 0.5), color: Color32::WHITE });
+    let n = 72u32;
+    for i in 0..=n {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let d = vec2(a.cos(), a.sin());
+        m.vertices.push(egui::epaint::Vertex { pos: c + d * r, uv: pos2(0.5 + 0.5 * d.x, 0.5 + 0.5 * d.y), color: Color32::WHITE });
+    }
+    for i in 1..=n {
+        m.add_triangle(0, i, i + 1);
+    }
+    painter.add(Shape::mesh(m));
+    let to_l = |p: Pos2| c + (p - target) * zoom;
+    if let Some((a, b, col)) = line {
+        let lp = painter.with_clip_rect(Rect::from_center_size(c, vec2(2.0 * r, 2.0 * r)).intersect(painter.clip_rect()));
+        // clip the line to the disc
+        let (pa, pb) = (to_l(a), to_l(b));
+        let d = pb - pa;
+        let f = pa - c;
+        let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
+        let disc = qb * qb - 4.0 * qa * qc;
+        if qa > 0.0 && disc > 0.0 {
+            let sq = disc.sqrt();
+            let t0 = ((-qb - sq) / (2.0 * qa)).max(0.0);
+            let t1 = ((-qb + sq) / (2.0 * qa)).min(1.0);
+            if t1 > t0 {
+                lp.line_segment([pa + d * t0, pa + d * t1], Stroke::new(1.0, col.gamma_multiply(0.9)));
+            }
+        }
+    }
+    painter.circle_stroke(c, r, Stroke::new(2.5, Color32::from_black_alpha(160)));
+    painter.circle_stroke(c, r, Stroke::new(1.2, INK_2()));
+    for d in [vec2(1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, -1.0)] {
+        let d = d.normalized();
+        let (p0, p1) = (c + d * 5.0, c + d * (r - 6.0));
+        painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_black_alpha(150)));
+        painter.line_segment([p0, p1], Stroke::new(0.8, Color32::WHITE));
+    }
 }
 
 /// One line of text cut with an ellipsis at `width`.

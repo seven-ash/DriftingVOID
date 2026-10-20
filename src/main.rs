@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod calc;
 mod dial;
+mod edges;
 mod canvas;
 mod doc;
 mod export;
