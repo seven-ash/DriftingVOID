@@ -259,8 +259,12 @@ enum TlDrag {
     Key { row: TlRow, from: f64 },
     SpanIn(TlRow),
     SpanOut(TlRow),
-    /// Sound layer: move (grabbed at `grab` seconds into it) or trim either end.
+    /// Sound or video clip: move (grabbed at `grab` seconds into it) or trim
+    /// either end (`AudioIn`, `AudioOut`).
     AudioMove { id: LayerId, grab: f64 },
+    /// Video clip, Alt-drag: slide the video inside the clip (the clip stays;
+    /// `from` is the video start when the drag began, `at` the pointer time).
+    VideoSlip { id: LayerId, from: f64, at: f64 },
     /// Shift-drag box over the tracks.
     Marquee { start: Pos2 },
     /// Several selected keys moving together (last snapped time under the pointer).
@@ -271,6 +275,9 @@ enum TlDrag {
 
 /// Audio clip colour on the timeline.
 const AUDIO_COLOR: Color32 = Color32::from_rgb(90, 200, 170);
+
+/// Video clip colour on the timeline.
+const VIDEO_COLOR: Color32 = Color32::from_rgb(130, 150, 255);
 
 /// Canvas camera colour.
 const CAM_COLOR: Color32 = Color32::from_rgb(176, 140, 255);
@@ -1559,6 +1566,20 @@ impl App {
                 app.doc.export_frame = Some(Rect::from_min_size(pos2(n[0], n[1]), vec2(n[2], n[3])));
             }
         }
+        // DV_VIDEO_CLIP="from,to,video_start": the first video layer's clip
+        // (seconds; a negative video start or a span past the end shows stills)
+        if let Ok(v) = std::env::var("DV_VIDEO_CLIP") {
+            let n: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            let vid = app.doc.layers.iter().find(|l| matches!(&l.kind, LayerKind::Image(im) if im.video.is_some())).map(|l| l.id);
+            if let (3, Some(id)) = (n.len(), vid) {
+                let an = app.doc.get_mut(id).unwrap().anim.get_or_insert_with(Default::default);
+                an.span = Some([n[0], n[1]]);
+                an.video_start = n[2];
+                app.doc.timeline.on = true;
+                app.doc.timeline.duration = app.doc.timeline.duration.max(n[1] + 1.0);
+                app.select_only(Some(id));
+            }
+        }
         if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
             app.open_video_export();
         }
@@ -2195,6 +2216,21 @@ impl App {
         }
     }
 
+    /// A video layer's clip on the timeline: (shown span, where the video's
+    /// first and last frames fall). Outside the video the layer holds its first
+    /// or last frame as a still (Ash, 10-21).
+    fn video_clip(&self, id: LayerId) -> Option<([f64; 2], [f64; 2])> {
+        let l = self.doc.get(id)?;
+        let LayerKind::Image(im) = &l.kind else { return None };
+        let v = im.video.as_ref()?;
+        let speed = v.speed.max(1e-3);
+        let (start, vs) = l.anim.as_ref().map_or((0.0, 0.0), |a| (a.start(), a.video_start));
+        let m0 = start - vs / speed;
+        let media = [m0, m0 + v.info.duration / speed];
+        let span = l.anim.as_ref().and_then(|a| a.span).unwrap_or(media);
+        Some((span, media))
+    }
+
     fn timeline_videos(&self) -> Vec<(LayerId, f64)> {
         let t = self.doc.timeline.time;
         self.doc
@@ -2245,6 +2281,12 @@ impl App {
                 }
             }
             let fl = self.video_of(id).map_or(0.03, |v| v.info.frame_len());
+            let dur = self.video_of(id).map_or(0.0, |v| v.info.duration);
+            if vt < 0.0 || vt >= dur - fl * 2.0 {
+                // before the first frame or after the last: a still until it starts
+                self.video_scrub(id, vt);
+                continue;
+            }
             match self.warm.remove(&id) {
                 Some((wt, player)) if (wt - vt).abs() <= fl * 0.5 => {
                     let speed = self.video_of(id).map_or(1.0, |v| v.speed);
@@ -2339,19 +2381,29 @@ impl App {
             let before: Vec<bool> = self.doc.layers.iter().map(|l| self.doc.alive(l)).collect();
             self.doc.timeline.time = t;
             crate::anim::evaluate(&mut self.doc);
-            // video layers that just came into their span start playing
+            // video layers leaving their span stop
             let now_alive: Vec<(LayerId, bool, bool)> = self.doc.layers.iter().zip(before).map(|(l, b)| (l.id, b, self.doc.alive(l))).collect();
             for (id, was, is) in now_alive {
-                if !was && is && self.video_of(id).is_some() {
-                    let vt = self.doc.get(id).map(|l| crate::anim::video_time(l.anim.as_ref(), self.video_of(id).map_or(1.0, |v| v.speed), t)).unwrap_or(0.0);
+                if was && !is {
+                    self.playing.remove(&id);
+                }
+            }
+            // and start when their first frame comes round (in their span, past
+            // the still before it); before that and after the end they hold
+            for (id, vt) in self.timeline_videos() {
+                if self.playing.contains_key(&id) {
+                    continue;
+                }
+                let Some(v) = self.video_of(id) else { continue };
+                if vt >= 0.0 && vt < v.info.duration - v.info.frame_len() * 2.0 {
                     if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                         if let Some(v) = im.video.as_mut() {
-                            v.time = vt.max(0.0);
+                            v.time = vt;
                         }
                     }
                     self.video_play(id, true);
-                } else if was && !is {
-                    self.playing.remove(&id);
+                } else if (v.time - vt.clamp(0.0, v.info.duration)).abs() > v.info.frame_len() && !self.scrub_want.contains_key(&id) {
+                    self.video_scrub(id, vt);
                 }
             }
         }
@@ -3227,10 +3279,16 @@ impl App {
             if selected {
                 p.rect_filled(rr, 6.0, FILL_1());
             }
+            let video = match row {
+                TlRow::Layer(id) => self.video_clip(*id),
+                _ => None,
+            };
             let col = if *cam {
                 CAM_COLOR
             } else if sound.is_some() {
                 AUDIO_COLOR
+            } else if video.is_some() {
+                VIDEO_COLOR
             } else {
                 INK_2()
             };
@@ -3260,6 +3318,31 @@ impl App {
                     p.rect_stroke(bar, 3.0, Stroke::new(1.2, AUDIO_COLOR), StrokeKind::Inside);
                 }
             }
+            if let Some(([s0, e0], [m0, m1])) = video {
+                // the clip; where it holds a still (before the first frame, after
+                // the last) it is paler and striped
+                let bar = Rect::from_min_max(pos2(x_of(s0), rr.top() + 3.0), pos2(x_of(e0).max(x_of(s0) + 2.0), rr.bottom() - 3.0));
+                p.rect_filled(bar, 3.0, VIDEO_COLOR.gamma_multiply(0.12));
+                let live = Rect::from_min_max(pos2(x_of(m0.max(s0)), bar.top()), pos2(x_of(m1.min(e0)), bar.bottom()));
+                if live.width() > 0.0 {
+                    p.rect_filled(live, 3.0, VIDEO_COLOR.gamma_multiply(0.3));
+                }
+                for (a, b) in [(s0, m0.min(e0)), (m1.max(s0), e0)] {
+                    if b <= a {
+                        continue;
+                    }
+                    let (xa, xb) = (x_of(a), x_of(b));
+                    let pc = p.with_clip_rect(Rect::from_min_max(pos2(xa, bar.top()), pos2(xb, bar.bottom())).intersect(rect));
+                    let mut x = xa - bar.height();
+                    while x < xb {
+                        pc.line_segment([pos2(x, bar.bottom()), pos2(x + bar.height(), bar.top())], Stroke::new(1.0, VIDEO_COLOR.gamma_multiply(0.45)));
+                        x += 6.0;
+                    }
+                }
+                if selected {
+                    p.rect_stroke(bar, 3.0, Stroke::new(1.2, VIDEO_COLOR), StrokeKind::Inside);
+                }
+            }
             if let TlRow::Layer(lid) = row {
                 // recorded strokes: thin red marks along the bottom of the row
                 for (a, b) in self.rec_spans(*lid) {
@@ -3269,8 +3352,9 @@ impl App {
                 }
             }
             let anim = self.row_anim(*row);
-            // a sound's span is its clip bar (drawn above)
-            match anim.and_then(|a| a.span).filter(|_| sound.is_none()) {
+            // a sound's or video's span is its clip bar (drawn above)
+            let clip = sound.is_some() || video.is_some();
+            match anim.and_then(|a| a.span).filter(|_| !clip) {
                 Some([a, b]) => {
                     let bar = Rect::from_min_max(pos2(x_of(a), cy - 4.0), pos2(x_of(b), cy + 4.0));
                     p.rect_filled(bar, 3.0, col.gamma_multiply(0.35));
@@ -3278,7 +3362,7 @@ impl App {
                         p.rect_filled(Rect::from_center_size(pos2(x, cy), vec2(4.0, 12.0)), 1.5, col);
                     }
                 }
-                None if sound.is_none() => {
+                None if !clip => {
                     p.line_segment([pos2(tr.left(), cy), pos2(tr.right(), cy)], Stroke::new(1.0, col.gamma_multiply(0.25)));
                 }
                 None => {}
@@ -3343,8 +3427,15 @@ impl App {
                         let span = anim.and_then(|a| a.span);
                         let sound_id = match row {
                             TlRow::Layer(id) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) => Some(id),
+                            TlRow::Layer(id) if self.video_clip(id).is_some() => Some(id),
                             _ => None,
                         };
+                        // a video clip without a span yet: its span is the video's length
+                        let span = match (sound_id, span) {
+                            (Some(id), None) => self.video_clip(id).map(|(s, _)| s),
+                            _ => span,
+                        };
+                        let alt = ui.input(|i| i.modifiers.alt);
                         let t_at = t_of(pp.x);
                         if let Some(kt) = key {
                             let picked = self.tl_sel.iter().any(|(r, t)| *r == row && (t - kt).abs() < 1e-6);
@@ -3356,8 +3447,18 @@ impl App {
                                 drag = TlDrag::Key { row, from: kt };
                             }
                         } else if let (Some(id), Some([a, b])) = (sound_id, span.filter(|_| pp.x >= tr.left())) {
-                            // a sound's clip: trim either end, or move it
-                            if (x_of(a) - pp.x).abs() <= 5.0 {
+                            // a sound's or video's clip: trim either end, or move it
+                            if self.video_clip(id).is_some() {
+                                let l = self.doc.get_mut(id).unwrap();
+                                let an = l.anim.get_or_insert_with(Default::default);
+                                if an.span.is_none() {
+                                    an.span = Some([a, b]);
+                                }
+                            }
+                            if alt && self.video_clip(id).is_some() && t_at > a && t_at < b {
+                                let vs = self.doc.get(id).and_then(|l| l.anim.as_ref()).map_or(0.0, |an| an.video_start);
+                                drag = TlDrag::VideoSlip { id, from: vs, at: t_at };
+                            } else if (x_of(a) - pp.x).abs() <= 5.0 {
                                 drag = TlDrag::AudioIn(id);
                             } else if (x_of(b) - pp.x).abs() <= 5.0 {
                                 drag = TlDrag::AudioOut(id);
@@ -3476,16 +3577,22 @@ impl App {
                 TlDrag::AudioIn(id) | TlDrag::AudioOut(id) => {
                     let fl = tl.frame_len();
                     if let Some(l) = self.doc.get_mut(id) {
-                        let src_len = match &l.kind {
-                            LayerKind::Audio(a) if a.len > 0.0 => Some(a.len),
-                            _ => None,
+                        // a sound ends where its samples do; a video goes on as a
+                        // still of its first or last frame
+                        let (src_len, video_speed) = match &l.kind {
+                            LayerKind::Audio(a) if a.len > 0.0 => (Some(a.len), None),
+                            LayerKind::Image(im) => (None, im.video.as_ref().map(|v| v.speed.max(1e-3))),
+                            _ => (None, None),
                         };
                         if let Some(an) = l.anim.as_mut() {
                             if let Some([s0, e0]) = an.span {
                                 if matches!(d, TlDrag::AudioIn(_)) {
-                                    // trim the head: the sound stays where it is in time
-                                    let ns = t.clamp(s0 - an.video_start, e0 - fl);
-                                    an.video_start += ns - s0;
+                                    // trim the head: the picture/sound stays where it is in time
+                                    let ns = match video_speed {
+                                        Some(_) => t.clamp(0.0, e0 - fl),
+                                        None => t.clamp(s0 - an.video_start, e0 - fl),
+                                    };
+                                    an.video_start += (ns - s0) * video_speed.unwrap_or(1.0);
                                     an.span = Some([ns, e0]);
                                 } else {
                                     let max_end = src_len.map_or(f64::MAX, |len| s0 + (len - an.video_start));
@@ -3494,6 +3601,15 @@ impl App {
                                 changed = true;
                             }
                         }
+                    }
+                }
+                TlDrag::VideoSlip { id, from, at } => {
+                    // the video slides under the clip: later in the clip ⇒ earlier video
+                    let speed = self.video_of(id).map_or(1.0, |v| v.speed);
+                    if let Some(an) = self.doc.get_mut(id).and_then(|l| l.anim.as_mut()) {
+                        let dt = tl.snap(t_of(pp.x)) - tl.snap(at);
+                        an.video_start = from - dt * speed;
+                        changed = true;
                     }
                 }
                 TlDrag::SpanIn(row) | TlDrag::SpanOut(row) => {
@@ -3531,7 +3647,7 @@ impl App {
                 self.tl_key = picked.first().copied();
                 self.tl_sel = picked;
             }
-            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::Keys { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_) | TlDrag::AudioMove { .. } | TlDrag::AudioIn(_) | TlDrag::AudioOut(_))) {
+            if matches!(self.tl_drag, Some(TlDrag::Key { .. } | TlDrag::Keys { .. } | TlDrag::SpanIn(_) | TlDrag::SpanOut(_) | TlDrag::AudioMove { .. } | TlDrag::AudioIn(_) | TlDrag::AudioOut(_) | TlDrag::VideoSlip { .. })) {
                 self.mark();
                 self.set_time(self.doc.timeline.time);
             }
