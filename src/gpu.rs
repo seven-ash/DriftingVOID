@@ -16,7 +16,7 @@ use egui::{Color32, Pos2, Rect, vec2};
 use tiny_skia::{Pixmap, Transform};
 use wgpu::util::DeviceExt;
 
-use crate::doc::{Blend, Document, Layer};
+use crate::doc::{Blend, Document, Layer, LayerId};
 use crate::export::{FlatCache, MaskMap, output_size};
 use crate::scene::{Draw, Projected};
 
@@ -146,6 +146,7 @@ pub struct Gpu {
     y_plane: wgpu::RenderPipeline,
     uv_plane: wgpu::RenderPipeline,
     from_nv12: wgpu::RenderPipeline,
+    ground: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
     pub max_side: u32,
     pub adapter: String,
@@ -159,10 +160,35 @@ pub struct Gpu {
     flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>, Arc<wgpu::Texture>, u64)>,
     /// Full-size targets: (w, h, slot).
     pool: HashMap<(u32, u32, usize), wgpu::Texture>,
+    /// Brush layers on the canvas: their tiles in one texture each, updated tile
+    /// by tile as they change (painting re-uploads only the touched tiles).
+    atlases: HashMap<LayerId, Atlas>,
     frame: u64,
 }
 
 static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
+
+/// The window's wgpu device (eframe on wgpu): exports, the playback cache and
+/// the canvas all use it, so textures could be shared and nothing is made twice.
+#[derive(Clone)]
+struct Shared {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    max_side: u32,
+    adapter: String,
+    vendor: u32,
+}
+
+static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+
+/// Called once at start when eframe runs on wgpu.
+pub fn install(rs: &eframe::egui_wgpu::RenderState) {
+    let info = rs.adapter.get_info();
+    let max_side = rs.device.limits().max_texture_dimension_2d;
+    if let Ok(mut s) = SHARED.lock() {
+        *s = Some(Shared { device: rs.device.clone(), queue: rs.queue.clone(), max_side, adapter: info.name, vendor: info.vendor });
+    }
+}
 
 thread_local! {
     /// DV_TIMING: milliseconds spent preparing (scene, flattening), rasterizing,
@@ -234,7 +260,17 @@ pub fn end_job() {
 }
 
 impl Gpu {
+    /// A renderer on the window's device (None under glow): the canvas has its
+    /// own, so its caches and the export's don't push each other out.
+    pub fn on_window_device() -> Option<Gpu> {
+        let s = SHARED.lock().ok()?.clone()?;
+        Some(Gpu::build(s.device, s.queue, s.max_side, s.adapter, s.vendor))
+    }
+
     fn new() -> Result<Gpu, String> {
+        if let Some(s) = SHARED.lock().ok().and_then(|s| s.clone()) {
+            return Ok(Gpu::build(s.device, s.queue, s.max_side, s.adapter, s.vendor));
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -254,6 +290,10 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
+        Ok(Gpu::build(device, queue, limits.max_texture_dimension_2d, info.name, info.vendor))
+    }
+
+    fn build(device: wgpu::Device, queue: wgpu::Queue, max_side: u32, adapter: String, vendor: u32) -> Gpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("export"), source: wgpu::ShaderSource::Wgsl(include_str!("gpu.wgsl").into()) });
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -301,6 +341,7 @@ impl Gpu {
         let y_plane = pipe_fmt("fs_y", None, wgpu::TextureFormat::R8Unorm);
         let uv_plane = pipe_fmt("fs_uv", None, wgpu::TextureFormat::Rg8Unorm);
         let from_nv12 = pipe("fs_from_nv12", None);
+        let ground = pipe("fs_ground", None);
         let over = pipe("fs_over", Some(over_blend));
         let warp = pipe("fs_warp", Some(over_blend));
         let blend = pipe("fs_blend", None);
@@ -342,7 +383,7 @@ impl Gpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        Ok(Gpu {
+        Gpu {
             device,
             queue,
             layout,
@@ -356,20 +397,23 @@ impl Gpu {
             y_plane,
             uv_plane,
             from_nv12,
+            ground,
             dummy,
-            max_side: limits.max_texture_dimension_2d,
-            adapter: info.name,
-            vendor: info.vendor,
+            max_side,
+            adapter,
+            vendor,
             flat: Arc::default(),
             rasters: HashMap::new(),
             flats: HashMap::new(),
             pool: HashMap::new(),
+            atlases: HashMap::new(),
             frame: 0,
-        })
+        }
     }
 
     /// Drops everything kept between frames (after a job).
     pub fn clear(&mut self) {
+        self.atlases.clear();
         self.flat = Arc::default();
         self.rasters.clear();
         self.flats.clear();
@@ -502,7 +546,7 @@ impl Gpu {
         // 1. what to draw, with the rasterizing left as jobs
         let t0 = std::time::Instant::now();
         let scene = crate::scene::build(doc);
-        let view = View { full, s, tw, th, k: k as f32 };
+        let view = View { full, s, tw, th, k: k as f32, origin: None };
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
         let mut nodes = Vec::new();
@@ -513,35 +557,7 @@ impl Gpu {
 
         // 2. rasterize on every core, then upload
         let t1 = std::time::Instant::now();
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let n = jobs.len();
-        let (rasters, keys): (Vec<Raster>, Vec<Option<Key>>) = jobs.into_iter().unzip();
-        let queue: Mutex<Vec<(usize, Raster)>> = Mutex::new(rasters.into_iter().enumerate().rev().collect());
-        let done: Mutex<Vec<Option<(Px, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
-        std::thread::scope(|sc| {
-            for _ in 0..threads.min(n) {
-                sc.spawn(|| {
-                    crate::export::set_ss(view.k);
-                    loop {
-                        let Some((i, job)) = queue.lock().unwrap().pop() else { break };
-                        let r = job();
-                        done.lock().unwrap()[i] = r;
-                    }
-                });
-            }
-        });
-        let mut ready: Vec<Arc<wgpu::Texture>> = Vec::with_capacity(n);
-        for (r, key) in done.into_inner().unwrap().into_iter().zip(keys) {
-            let t = match r {
-                Some((Px::Nv12(f), w, h)) => self.upload_nv12(&f.data, w, h),
-                Some((data, w, h)) => self.upload(&data, w, h),
-                None => Arc::new(self.texture(1, 1, wgpu::TextureUsages::TEXTURE_BINDING)),
-            };
-            if let Some(key) = key {
-                self.rasters.insert(key, (t.clone(), g));
-            }
-            ready.push(t);
-        }
+        let ready = self.run_jobs(jobs, view.k);
 
         // 3. draw
         let t2 = std::time::Instant::now();
@@ -630,6 +646,89 @@ impl Gpu {
         Ok(Pending { buf, kind, w: fw, h: fh, index, rx })
     }
 
+    /// The canvas: the document as framed by the window (`world_min` at the
+    /// target's top left, `s` pixels per canvas unit) drawn over the ground into
+    /// `out` (Rgba8Unorm, the window's pixels). Nothing is read back; egui shows
+    /// `out`. Returns the sub-pixel offset of the drawing (target pixels) to
+    /// place it at, since the drawing snaps to whole canvas pixels.
+    pub fn render_canvas(&mut self, doc: &Document, world_min: Pos2, s: f32, out: &wgpu::Texture, ground: &Ground) -> egui::Vec2 {
+        let (tw, th) = (out.width(), out.height());
+        let ox = (world_min.x * s).floor();
+        let oy = (world_min.y * s).floor();
+        let frac = vec2(world_min.x * s - ox, world_min.y * s - oy);
+        let full = Rect::from_min_size(Pos2::new(ox / s, oy / s), vec2(tw as f32 / s, th as f32 / s));
+        self.frame += 1;
+        let g = self.frame;
+        // the canvas keeps pictures a little longer (a few frames of panning)
+        self.rasters.retain(|_, v| v.1 + 30 >= g);
+        self.flats.retain(|_, v| v.2 + 30 >= g);
+        self.atlases.retain(|_, a| a.used + 30 >= g);
+        self.flat.sweep();
+        let scene = crate::scene::build(doc);
+        let view = View { full, s, tw, th, k: 1.0, origin: Some([ox as i32, oy as i32]) };
+        let cull = full.expand(2.0 / s);
+        let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
+        let mut nodes = Vec::new();
+        for item in scene.items.into_iter().filter(|it| it.bounds.intersects(cull)) {
+            let b = item.bounds;
+            self.prepare(item.draw, b, &view, &mut jobs, &mut nodes);
+        }
+        let ready = self.run_jobs(jobs, 1.0);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let mut u = Uniform::new([0.0, 0.0, tw as f32, th as f32], tw, th);
+        u.h0 = ground.void;
+        u.h1 = ground.warm;
+        u.h2 = ground.cool;
+        u.p0 = ground.warm_at;
+        u.p1 = ground.cool_at;
+        u.bg = ground.dot;
+        // dots: step in target pixels, grid offset, radius
+        let step = ground.step * s;
+        u.rot = [step, (ox).rem_euclid(step), (oy).rem_euclid(step), ground.dot_r];
+        self.pass(&mut enc, &self.ground, out, &u, &self.dummy, &self.dummy);
+        for nd in &nodes {
+            self.run(&mut enc, nd, out, 0, &ready, &view, None);
+        }
+        self.queue.submit([enc.finish()]);
+        frac
+    }
+
+    /// Runs rasterizing jobs on every core and uploads the results (cached by
+    /// their keys).
+    fn run_jobs(&mut self, jobs: Vec<(Raster, Option<Key>)>, k: f32) -> Vec<Arc<wgpu::Texture>> {
+        let g = self.frame;
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let n = jobs.len();
+        let (rasters, keys): (Vec<Raster>, Vec<Option<Key>>) = jobs.into_iter().unzip();
+        let queue: Mutex<Vec<(usize, Raster)>> = Mutex::new(rasters.into_iter().enumerate().rev().collect());
+        let done: Mutex<Vec<Option<(Px, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
+        std::thread::scope(|sc| {
+            for _ in 0..threads.min(n) {
+                sc.spawn(|| {
+                    crate::export::set_ss(k);
+                    loop {
+                        let Some((i, job)) = queue.lock().unwrap().pop() else { break };
+                        let r = job();
+                        done.lock().unwrap()[i] = r;
+                    }
+                });
+            }
+        });
+        let mut ready: Vec<Arc<wgpu::Texture>> = Vec::with_capacity(n);
+        for (r, key) in done.into_inner().unwrap().into_iter().zip(keys) {
+            let t = match r {
+                Some((Px::Nv12(f), w, h)) => self.upload_nv12(&f.data, w, h),
+                Some((data, w, h)) => self.upload(&data, w, h),
+                None => Arc::new(self.texture(1, 1, wgpu::TextureUsages::TEXTURE_BINDING)),
+            };
+            if let Some(key) = key {
+                self.rasters.insert(key, (t.clone(), g));
+            }
+            ready.push(t);
+        }
+        ready
+    }
+
     /// Waits for a queued picture and reads it back.
     pub fn finish(&self, p: Pending) -> Result<Frame, String> {
         let t = std::time::Instant::now();
@@ -673,6 +772,11 @@ impl Gpu {
     fn prepare(&mut self, d: Draw, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         match d {
             Draw::Flat(layer) if matches!(layer.kind, crate::doc::LayerKind::Image(_)) => self.image(layer, v, jobs, out),
+            Draw::Flat(layer) if v.origin.is_some() && matches!(layer.kind, crate::doc::LayerKind::Raster(_)) => {
+                if let Some(n) = self.atlas(&layer, v) {
+                    out.push(n);
+                }
+            }
             Draw::Flat(layer) => {
                 let opacity = layer.opacity;
                 if let Some((img, off)) = self.raster(layer, bounds, v, jobs) {
@@ -708,8 +812,8 @@ impl Gpu {
     /// A 2D layer rasterized into its box (target pixels), from the cache when
     /// it hasn't changed.
     fn raster(&mut self, layer: Layer, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>) -> Option<(Img, [i32; 2])> {
-        let rect = v.px(bounds)?;
-        let key = Key { id: layer.id, content: crate::canvas::content_key(&layer), rect, view: v.key() };
+        let rect = if v.origin.is_some() { v.layer_box(bounds)? } else { v.px(bounds)? };
+        let key = Key { id: layer.id, content: crate::canvas::content_key(&layer), rect: v.abs(rect), view: v.key() };
         let off = [rect[0], rect[1]];
         if let Some(e) = self.rasters.get_mut(&key) {
             e.1 = self.frame;
@@ -836,6 +940,71 @@ impl Gpu {
         out.push(Node::Image { img, inv, rect, opacity: layer.opacity, nearest, px_per_src });
     }
 
+    /// A brush layer from its tile atlas (canvas): sampled as a photo is, nearest
+    /// at 1:1 and bicubic otherwise. None when it would not fit one texture.
+    fn atlas(&mut self, layer: &Layer, v: &View) -> Option<Node> {
+        let crate::doc::LayerKind::Raster(r) = &layer.kind else { return None };
+        use crate::raster::TILE;
+        let (mut tx0, mut ty0, mut tx1, mut ty1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for &(tx, ty) in r.tiles.keys() {
+            tx0 = tx0.min(tx);
+            ty0 = ty0.min(ty);
+            tx1 = tx1.max(tx);
+            ty1 = ty1.max(ty);
+        }
+        if tx1 < tx0 {
+            return None;
+        }
+        let limit = (self.max_side / TILE as u32) as i32;
+        let fits = |a: &Atlas| a.t0.0 <= tx0 && a.t0.1 <= ty0 && a.t0.0 + a.n.0 > tx1 && a.t0.1 + a.n.1 > ty1;
+        let frame = self.frame;
+        if !self.atlases.get(&layer.id).is_some_and(fits) {
+            // a margin of tiles each way, so painting outward rarely makes it again
+            let t0 = (tx0 - 2, ty0 - 2);
+            let n = (tx1 - tx0 + 5, ty1 - ty0 + 5);
+            if n.0 > limit || n.1 > limit {
+                return None;
+            }
+            let tex = self.texture((n.0 * TILE) as u32, (n.1 * TILE) as u32, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+            self.atlases.insert(layer.id, Atlas { tex: Arc::new(tex), t0, n, revs: HashMap::new(), used: frame });
+        }
+        let a = self.atlases.get_mut(&layer.id).unwrap();
+        a.used = frame;
+        let blank = vec![0u8; (TILE * TILE * 4) as usize];
+        let put = |q: &wgpu::Queue, a: &Atlas, key: (i32, i32), px: &[u8]| {
+            q.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &a.tex, mip_level: 0, origin: wgpu::Origin3d { x: ((key.0 - a.t0.0) * TILE) as u32, y: ((key.1 - a.t0.1) * TILE) as u32, z: 0 }, aspect: wgpu::TextureAspect::All },
+                px,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((TILE * 4) as u32), rows_per_image: Some(TILE as u32) },
+                wgpu::Extent3d { width: TILE as u32, height: TILE as u32, depth_or_array_layers: 1 },
+            );
+        };
+        // tiles gone: cleared; tiles new or changed: uploaded
+        let gone: Vec<(i32, i32)> = a.revs.keys().copied().filter(|k| !r.tiles.contains_key(k)).collect();
+        for k in gone {
+            put(&self.queue, a, k, &blank);
+            a.revs.remove(&k);
+        }
+        for (k, t) in &r.tiles {
+            if a.revs.get(k) != Some(&t.rev) {
+                put(&self.queue, a, *k, &t.px);
+                a.revs.insert(*k, t.rev);
+            }
+        }
+        // atlas pixel -> target pixel: one canvas unit per atlas pixel
+        let o = Pos2::new(r.offset.x + (a.t0.0 * TILE) as f32, r.offset.y + (a.t0.1 * TILE) as f32);
+        let s = v.s;
+        let (fx, fy) = ((o.x - v.full.min.x) * s, (o.y - v.full.min.y) * s);
+        let inv = [[1.0 / s, 0.0, -fx / s], [0.0, 1.0 / s, -fy / s]];
+        let (w, h) = ((a.n.0 * TILE) as f32 * s, (a.n.1 * TILE) as f32 * s);
+        let rect = [(fx.floor() as i32).max(0), (fy.floor() as i32).max(0), ((fx + w).ceil() as i32).min(v.tw as i32), ((fy + h).ceil() as i32).min(v.th as i32)];
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            return None;
+        }
+        let nearest = (s - 1.0).abs() < 1e-4;
+        Some(Node::Image { img: Img::Ready(a.tex.clone()), inv, rect, opacity: layer.opacity, nearest, px_per_src: s })
+    }
+
     /// A mask's keep values (1 − hidden) over `rect`.
     fn keep(&mut self, mask: Layer, map: Option<MaskMap>, rect: [i32; 4], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>) -> Img {
         let mut hm = std::collections::hash_map::DefaultHasher::new();
@@ -848,7 +1017,7 @@ impl Gpu {
                 }
             }
         }
-        let key = Key { id: mask.id, content: std::hash::Hasher::finish(&hm), rect, view: v.key() };
+        let key = Key { id: mask.id, content: std::hash::Hasher::finish(&hm), rect: v.abs(rect), view: v.key() };
         if let Some(e) = self.rasters.get_mut(&key) {
             e.1 = self.frame;
             return Img::Ready(e.0.clone());
@@ -1139,6 +1308,31 @@ impl Gpu {
     }
 }
 
+/// A brush layer's tiles in one texture: tile `t0` at its top left, `n` tiles
+/// each way, and the revision of each tile uploaded.
+struct Atlas {
+    tex: Arc<wgpu::Texture>,
+    t0: (i32, i32),
+    n: (i32, i32),
+    revs: HashMap<(i32, i32), u64>,
+    used: u64,
+}
+
+/// The canvas ground (theme::draw_ground): void colour, two soft blooms and the
+/// drifting dot grid. Colours premultiplied, 0..1; positions in target pixels.
+pub struct Ground {
+    pub void: [f32; 4],
+    pub warm: [f32; 4],
+    pub cool: [f32; 4],
+    /// Centre x, y and radius of each bloom.
+    pub warm_at: [f32; 4],
+    pub cool_at: [f32; 4],
+    pub dot: [f32; 4],
+    /// Dot spacing in canvas units, and radius in target pixels.
+    pub step: f32,
+    pub dot_r: f32,
+}
+
 /// The drawn picture: its canvas rect, target pixels per unit and size, and the
 /// supersampling factor.
 #[derive(Clone, Copy)]
@@ -1148,6 +1342,9 @@ struct View {
     tw: u32,
     th: u32,
     k: f32,
+    /// Canvas mode: `full.min · s` in whole pixels. Layer pictures are then kept
+    /// by their place in canvas pixels, so panning reuses them.
+    origin: Option<[i32; 2]>,
 }
 
 impl View {
@@ -1165,7 +1362,41 @@ impl View {
     }
 
     fn key(&self) -> [u32; 4] {
-        [self.full.min.x.to_bits(), self.full.min.y.to_bits(), self.s.to_bits(), self.k.to_bits()]
+        match self.origin {
+            Some(_) => [0, 0, self.s.to_bits(), self.k.to_bits()],
+            None => [self.full.min.x.to_bits(), self.full.min.y.to_bits(), self.s.to_bits(), self.k.to_bits()],
+        }
+    }
+
+    /// A target rect in canvas pixels (canvas mode), for cache keys.
+    fn abs(&self, r: [i32; 4]) -> [i32; 4] {
+        match self.origin {
+            Some([ox, oy]) => [r[0] + ox, r[1] + oy, r[2] + ox, r[3] + oy],
+            None => r,
+        }
+    }
+
+    /// Canvas mode: a layer's box in target pixels, the whole layer when it is
+    /// not huge (so panning keeps its picture), else what is in view and a
+    /// margin, on a 512 px grid of canvas pixels.
+    fn layer_box(&self, b: Rect) -> Option<[i32; 4]> {
+        let [ox, oy] = self.origin?;
+        let a = [(b.min.x * self.s).floor() as i32 - 1, (b.min.y * self.s).floor() as i32 - 1, (b.max.x * self.s).ceil() as i32 + 1, (b.max.y * self.s).ceil() as i32 + 1];
+        if a[2] <= a[0] || a[3] <= a[1] {
+            return None;
+        }
+        let mut r = a;
+        if a[2] - a[0] > 4096 || a[3] - a[1] > 4096 {
+            let g = 512;
+            let v = [ox - g, oy - g, ox + self.tw as i32 + g, oy + self.th as i32 + g];
+            let v = [v[0].div_euclid(g) * g, v[1].div_euclid(g) * g, (v[2] + g - 1).div_euclid(g) * g, (v[3] + g - 1).div_euclid(g) * g];
+            r = [a[0].max(v[0]), a[1].max(v[1]), a[2].min(v[2]), a[3].min(v[3])];
+        }
+        // visible at all?
+        if r[2] <= ox || r[3] <= oy || r[0] >= ox + self.tw as i32 || r[1] >= oy + self.th as i32 || r[2] <= r[0] || r[3] <= r[1] {
+            return None;
+        }
+        Some([r[0] - ox, r[1] - oy, r[2] - ox, r[3] - oy])
     }
 }
 

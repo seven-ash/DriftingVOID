@@ -218,3 +218,18 @@ fn gpu_parity() {
     }
     assert!(fails.is_empty(), "GPU differs from the CPU reference: {fails:?}");
 }
+
+/// DV_WRITE_FLAT=path.void: saves the flat golden scene (brush layer, masks,
+/// blend modes) as a project, to open it in the app for canvas captures.
+#[test]
+#[ignore]
+fn write_flat_void() {
+    if let Some(p) = std::env::var_os("DV_WRITE_FLAT") {
+        let mut doc = flat_doc();
+        // a brush layer that shows (red strokes over the left)
+        let mut r = crate::raster::RasterLayer::default();
+        r.fill_rect(Rect::from_min_size(pos2(10.0, 10.0), vec2(30.0, 280.0)), true);
+        doc.insert("brush2".into(), LayerKind::Raster(r), None);
+        crate::io::save_project(&doc, std::path::Path::new(&p)).unwrap();
+    }
+}

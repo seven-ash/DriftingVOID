@@ -12,6 +12,7 @@ mod export;
 mod extrude;
 mod fontdb;
 mod glass;
+mod glass_gpu;
 mod gpu;
 #[cfg(test)]
 mod golden;
@@ -65,10 +66,23 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true)
             .with_icon(window_icon()),
         multisampling: 4,
-        // glow until the canvas moves onto the new renderer (phase 3 of
-        // docs/updates/wgpu-renderer.md): masks, groups, blends and glass are GL
-        // callbacks. DV_WGPU=1 runs eframe on wgpu to try it (those effects off).
-        renderer: if std::env::var_os("DV_WGPU").is_some() { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow },
+        // wgpu: the canvas and glass draw on the GPU renderer (gpu.rs, glass_gpu.rs).
+        // DV_GL=1 runs the old glow backend (GL glass and effects) to compare,
+        // until it is removed.
+        renderer: if std::env::var_os("DV_GL").is_some() { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu },
+        // the export renders on this device too: the adapter's full texture size
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
+                power_preference: eframe::wgpu::PowerPreference::HighPerformance,
+                device_descriptor: std::sync::Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
+                    label: Some("drifting void"),
+                    required_limits: eframe::wgpu::Limits { max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d, ..eframe::wgpu::Limits::default() },
+                    ..Default::default()
+                }),
+                ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native("Drifting VOID", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))))

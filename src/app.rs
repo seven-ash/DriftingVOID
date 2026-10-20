@@ -917,6 +917,9 @@ pub struct App {
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
+    /// The canvas on the GPU renderer (eframe on wgpu), drawn into a texture egui
+    /// shows; None under glow (the canvas then paints egui meshes).
+    cgpu: Option<CanvasGpu>,
     /// Frames of the canvas rendered ahead for playback (phase 4).
     pcache: crate::playcache::PlayCache,
     /// Bumped on every commit, undo/redo and load (the cache follows it).
@@ -927,6 +930,8 @@ pub struct App {
     /// DV_TIMING while playing: (since, cached frames, live frames, ms drawing
     /// cached, ms drawing live), printed every 2 s.
     cache_stats: (f64, u32, u32, f64, f64),
+    /// DV_TIMING: GPU canvas frames and time since `.0`.
+    canvas_stats: (f64, u32, f64),
     /// Pre-roll: wall time the play button was pressed, while the video decoders
     /// fill up; the clock waits at its start until every one has a frame.
     tl_arm: Option<f64>,
@@ -998,6 +1003,46 @@ fn canvas_dim_outside(painter: &egui::Painter, area: Rect, q: [Pos2; 4], col: Co
         mesh.add_triangle(k, 4 + n, 4 + k);
     }
     painter.with_clip_rect(area).add(Shape::mesh(mesh));
+}
+
+/// The canvas renderer and its target texture (registered with egui).
+struct CanvasGpu {
+    gpu: crate::gpu::Gpu,
+    tex: Option<(eframe::wgpu::Texture, egui::TextureId)>,
+    rs: eframe::egui_wgpu::RenderState,
+}
+
+impl CanvasGpu {
+    /// The target texture at `w`×`h` pixels (made, or remade at a new size).
+    fn target(&mut self, w: u32, h: u32) -> (eframe::wgpu::Texture, egui::TextureId) {
+        use eframe::wgpu;
+        if let Some((t, id)) = &self.tex {
+            if t.width() == w && t.height() == h {
+                return (t.clone(), *id);
+            }
+        }
+        let t = self.rs.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("canvas"),
+            size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = t.create_view(&Default::default());
+        let mut r = self.rs.renderer.write();
+        let id = match &self.tex {
+            Some((_, id)) => {
+                r.update_egui_texture_from_wgpu_texture(&self.rs.device, &view, wgpu::FilterMode::Nearest, *id);
+                *id
+            }
+            None => r.register_native_texture(&self.rs.device, &view, wgpu::FilterMode::Nearest),
+        };
+        self.tex = Some((t.clone(), id));
+        (t, id)
+    }
 }
 
 fn is_paint_layer(k: &LayerKind) -> bool {
@@ -1103,9 +1148,15 @@ impl App {
             tl_h: 120.0,
             tl_play: None,
             pcache: crate::playcache::PlayCache::new(),
+            cgpu: cc.wgpu_render_state.as_ref().and_then(|rs| {
+                crate::gpu::install(rs);
+                crate::glass_gpu::install(rs, 4);
+                crate::gpu::Gpu::on_window_device().map(|gpu| CanvasGpu { gpu, tex: None, rs: rs.clone() })
+            }),
             doc_rev: 0,
             last_input: 0.0,
             cache_stats: (0.0, 0, 0, 0.0, 0.0),
+            canvas_stats: (0.0, 0, 0.0),
             tl_arm: None,
             warm: HashMap::new(),
             warm_moved: 0.0,
@@ -9284,7 +9335,9 @@ impl App {
 
         let painter = ui.painter_at(rect);
         let xf = self.xf();
-        theme::draw_ground(&painter, rect, &xf);
+        if self.cgpu.is_none() {
+            theme::draw_ground(&painter, rect, &xf);
+        }
 
         self.tex.begin_frame();
         // Crop mode: ghost of the full photo underneath.
@@ -9333,7 +9386,54 @@ impl App {
             (Some(tex), None) => {
                 painter.image(tex, rect, uv, Color32::WHITE);
             }
-            _ => canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None),
+            _ => match &mut self.cgpu {
+                Some(cg) => {
+                    // the document on the GPU renderer, over its ground
+                    let t_gpu = std::time::Instant::now();
+                    let (w, h) = ((rect.width() * ppp).ceil() as u32 + 1, (rect.height() * ppp).ceil() as u32 + 1);
+                    let (tex, id) = cg.target(w, h);
+                    let ground = theme::ground_params(w as f32, h as f32, ppp, self.zoom);
+                    // cropping: the whole photo faintly under the cropped one
+                    let ghost = (self.tool == Tool::Crop).then(|| self.sel).flatten().and_then(|id| {
+                        let i = self.doc.index_of(id)?;
+                        let l = self.doc.get(id)?;
+                        let LayerKind::Image(im) = &l.kind else { return None };
+                        let mut g = l.clone();
+                        g.id = u64::MAX - 7;
+                        g.opacity = 0.3 * l.opacity;
+                        g.anim = None;
+                        if let LayerKind::Image(gi) = &mut g.kind {
+                            gi.crop = Rect::from_min_size(Pos2::ZERO, im.src.size());
+                            gi.center = im.src_to_world(gi.crop.center());
+                        }
+                        let mut d = self.doc.clone();
+                        d.layers.insert(i, g);
+                        Some(d)
+                    });
+                    let frac = cg.gpu.render_canvas(ghost.as_ref().unwrap_or(&self.doc), xf.s2w(rect.min), self.zoom * ppp, &tex, &ground);
+                    let at = Rect::from_min_size(rect.min - frac / ppp, vec2(w as f32, h as f32) / ppp);
+                    painter.image(id, at, uv, Color32::WHITE);
+                    // the glass cards blur this picture
+                    crate::glass_gpu::update(&cg.rs, &tex, [at.min.x * ppp, at.min.y * ppp]);
+                    crate::glass::scene_drawn(ctx.cumulative_pass_nr());
+                    // what only the editor shows
+                    for l in self.doc.layers.iter().filter(|l| l.visible && self.doc.alive(l)) {
+                        if let LayerKind::Audio(a) = &l.kind {
+                            canvas::sound_gizmo(&painter, xf.rect_w2s(a.rect()), a.mute);
+                        }
+                    }
+                    if std::env::var_os("DV_TIMING").is_some() {
+                        let st = &mut self.canvas_stats;
+                        st.1 += 1;
+                        st.2 += t_gpu.elapsed().as_secs_f64() * 1e3;
+                        if self.now - st.0 >= 2.0 {
+                            eprintln!("GPU canvas: {} frames in {:.1} s, {:.2} ms each (CPU side)", st.1, self.now - st.0, st.2 / st.1.max(1) as f64);
+                            *st = (self.now, 0, 0.0);
+                        }
+                    }
+                }
+                None => canvas::draw_doc(&painter, &ctx, &self.doc, &xf, &mut self.tex, None),
+            },
         }
         if let Some(q) = region_quad {
             // a preview monitor: what lies outside the region is dimmed while playing
@@ -11174,6 +11274,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
+        crate::glass::begin_pass(ctx.cumulative_pass_nr());
         if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving() || i.pointer.any_down()) {
             self.last_input = self.now;
         }

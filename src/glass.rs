@@ -39,10 +39,36 @@ pub fn set_shadow(on: bool) {
 }
 
 /// GL glass path works (independent of the glass on/off setting).
-/// Not running on glow (wgpu): no GL callbacks, so glass, masks, groups and blends
-/// take their CPU/opaque paths.
+/// Not running on glow (wgpu): no GL callbacks. The canvas draws masks, groups
+/// and blends on the GPU renderer, and glass comes from `glass_gpu`.
 pub fn no_gl() {
     FAILED.store(true, Ordering::Relaxed);
+}
+
+static WGPU: AtomicBool = AtomicBool::new(false);
+/// The pass in which the GPU canvas last gave the glass a picture.
+static SCENE_PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Glass is drawn by `glass_gpu` (eframe on wgpu).
+pub fn set_wgpu(on: bool) {
+    WGPU.store(on, Ordering::Relaxed);
+}
+
+pub fn is_wgpu() -> bool {
+    WGPU.load(Ordering::Relaxed)
+}
+
+/// The GPU canvas drew this pass (glass has something to show).
+pub fn scene_drawn(pass: u64) {
+    SCENE_PASS.store(pass, Ordering::Relaxed);
+}
+
+static CUR_PASS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A new pass: glass under wgpu needs the canvas drawn this pass or the last
+/// (not in the 3D workspace, where cards are opaque).
+pub fn begin_pass(pass: u64) {
+    CUR_PASS.store(pass, Ordering::Relaxed);
 }
 
 pub fn gl_ok() -> bool {
@@ -50,6 +76,10 @@ pub fn gl_ok() -> bool {
 }
 
 pub fn available() -> bool {
+    if is_wgpu() {
+        let (drawn, now) = (SCENE_PASS.load(Ordering::Relaxed), CUR_PASS.load(Ordering::Relaxed));
+        return ENABLED.load(Ordering::Relaxed) && drawn != u64::MAX && drawn + 1 >= now;
+    }
     ENABLED.load(Ordering::Relaxed) && (READY.load(Ordering::Relaxed) || !FAILED.load(Ordering::Relaxed))
 }
 
@@ -141,6 +171,9 @@ pub fn set_strength(v: f32) {
 }
 
 pub fn shape(card: Rect, look: Look) -> Shape {
+    if is_wgpu() {
+        return crate::glass_gpu::shape(card, look);
+    }
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         // SAFETY: called by egui_glow on the GL thread with its context current.
         unsafe { paint(painter.gl(), &info, card, look) };
@@ -152,6 +185,9 @@ pub fn shape(card: Rect, look: Look) -> Shape {
 /// (gets tint, refraction and dispersion under glass); everything painted after it
 /// and before a glass card is the *overlay* layer (only blurred, full brightness).
 pub fn scene_marker(screen: Rect, frame: u64) -> Shape {
+    if is_wgpu() {
+        return Shape::Noop;
+    }
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         // SAFETY: called by egui_glow on the GL thread with its context current.
         unsafe { snapshot(painter.gl(), &info, frame, false) };
@@ -163,6 +199,9 @@ pub fn scene_marker(screen: Rect, frame: u64) -> Shape {
 /// lies over another panel shows that panel blurred only (tint, refraction and
 /// dispersion are applied once, to what is below all panels).
 pub fn ui_marker(screen: Rect, frame: u64) -> Shape {
+    if is_wgpu() {
+        return Shape::Noop;
+    }
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         // SAFETY: called by egui_glow on the GL thread with its context current.
         unsafe { snapshot(painter.gl(), &info, frame, true) };

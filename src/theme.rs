@@ -254,6 +254,35 @@ pub fn draw_void(painter: &Painter, rect: Rect) {
     radial(painter, rect.right_top() + vec2(-rect.width() * 0.15, rect.height() * 0.08), d * 0.5, BLOOM_COOL().gamma_multiply(0.08));
 }
 
+/// Dot grid spacing (canvas units) for a zoom: kept 28–112 screen points apart.
+pub fn dot_step(zoom: f32) -> f32 {
+    let mut step = 32.0;
+    while step * zoom < 28.0 {
+        step *= 2.0;
+    }
+    while step * zoom > 112.0 && step > 8.0 {
+        step *= 0.5;
+    }
+    step
+}
+
+/// `draw_ground` for the GPU canvas: a `w`×`h` px target at `ppp` pixels per
+/// point, the dot grid for `zoom`.
+pub fn ground_params(w: f32, h: f32, ppp: f32, zoom: f32) -> crate::gpu::Ground {
+    let c = |c: Color32| c.to_array().map(|v| v as f32 / 255.0);
+    let d = w.max(h);
+    crate::gpu::Ground {
+        void: c(VOID()),
+        warm: c(BLOOM_WARM().gamma_multiply(0.07)),
+        cool: c(BLOOM_COOL().gamma_multiply(0.08)),
+        warm_at: [w * 0.12, h - h * 0.1, d * 0.55, 0.0],
+        cool_at: [w - w * 0.15, h * 0.08, d * 0.5, 0.0],
+        dot: c(INK_3().gamma_multiply(0.35)),
+        step: dot_step(zoom),
+        dot_r: ppp,
+    }
+}
+
 pub fn draw_ground(painter: &Painter, rect: Rect, xf: &crate::canvas::Xf) {
     draw_void(painter, rect);
     // drifting dot grid in world space, spacing kept >= 28 screen points

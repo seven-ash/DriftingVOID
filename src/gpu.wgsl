@@ -297,3 +297,29 @@ fn fs_from_nv12(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let rgb = vec3f(yy + 1.5748 * cr, yy - 0.187324 * cb - 0.468124 * cr, yy + 1.8556 * cb);
     return vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)), 1.0);
 }
+
+// The canvas ground: void colour (h0), two blooms (h1/p0 warm, h2/p1 cool: colour;
+// centre x, y and radius), and the dot grid (bg: colour; rot: step, offset x, y,
+// radius), as theme::draw_ground paints it.
+@fragment
+fn fs_ground(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let p = pos.xy;
+    var c = u.h0;
+    for (var i = 0; i < 2; i++) {
+        var col = u.h1;
+        var at = u.p0;
+        if i == 1 {
+            col = u.h2;
+            at = u.p1;
+        }
+        let a = max(0.0, 1.0 - distance(p, at.xy) / max(at.z, 1.0));
+        let s = col * a;
+        c = s + c * (1.0 - s.a);
+    }
+    let step = u.rot.x;
+    let q = (p + u.rot.yz) - floor((p + u.rot.yz) / step + 0.5) * step;
+    let cov = clamp(u.rot.w + 0.5 - length(q), 0.0, 1.0);
+    let d = u.bg * cov;
+    c = d + c * (1.0 - d.a);
+    return vec4f(c.rgb, 1.0);
+}
