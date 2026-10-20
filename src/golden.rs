@@ -306,6 +306,45 @@ fn gpu_text_matches_cpu() {
     }
 }
 
+/// A mask that hides nothing (empty, or painted far away) leaves a thick 3D
+/// text exactly as it is without one (Ash, 10-21: an empty mask cut the
+/// sides).
+#[test]
+fn empty_mask_leaves_thick_text() {
+    let mut plain = room_doc(false, 0.0);
+    let owner = plain.layers.iter().find(|l| l.place.as_ref().is_some_and(|p| p.thick > 0.0) && l.opacity >= 1.0).unwrap().id;
+    // deep: the sides reach well past the front face's bounds
+    plain.get_mut(owner).unwrap().place.as_mut().unwrap().thick = 400.0;
+    let region = plain.content_bounds().unwrap();
+    let with_mask = |paint: bool| {
+        let mut d = plain.clone();
+        let mut m = crate::raster::RasterLayer::default();
+        if paint {
+            m.fill_rect(Rect::from_min_size(region.min + vec2(2.0, 2.0), vec2(4.0, 4.0)), true);
+        }
+        let mid = d.insert("m".into(), LayerKind::Raster(m), None);
+        let k0 = crate::anim::key_of(d.get(owner).unwrap(), 0.0);
+        let ml = d.get_mut(mid).unwrap();
+        ml.mask_of = Some(owner);
+        ml.mask_anchor = Some((owner, k0.center));
+        ml.mask_invert = false;
+        d
+    };
+    let r = crate::gpu::with_gpu(|g| {
+        let draw = |g: &mut crate::gpu::Gpu, d: &Document| g.render_ss(d, region.center(), region.size(), 0.0, 1.0, Some(Color32::BLACK), 1).unwrap();
+        let a = draw(g, &plain);
+        let b = draw(g, &with_mask(false));
+        let c = draw(g, &with_mask(true));
+        (diff(&a, &b), diff(&a, &c))
+    });
+    let Some((empty, far)) = r else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    eprintln!("empty {empty:?}, far {far:?}");
+    assert!(empty.0 < 1e-4 && far.0 < 1e-4, "a mask that hides nothing changed the picture");
+}
+
 /// DV_WRITE_FLAT=path.void: saves the flat golden scene (brush layer, masks,
 /// blend modes) as a project, to open it in the app for canvas captures.
 #[test]
