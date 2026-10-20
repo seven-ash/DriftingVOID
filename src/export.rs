@@ -237,7 +237,11 @@ fn draw_projected(out: &mut Pixmap, p: &Projected, b: &Band) {
 #[derive(Default)]
 pub struct FlatCache {
     #[allow(clippy::type_complexity)]
-    map: std::sync::Mutex<HashMap<(u64, u32, u64, u8, bool), (std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>, u64)>>,
+    map: std::sync::Mutex<HashMap<(u64, u32, u64, u8, bool), (std::sync::Arc<(Pixmap, Rect, f32, Option<std::sync::Arc<Vec<crate::extrude::Edge>>>)>, u64)>>,
+    /// Outlines of thick layers, traced at whole powers of two of resolution
+    /// (zooming re-traces only when the scale doubles or halves).
+    #[allow(clippy::type_complexity)]
+    edges: std::sync::Mutex<HashMap<(u64, u64, u8, u32), (std::sync::Arc<Vec<crate::extrude::Edge>>, u64)>>,
     frame: std::sync::atomic::AtomicU64,
 }
 
@@ -266,10 +270,24 @@ impl FlatCache {
     pub fn sweep(&self) {
         let g = self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.map.lock().unwrap().retain(|_, v| v.1 + 1 >= g);
+        self.edges.lock().unwrap().retain(|_, v| v.1 + 1 >= g);
+    }
+
+    /// While the view is zooming: any picture of this layer already made (the
+    /// sharpest), so zooming doesn't wait for a new one each step. None when
+    /// there is none yet.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn nearest(&self, layer: &Layer, pl: &crate::persp::Placement) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<std::sync::Arc<Vec<crate::extrude::Edge>>>)>> {
+        let (id, ck, segs, thick) = (layer.id, crate::canvas::content_key(layer), pl.segs.clamp(1, 4), pl.thick > 0.0);
+        let g = self.frame.load(std::sync::atomic::Ordering::Relaxed);
+        let mut m = self.map.lock().unwrap();
+        let best = m.iter_mut().filter(|(k, _)| k.0 == id && k.2 == ck && k.3 == segs && k.4 == thick).max_by(|a, b| f32::from_bits(a.0.1).total_cmp(&f32::from_bits(b.0.1)))?;
+        best.1.1 = g;
+        Some(best.1.0.clone())
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>> {
+    pub(crate) fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<std::sync::Arc<Vec<crate::extrude::Edge>>>)>> {
         // in steps of 2^(1/8), rounded up: a layer turning or moving in depth keeps
         // its flattened picture (and outline) for a while instead of re-making
         // them every frame, and never gets less sharp than asked
@@ -284,12 +302,25 @@ impl FlatCache {
         let (src, rect, res) = flatten_layer(layer, res)?;
         let segs = pl.segs.clamp(1, 4);
         let edges = (pl.thick > 0.0).then(|| {
-            if segs > 1 {
-                // the outline from a finer picture (more segments)
-                flatten_layer(layer, res * segs as f32).map_or_else(|| crate::extrude::trace(&src, rect, res), |(f, fr, fres)| crate::extrude::trace(&f, fr, fres))
-            } else {
-                crate::extrude::trace(&src, rect, res)
+            // the outline at a whole power of two of resolution (at most 4), times
+            // the segments (at most 8): its detail follows the zoom only in
+            // doublings, and tracing stays cheap when zoomed far in
+            let re = 2f32.powf(res.max(1e-3).log2().ceil()).min(4.0);
+            let key = (layer.id, crate::canvas::content_key(layer), segs, re.to_bits());
+            let mut em = self.edges.lock().unwrap();
+            if let Some(e) = em.get_mut(&key) {
+                e.1 = g;
+                return e.0.clone();
             }
+            let tr = (re * segs as f32).min(8.0);
+            let e = if (tr - res).abs() < 1e-6 {
+                crate::extrude::trace(&src, rect, res)
+            } else {
+                flatten_layer(layer, tr).map_or_else(|| crate::extrude::trace(&src, rect, res), |(f, fr, fres)| crate::extrude::trace(&f, fr, fres))
+            };
+            let e = std::sync::Arc::new(e);
+            em.insert(key, (e.clone(), g));
+            e
         });
         let v = std::sync::Arc::new((src, rect, res, edges));
         m.insert(key, (v.clone(), g));

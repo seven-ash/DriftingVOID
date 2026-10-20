@@ -931,7 +931,7 @@ pub struct App {
     /// cached, ms drawing live), printed every 2 s.
     cache_stats: (f64, u32, u32, f64, f64),
     /// DV_TIMING: GPU canvas frames and time since `.0`.
-    canvas_stats: (f64, u32, f64),
+    canvas_stats: (f64, u32, f64, f64),
     /// Pre-roll: wall time the play button was pressed, while the video decoders
     /// fill up; the clock waits at its start until every one has a frame.
     tl_arm: Option<f64>,
@@ -1010,6 +1010,8 @@ struct CanvasGpu {
     gpu: crate::gpu::Gpu,
     tex: Option<(eframe::wgpu::Texture, egui::TextureId)>,
     rs: eframe::egui_wgpu::RenderState,
+    /// The last zoom and when it changed.
+    zoom: (f32, f64),
 }
 
 impl CanvasGpu {
@@ -1151,12 +1153,12 @@ impl App {
             cgpu: cc.wgpu_render_state.as_ref().and_then(|rs| {
                 crate::gpu::install(rs);
                 crate::glass_gpu::install(rs, 4);
-                crate::gpu::Gpu::on_window_device().map(|gpu| CanvasGpu { gpu, tex: None, rs: rs.clone() })
+                crate::gpu::Gpu::on_window_device().map(|gpu| CanvasGpu { gpu, tex: None, rs: rs.clone(), zoom: (0.0, 0.0) })
             }),
             doc_rev: 0,
             last_input: 0.0,
             cache_stats: (0.0, 0, 0, 0.0, 0.0),
-            canvas_stats: (0.0, 0, 0.0),
+            canvas_stats: (0.0, 0, 0.0, 0.0),
             tl_arm: None,
             warm: HashMap::new(),
             warm_moved: 0.0,
@@ -9333,6 +9335,27 @@ impl App {
             self.handle_canvas_input(&ctx, rect, ui.layer_id());
         }
 
+        // DV_ZOOM_SWEEP / DV_PAN_SWEEP: the view zooms in and out, or pans, by
+        // itself every frame (measuring the canvas without input)
+        if std::env::var_os("DV_ZOOM_SWEEP").is_some() || std::env::var_os("DV_PAN_SWEEP").is_some() {
+            ctx.request_repaint();
+        }
+        if std::env::var_os("DV_ZOOM_SWEEP").is_some() && self.now > 3.0 {
+            let k = if ((self.now - 3.0) / 2.0) as i64 % 2 == 0 { 1.02 } else { 1.0 / 1.02 };
+            self.zoom_at(rect.center(), k);
+            ctx.request_repaint();
+        }
+        if let Some(z) = std::env::var("DV_PAN_SWEEP").ok().and_then(|v| v.parse::<f32>().ok()) {
+            // DV_PAN_SWEEP=zoom: pans at that zoom
+            if self.now <= 3.0 && (self.zoom - z).abs() > 1e-3 {
+                self.zoom_at(rect.center(), z / self.zoom);
+            }
+        }
+        if std::env::var_os("DV_PAN_SWEEP").is_some() && self.now > 3.0 {
+            let d = if ((self.now - 3.0) / 2.0) as i64 % 2 == 0 { 6.0 } else { -6.0 };
+            self.pan.x += d;
+            ctx.request_repaint();
+        }
         let painter = ui.painter_at(rect);
         let xf = self.xf();
         if self.cgpu.is_none() {
@@ -9410,7 +9433,16 @@ impl App {
                         d.layers.insert(i, g);
                         Some(d)
                     });
-                    let frac = cg.gpu.render_canvas(ghost.as_ref().unwrap_or(&self.doc), xf.s2w(rect.min), self.zoom * ppp, &tex, &ground);
+                    // zooming: 3D-space layers keep the picture they have until the
+                    // zoom rests, then are made sharp at the new scale
+                    if (cg.zoom.0 - self.zoom).abs() > 1e-6 {
+                        cg.zoom = (self.zoom, self.now);
+                    }
+                    let zooming = self.now - cg.zoom.1 < 0.25;
+                    if zooming {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(260));
+                    }
+                    let frac = cg.gpu.render_canvas(ghost.as_ref().unwrap_or(&self.doc), xf.s2w(rect.min), self.zoom * ppp, &tex, &ground, zooming);
                     let at = Rect::from_min_size(rect.min - frac / ppp, vec2(w as f32, h as f32) / ppp);
                     painter.image(id, at, uv, Color32::WHITE);
                     // the glass cards blur this picture
@@ -9425,10 +9457,14 @@ impl App {
                     if std::env::var_os("DV_TIMING").is_some() {
                         let st = &mut self.canvas_stats;
                         st.1 += 1;
-                        st.2 += t_gpu.elapsed().as_secs_f64() * 1e3;
+                        let ms = t_gpu.elapsed().as_secs_f64() * 1e3;
+                        st.2 += ms;
+                        st.3 = st.3.max(ms);
                         if self.now - st.0 >= 2.0 {
-                            eprintln!("GPU canvas: {} frames in {:.1} s, {:.2} ms each (CPU side)", st.1, self.now - st.0, st.2 / st.1.max(1) as f64);
-                            *st = (self.now, 0, 0.0);
+                            let g = crate::gpu::take_stats();
+                            let n = st.1.max(1) as f64;
+                            eprintln!("GPU canvas: {} frames in {:.1} s, {:.2} ms each, worst {:.1} (CPU side): prepare {:.2}, rasterize {:.2}, encode {:.2}", st.1, self.now - st.0, st.2 / n, st.3, g[0] / n, g[1] / n, g[2] / n);
+                            *st = (self.now, 0, 0.0, 0.0);
                         }
                     }
                 }

@@ -157,7 +157,10 @@ pub struct Gpu {
     /// Rasterized 2D layers and mask keep images, by content and placement.
     rasters: HashMap<Key, (Arc<wgpu::Texture>, u64)>,
     /// Textures of flattened 3D layers (the entry is kept so its address stays unique).
-    flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>, Arc<wgpu::Texture>, u64)>,
+    flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Arc<Vec<crate::extrude::Edge>>>)>, Arc<wgpu::Texture>, u64)>,
+    /// Extrusion sides in canvas units, by outline, placement, camera and light:
+    /// panning only moves them, and a still layer doesn't recompute them.
+    sides: HashMap<u64, (Arc<Vec<crate::extrude::Side>>, u64)>,
     /// Full-size targets: (w, h, slot).
     pool: HashMap<(u32, u32, usize), wgpu::Texture>,
     /// Brush layers on the canvas: their tiles in one texture each, updated tile
@@ -407,6 +410,7 @@ impl Gpu {
             flats: HashMap::new(),
             pool: HashMap::new(),
             atlases: HashMap::new(),
+            sides: HashMap::new(),
             frame: 0,
         }
     }
@@ -414,6 +418,7 @@ impl Gpu {
     /// Drops everything kept between frames (after a job).
     pub fn clear(&mut self) {
         self.atlases.clear();
+        self.sides.clear();
         self.flat = Arc::default();
         self.rasters.clear();
         self.flats.clear();
@@ -541,12 +546,13 @@ impl Gpu {
         let g = self.frame;
         self.rasters.retain(|_, v| v.1 + 1 >= g);
         self.flats.retain(|_, v| v.2 + 1 >= g);
+        self.sides.retain(|_, v| v.1 + 1 >= g);
         self.flat.sweep();
 
         // 1. what to draw, with the rasterizing left as jobs
         let t0 = std::time::Instant::now();
         let scene = crate::scene::build(doc);
-        let view = View { full, s, tw, th, k: k as f32, origin: None };
+        let view = View { full, s, tw, th, k: k as f32, origin: None, zooming: false };
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
         let mut nodes = Vec::new();
@@ -651,7 +657,7 @@ impl Gpu {
     /// `out` (Rgba8Unorm, the window's pixels). Nothing is read back; egui shows
     /// `out`. Returns the sub-pixel offset of the drawing (target pixels) to
     /// place it at, since the drawing snaps to whole canvas pixels.
-    pub fn render_canvas(&mut self, doc: &Document, world_min: Pos2, s: f32, out: &wgpu::Texture, ground: &Ground) -> egui::Vec2 {
+    pub fn render_canvas(&mut self, doc: &Document, world_min: Pos2, s: f32, out: &wgpu::Texture, ground: &Ground, zooming: bool) -> egui::Vec2 {
         let (tw, th) = (out.width(), out.height());
         let ox = (world_min.x * s).floor();
         let oy = (world_min.y * s).floor();
@@ -663,9 +669,11 @@ impl Gpu {
         self.rasters.retain(|_, v| v.1 + 30 >= g);
         self.flats.retain(|_, v| v.2 + 30 >= g);
         self.atlases.retain(|_, a| a.used + 30 >= g);
+        self.sides.retain(|_, v| v.1 + 30 >= g);
         self.flat.sweep();
+        let t0 = std::time::Instant::now();
         let scene = crate::scene::build(doc);
-        let view = View { full, s, tw, th, k: 1.0, origin: Some([ox as i32, oy as i32]) };
+        let view = View { full, s, tw, th, k: 1.0, origin: Some([ox as i32, oy as i32]), zooming };
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
         let mut nodes = Vec::new();
@@ -673,7 +681,9 @@ impl Gpu {
             let b = item.bounds;
             self.prepare(item.draw, b, &view, &mut jobs, &mut nodes);
         }
+        let t1 = std::time::Instant::now();
         let ready = self.run_jobs(jobs, 1.0);
+        let t2 = std::time::Instant::now();
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut u = Uniform::new([0.0, 0.0, tw as f32, th as f32], tw, th);
         u.h0 = ground.void;
@@ -690,6 +700,17 @@ impl Gpu {
             self.run(&mut enc, nd, out, 0, &ready, &view, None);
         }
         self.queue.submit([enc.finish()]);
+        if TIMING.with(|c| c.get()) {
+            let t3 = std::time::Instant::now();
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
+            STATS.with(|c| {
+                let mut v = c.get();
+                for (i, x) in [ms(t0, t1), ms(t1, t2), ms(t2, t3)].into_iter().enumerate() {
+                    v[i] += x;
+                }
+                c.set(v);
+            });
+        }
         frac
     }
 
@@ -1048,7 +1069,10 @@ impl Gpu {
         let h = crate::persp::mul_mm(&out_m, &pl.homography(&cam));
         let res = crate::export::magnification(&h, layer.bounds().unwrap_or(full)).clamp(0.05, 4.0);
         let clip = clip.map(|m| Rect::from_min_max(((m.min - full.min) * v.s).to_pos2(), ((m.max - full.min) * v.s).to_pos2()));
-        let Some(fl) = self.flat.get(&layer, &pl, res) else { return };
+        // (not when it has got much too coarse: past half the scale needed, one
+        // new picture is made even while zooming)
+        let fl = if v.zooming { self.flat.nearest(&layer, &pl).filter(|f| f.2 >= res * 0.5) } else { None };
+        let Some(fl) = fl.or_else(|| self.flat.get(&layer, &pl, res)) else { return };
         let ptr = Arc::as_ptr(&fl) as usize;
         let tex = match self.flats.get_mut(&ptr) {
             Some(e) => {
@@ -1090,8 +1114,34 @@ impl Gpu {
         }
         let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
         if let Some(edges) = &fl.3 {
-            let to_full = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * v.s, (p.y - full.min.y) * v.s));
-            let sides = crate::extrude::sides(edges, &pl, &to_full, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE);
+            // sides in canvas units, kept while outline, placement, camera and
+            // light stay the same; then moved into target pixels
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (Arc::as_ptr(edges) as usize).hash(&mut h);
+                serde_json::to_string(&pl).unwrap_or_default().hash(&mut h);
+                serde_json::to_string(&light).unwrap_or_default().hash(&mut h);
+                format!("{cam:?}").hash(&mut h);
+                h.finish()
+            };
+            let frame = self.frame;
+            let canvas_sides = match self.sides.get_mut(&key) {
+                Some(e) => {
+                    e.1 = frame;
+                    e.0.clone()
+                }
+                None => {
+                    let to_c = |w: crate::persp::V3| cam.project(w);
+                    let made = Arc::new(crate::extrude::sides(edges, &pl, &to_c, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE));
+                    self.sides.insert(key, (made.clone(), frame));
+                    made
+                }
+            };
+            let sides: Vec<crate::extrude::Side> = canvas_sides
+                .iter()
+                .map(|sd| crate::extrude::Side { q: sd.q.map(|p| egui::pos2((p.x - full.min.x) * v.s, (p.y - full.min.y) * v.s)), ..*sd })
+                .collect();
             let pts: Vec<Pos2> = sides.iter().flat_map(|sd| sd.q).collect();
             if !pts.is_empty() {
                 let bb = Rect::from_points(&pts).expand(2.0);
@@ -1345,6 +1395,8 @@ struct View {
     /// Canvas mode: `full.min · s` in whole pixels. Layer pictures are then kept
     /// by their place in canvas pixels, so panning reuses them.
     origin: Option<[i32; 2]>,
+    /// The canvas is zooming: layers in 3D spaces reuse a picture already made.
+    zooming: bool,
 }
 
 impl View {
