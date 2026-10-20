@@ -234,57 +234,189 @@ fn content_to_world(pl: &Placement, m: &M3, t: V3, p: Pos2) -> V3 {
 
 /// Draws the workspace. Camera view reuses the 2D renderer (it is the same picture).
 #[allow(clippy::too_many_arguments)]
-/// Where the light gizmo sits: the sun (up-light of the origin) and the arrow tip.
-pub fn light_handle(cam: &Camera, l: &persp::Light) -> (V3, V3) {
-    let len = cam.origin_depth().max(1.0) * 0.3;
-    let d = l.dir();
-    // around the working point on the floor (the origin is the camera itself)
-    let at = cam.ref_pt;
-    (persp::add(at, persp::scale(d, -len)), persp::add(at, persp::scale(d, -len * 0.04)))
+/// The light compass: a fixed widget on the left of the 3D view. A sphere seen
+/// through the view's own rotation, so its world axes turn as the view orbits; the
+/// light is a sun on the sphere with an arrow to the centre (the way it shines).
+/// Hovered, three rings around the world axes turn the light about that axis.
+pub struct Compass {
+    pub c: Pos2,
+    pub r: f32,
 }
 
-fn light_gizmo(painter: &Painter, proj: &Proj, cam: &Camera, l: &persp::Light, selected: bool) {
-    let (sun, tip) = light_handle(cam, l);
-    let col = if selected { crate::theme::ACCENT } else { Color32::from_rgb(255, 214, 102) };
-    let (Some(s), Some(t)) = (proj.project(sun), proj.project(tip)) else { return };
-    painter.circle_stroke(s, 7.0, Stroke::new(1.8, col));
-    for k in 0..8 {
-        let a = k as f32 * std::f32::consts::TAU / 8.0;
-        let v = egui::vec2(a.cos(), a.sin());
-        painter.line_segment([s + v * 10.0, s + v * 14.0], Stroke::new(1.4, col));
+/// What a press on the compass grabs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CompassPart {
+    /// The ring around world axis 0/1/2, at angle `t` on it.
+    Ring(usize, f64),
+    /// The sun: dragged over the sphere, on the half it was grabbed on.
+    Sun { front: bool },
+    /// The compass body (takes the press, does nothing).
+    Body,
+}
+
+impl Compass {
+    pub fn new(rect: Rect) -> Self {
+        Self { c: pos2(rect.left() + 100.0, rect.center().y), r: 60.0 }
     }
-    let dir = (t - s).normalized();
-    if (t - s).length() > 4.0 {
-        let from = s + dir * (16.0f32).min((t - s).length() * 0.5);
-        painter.line_segment([from, t], Stroke::new(2.0, col));
-        let n = egui::vec2(-dir.y, dir.x);
-        painter.add(Shape::convex_polygon(vec![t + dir * 6.0, t - dir * 4.0 + n * 5.0, t - dir * 4.0 - n * 5.0], col, Stroke::NONE));
+
+    /// Screen point and depth (positive: away from the viewer) of a world direction.
+    fn show(&self, proj: &Proj, v: V3) -> (Pos2, f64) {
+        let q = mul_mv(&proj.r, v);
+        (self.c + vec2(q[0] as f32, q[1] as f32) * self.r, q[2])
+    }
+
+    /// Two world axes spanning the ring around `axis` (right-handed with it).
+    fn ring_basis(axis: usize) -> (V3, V3) {
+        let e = |i: usize| {
+            let mut v = [0.0; 3];
+            v[i] = 1.0;
+            v
+        };
+        (e((axis + 1) % 3), e((axis + 2) % 3))
+    }
+
+    fn ring_point(axis: usize, t: f64) -> V3 {
+        let (u, w) = Self::ring_basis(axis);
+        add(scale(u, t.cos()), scale(w, t.sin()))
+    }
+
+    /// Where the sun shows: the light comes from -dir.
+    pub fn sun(&self, proj: &Proj, l: &persp::Light) -> (Pos2, f64) {
+        self.show(proj, scale(l.dir(), -0.92))
+    }
+
+    pub fn contains(&self, p: Pos2) -> bool {
+        p.distance(self.c) < self.r + 14.0
+    }
+
+    pub fn hit(&self, proj: &Proj, l: Option<&persp::Light>, p: Pos2) -> Option<CompassPart> {
+        if !self.contains(p) {
+            return None;
+        }
+        let Some(l) = l else { return Some(CompassPart::Body) };
+        let (sp, sz) = self.sun(proj, l);
+        if sp.distance(p) < 13.0 {
+            return Some(CompassPart::Sun { front: sz <= 0.0 });
+        }
+        // nearest ring point; back halves count as a little farther
+        let mut best: Option<(f32, usize, f64)> = None;
+        for axis in 0..3 {
+            for k in 0..96 {
+                let t = k as f64 / 96.0 * std::f64::consts::TAU;
+                let (q, z) = self.show(proj, Self::ring_point(axis, t));
+                let d = q.distance(p) + if z > 0.0 { 3.0 } else { 0.0 };
+                if d < 8.0 && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, axis, t));
+                }
+            }
+        }
+        Some(best.map_or(CompassPart::Body, |(_, a, t)| CompassPart::Ring(a, t)))
+    }
+
+    /// Angle change along ring `axis` at `t` for a pointer move `d`: the move
+    /// projected on the ring's screen tangent there.
+    pub fn ring_step(&self, proj: &Proj, axis: usize, t: f64, d: egui::Vec2) -> f64 {
+        let (u, w) = Self::ring_basis(axis);
+        let tan = add(scale(u, -t.sin()), scale(w, t.cos()));
+        let q = mul_mv(&proj.r, tan);
+        let tv = vec2(q[0] as f32, q[1] as f32) * self.r;
+        let n2 = tv.length_sq().max((self.r * 0.25).powi(2));
+        (d.dot(tv) / n2) as f64
+    }
+
+    /// The light direction that puts the sun under `p` (on the front or back half).
+    pub fn sun_dir(&self, proj: &Proj, p: Pos2, front: bool) -> V3 {
+        let mut o = (p - self.c) / (self.r * 0.92);
+        if o.length() > 1.0 {
+            o = o.normalized();
+        }
+        let z = ((1.0 - o.length_sq()).max(0.0) as f64).sqrt() * if front { -1.0 } else { 1.0 };
+        let s = mul_mv(&transpose(&proj.r), [o.x as f64, o.y as f64, z]);
+        scale(normalize(s), -1.0)
+    }
+
+    /// `active`: the ring being dragged (drawn alone, brighter).
+    pub fn draw(&self, painter: &Painter, proj: &Proj, l: Option<&persp::Light>, hovered: bool, active: Option<usize>) {
+        let (c, r) = (self.c, self.r);
+        painter.circle_filled(c, r + 10.0, Color32::from_black_alpha(70));
+        painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_white_alpha(40)));
+        // the floor ring always (faint); all three rings while hovered
+        let ring = |axis: usize, alpha: f32, width: f32| {
+            let col = persp::AXIS_COLORS[axis];
+            let n = 72;
+            for k in 0..n {
+                let (a, za) = self.show(proj, Self::ring_point(axis, k as f64 / n as f64 * std::f64::consts::TAU));
+                let (b, zb) = self.show(proj, Self::ring_point(axis, (k + 1) as f64 / n as f64 * std::f64::consts::TAU));
+                let a2 = if za + zb > 0.0 { alpha * 0.3 } else { alpha };
+                painter.line_segment([a, b], Stroke::new(width, col.gamma_multiply(a2)));
+            }
+        };
+        match (l.is_some() && hovered, active) {
+            (_, Some(a)) => ring(a, 1.0, 2.6),
+            (true, None) => {
+                for a in 0..3 {
+                    ring(a, 0.9, 1.8);
+                }
+            }
+            _ => ring(2, 0.35, 1.0),
+        }
+        // world axes, the far ones first and dimmed
+        let mut axes: Vec<(usize, Pos2, f64)> = (0..3)
+            .map(|i| {
+                let mut v = [0.0; 3];
+                v[i] = 0.78;
+                let (q, z) = self.show(proj, v);
+                (i, q, z)
+            })
+            .collect();
+        axes.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (i, q, z) in axes {
+            let col = persp::AXIS_COLORS[i].gamma_multiply(if z > 0.0 { 0.45 } else { 1.0 });
+            painter.line_segment([c, q], Stroke::new(1.6, col));
+            painter.circle_filled(q, 7.0, col);
+            painter.text(q, Align2::CENTER_CENTER, ["X", "Y", "Z"][i], FontId::proportional(9.5), Color32::from_black_alpha(220));
+        }
+        // the light: a sun on the sphere, an arrow along its direction to the centre
+        if let Some(l) = l {
+            let (s, z) = self.sun(proj, l);
+            let col = Color32::from_rgb(255, 214, 102).gamma_multiply(if z > 0.0 { 0.5 } else { 1.0 });
+            if (c - s).length() > 16.0 {
+                let dir = (c - s).normalized();
+                painter.line_segment([s + dir * 10.0, c - dir * 5.0], Stroke::new(2.0, col));
+                let n = vec2(-dir.y, dir.x);
+                painter.add(Shape::convex_polygon(vec![c, c - dir * 9.0 + n * 5.0, c - dir * 9.0 - n * 5.0], col, Stroke::NONE));
+            }
+            painter.circle_filled(s, 6.0, col);
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                let v = vec2(a.cos(), a.sin());
+                painter.line_segment([s + v * 8.5, s + v * 12.0], Stroke::new(1.4, col));
+            }
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>, light_sel: bool) {
+pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>) {
     let rect = proj.rect;
-    let light = doc.spaces.iter().find(|s| s.id == view.space).and_then(|s| s.light);
     if let Some(xf) = proj.canvas_xf() {
         let fr = xf.rect_w2s(cam.frame);
         let clip = painter.with_clip_rect(fr.intersect(rect));
         crate::canvas::draw_doc(&clip, ctx, doc, &xf, cache, None);
         painter.rect_stroke(fr, 0.0, Stroke::new(1.0, INK_3()), egui::StrokeKind::Outside);
         draw_selection(painter, doc, proj, sel);
-        if let Some(l) = light {
-            light_gizmo(painter, proj, cam, &l, light_sel);
-        }
         return;
     }
-    // floor grid (XY) with the X and Y axes
-    let g = nice(cam.frame.width().max(cam.frame.height()) as f64 / 8.0);
+    // floor grid on the floor plane (z = 0 is eye level), under the camera, with
+    // the X and Y axes through the point below it
+    let g = nice(cam.origin_depth().max(1.0) / 4.0);
     let n = 20i32;
     let e = g * n as f64;
+    let fz = cam.floor_z;
     for i in -n..=n {
         let t = i as f64 * g;
         let c = if i == 0 { None } else { Some(Color32::from_white_alpha(if i % 5 == 0 { 46 } else { 22 })) };
-        for (a, b, axis) in [([-e, t, 0.0], [e, t, 0.0], 0usize), ([t, -e, 0.0], [t, e, 0.0], 1)] {
+        for (a, b, axis) in [([-e, t, fz], [e, t, fz], 0usize), ([t, -e, fz], [t, e, fz], 1)] {
             if let Some(s) = proj.segment(a, b) {
                 let col = c.unwrap_or(persp::AXIS_COLORS[axis].gamma_multiply(0.85));
                 painter.line_segment(s, Stroke::new(if c.is_none() { 1.4 } else { 1.0 }, col));
@@ -316,9 +448,6 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         draw_plane(painter, ctx, l, pl, proj, cache);
     }
     draw_selection(painter, doc, proj, sel);
-    if let Some(l) = light {
-        light_gizmo(painter, proj, cam, &l, light_sel);
-    }
     // origin
     if let Some(o) = proj.project([0.0; 3]) {
         painter.circle_stroke(o, 3.5, Stroke::new(1.2, INK_2()));
@@ -679,6 +808,32 @@ mod tests {
         let p = Proj::new(&v, &c, Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0)));
         let pl = Placement::facing(1, &c, pos2(700.0, 450.0));
         (c, v, p, pl)
+    }
+
+    #[test]
+    fn compass_sun_follows_the_pointer_and_rings_turn_about_their_axis() {
+        let (_, _, p, _) = setup();
+        let k = Compass::new(p.rect);
+        // the sun lands under the pointer (front half), through the light's angles
+        let at = k.c + vec2(25.0, -18.0);
+        let l = persp::Light::from_dir(k.sun_dir(&p, at, true), 0.3);
+        let (s, z) = k.sun(&p, &l);
+        assert!(s.distance(at) < 1.0 && z < 0.0, "{s:?} vs {at:?}");
+        // a move along a ring's screen tangent turns forward on it, by about the
+        // move over the tangent's length
+        for axis in 0..3 {
+            let t: f64 = 0.7;
+            let (u, w) = Compass::ring_basis(axis);
+            let q = mul_mv(&p.r, add(scale(u, -t.sin()), scale(w, t.cos())));
+            let d = vec2(q[0] as f32, q[1] as f32).normalized() * 4.0;
+            let dt = k.ring_step(&p, axis, t, d);
+            assert!(dt > 0.0, "axis {axis}");
+            let (a0, _) = k.show(&p, Compass::ring_point(axis, t));
+            let (a1, _) = k.show(&p, Compass::ring_point(axis, t + dt));
+            if (a1 - a0).length() > 0.5 {
+                assert!((a1 - a0).normalized().dot(d.normalized()) > 0.9, "axis {axis}: the ring point follows the pointer");
+            }
+        }
     }
 
     #[test]

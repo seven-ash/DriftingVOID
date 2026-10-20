@@ -560,8 +560,10 @@ impl GamutMap {
     }
 
     /// Samples `win` on a w x h grid and keeps only the 4-connected component
-    /// that contains the reference point.
+    /// that contains the reference point. A window spanning every hue wraps
+    /// around, so a region crossing its side edges stays one region.
     fn sample(self, r: (f32, f32, f32), win: Win, w: usize, h: usize) -> (Vec<Color32>, Vec<bool>) {
+        let wrap = win.x1 - win.x0 >= 0.999;
         let lch = crate::okhsv::lch_of(crate::okhsv::to_rgb(r.0, r.1, r.2), r.0);
         let mut cols = Vec::with_capacity(w * h);
         let mut raw = Vec::with_capacity(w * h);
@@ -591,9 +593,13 @@ impl GamutMap {
             let (i, j) = (k % w, k / w);
             if i > 0 {
                 stack.push(k - 1);
+            } else if wrap {
+                stack.push(k + w - 1);
             }
             if i + 1 < w {
                 stack.push(k + 1);
+            } else if wrap {
+                stack.push(k + 1 - w);
             }
             if j > 0 {
                 stack.push(k - w);
@@ -611,14 +617,35 @@ impl GamutMap {
         let full = Win { x0: rx - 0.5, x1: rx + 0.5, y0: 0.0, y1: 1.0 };
         let (w, h) = (180, 90);
         let (_, keep) = self.sample(r, full, w, h);
-        let (mut dx, mut dy) = (0.0f32, 0.0f32);
+        let mut dy = 0.0f32;
+        let mut cols = vec![false; w];
         for (k, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
-            let x = full.x0 + ((k % w) as f32 + 0.5) / w as f32;
-            let y = ((k / w) as f32 + 0.5) / h as f32;
-            dx = dx.max((x - rx).abs());
-            dy = dy.max((y - ry).abs());
+            cols[k % w] = true;
+            dy = dy.max((((k / w) as f32 + 0.5) / h as f32 - ry).abs());
         }
-        let hx = (dx * 1.25 + 0.01).clamp(0.04, 0.5);
+        // The region's hue span, read around the hue circle: it is what the
+        // longest run of empty columns leaves, so a region crossing the seam
+        // behind the reference is centred whole instead of split at the sides.
+        let (mut gap, mut gap_at, mut run) = (0usize, 0usize, 0usize);
+        for i in 0..2 * w {
+            if cols[i % w] {
+                run = 0;
+            } else {
+                run += 1;
+                if run > gap && run <= w {
+                    gap = run;
+                    gap_at = i + 1 - run;
+                }
+            }
+        }
+        let (cx, half) = if gap == 0 || gap >= w {
+            (rx, 0.5)
+        } else {
+            let span = (w - gap) as f32;
+            (full.x0 + ((gap_at + gap) as f32 + span * 0.5) / w as f32, span * 0.5 / w as f32)
+        };
+        let rx = cx;
+        let hx = (half * 1.25 + 0.01).clamp(0.04, 0.5);
         let hy = (dy * 1.25 + 0.01).clamp(0.08, 0.5);
         let (mut y0, mut y1) = (ry - hy, ry + hy);
         if y0 < 0.0 {
@@ -835,9 +862,9 @@ pub struct App {
     view3d: Option<crate::view3d::View3d>,
     modal3d: Option<crate::view3d::Modal>,
     /// The 3D view's light gizmo is selected.
-    light_sel: bool,
     /// R on the light: (space, light before, pointer at start).
-    light_rot: Option<(u64, crate::persp::Light, Pos2)>,
+    /// Turning the light on the compass: space, light before, part, last pointer.
+    light_drag: Option<(u64, crate::persp::Light, crate::view3d::CompassPart, Pos2)>,
     /// An image export running on a worker thread (its status line when done).
     img_job: Option<std::sync::mpsc::Receiver<String>>,
     nav3d: Option<crate::view3d::Nav>,
@@ -856,6 +883,8 @@ pub struct App {
     wall_base_new: bool,
     /// The next drag in the space tool draws the tape measure.
     space_tape_draw: bool,
+    /// Caret index where a press inside the edited text began (drag selection).
+    edit_press: Option<usize>,
     /// Selected wall of the active space, and whether the next drag draws a new one.
     wall_sel: Option<u64>,
     wall_new: bool,
@@ -989,8 +1018,7 @@ impl App {
             ws3d: false,
             view3d: None,
             modal3d: None,
-            light_sel: false,
-            light_rot: None,
+            light_drag: None,
             img_job: None,
             nav3d: None,
             tab_t0: None,
@@ -1001,6 +1029,7 @@ impl App {
             space_place: None,
             wall_base_new: false,
             space_tape_draw: false,
+            edit_press: None,
             wall_sel: None,
             wall_new: false,
             grs2d: None,
@@ -1171,6 +1200,12 @@ impl App {
                             r.axis = ax;
                         }
                         sp.tape = Some(r);
+                    }
+                }
+                // DV_SPACE_FOLLOW=1: the space follows the photo (its name shows in the panel)
+                if std::env::var_os("DV_SPACE_FOLLOW").is_some() {
+                    if let Some(l) = app.doc.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))) {
+                        sp.follow = Some(crate::persp::SpaceFollow { layer: l.id, last: [im.center.x, im.center.y, im.scale, im.rotation] });
                     }
                 }
                 // DV_SPACE_REF="x1,y1,x2,y2,axis,metres" (photo pixels): a reference length
@@ -1588,7 +1623,6 @@ impl App {
     }
 
     fn select_only(&mut self, id: Option<LayerId>) {
-        self.light_sel = false;
         self.sel = id;
         self.extra_sel.clear();
         self.sub = SubSel::default();
@@ -4921,7 +4955,20 @@ impl App {
         self.handle_3d_input(ctx, rect, ui.layer_id(), &proj);
         let view = self.view3d.clone().unwrap();
         let proj = Proj::new(&view, cam, rect);
-        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel, self.light_sel);
+        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel);
+        // the light compass, turned with this view
+        let light = self.doc.spaces.iter().find(|s| s.id == sid).and_then(|s| s.light);
+        let compass = crate::view3d::Compass::new(rect);
+        let hov = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| compass.contains(p));
+        let ring = match self.light_drag {
+            Some((_, _, crate::view3d::CompassPart::Ring(a, _), _)) => Some(a),
+            _ => None,
+        };
+        // DV_COMPASS=hover shows the rings, =0/1/2 one ring as if dragged (captures)
+        let dbg = std::env::var("DV_COMPASS").ok();
+        let ring = ring.or(dbg.as_deref().and_then(|v| v.parse().ok()));
+        let hov = hov || dbg.is_some();
+        compass.draw(&painter, &proj, light.as_ref(), hov || self.light_drag.is_some(), ring);
         if crate::glass::available() {
             painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
         }
@@ -4970,6 +5017,7 @@ impl App {
         }
         let mut click: Option<Pos2> = None;
         let mut cancel = false;
+        let compass = crate::view3d::Compass::new(rect);
         for ev in &events {
             match ev {
                 egui::Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, modifiers } if over(*pos) && self.modal3d.is_none() => {
@@ -4979,6 +5027,23 @@ impl App {
                 }
                 egui::Event::PointerButton { button: PointerButton::Middle, pressed: false, .. } if self.source == Source::Middle => {
                     self.nav3d = None;
+                }
+                egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } if over(*pos) && self.modal3d.is_none() && compass.contains(*pos) => {
+                    let sp = sid.and_then(|s| self.doc.spaces.iter().find(|x| x.id == s));
+                    let light = sp.and_then(|x| x.light);
+                    match (sp.map(|x| x.id), light, compass.hit(proj, light.as_ref(), *pos)) {
+                        (Some(s), Some(l), Some(part)) if part != crate::view3d::CompassPart::Body => {
+                            self.light_drag = Some((s, l, part, *pos));
+                            self.status = "빛 회전 · Esc: 취소".into();
+                        }
+                        (_, None, _) => self.status = "조명 꺼짐 · 공간 패널에서 켜기".into(),
+                        _ => {}
+                    }
+                }
+                egui::Event::PointerButton { button: PointerButton::Primary, pressed: false, .. } if self.light_drag.is_some() => {
+                    self.light_drag = None;
+                    self.status.clear();
+                    self.mark();
                 }
                 egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } if over(*pos) => click = Some(*pos),
                 egui::Event::PointerButton { pos, button: PointerButton::Secondary, pressed: true, .. } if over(*pos) => cancel = true,
@@ -5038,18 +5103,9 @@ impl App {
                 if k(Modifiers::NONE, Key::Escape) {
                     cancel = true;
                 }
-            } else if self.light_rot.is_some() {
+            } else if self.light_drag.is_some() {
                 if k(Modifiers::NONE, Key::Escape) {
                     cancel = true;
-                }
-                if k(Modifiers::NONE, Key::Enter) {
-                    click = Some(hover.unwrap_or(rect.center()));
-                }
-            } else if self.light_sel && k(Modifiers::NONE, Key::R) {
-                let light = sid.and_then(|s| self.doc.spaces.iter().find(|x| x.id == s)).and_then(|x| x.light.map(|l| (x.id, l)));
-                if let (Some((s, l)), Some(hp)) = (light, hover) {
-                    self.light_rot = Some((s, l, hp));
-                    self.status = "빛 회전 · 클릭: 확정 · Esc: 취소".into();
                 }
             } else {
                 let target = self
@@ -5114,46 +5170,47 @@ impl App {
                 l.place = Some(pl);
             }
         }
-        // live light turn: horizontal motion about the view's up, vertical about its right
-        if let Some((s, l0, start)) = self.light_rot {
-            let cur = hover.unwrap_or(start);
-            let d = cur - start;
-            if let Some(v) = &self.view3d {
-                let right = v.right();
-                let up = crate::persp::normalize(crate::persp::cross(v.forward(), right));
-                let dir = rotate_about(rotate_about(l0.dir(), up, d.x as f64 * 0.01), right, -d.y as f64 * 0.01);
-                let nl = crate::persp::Light::from_dir(dir, l0.ambient);
+        // live light turn on the compass: a ring turns it about that world axis by
+        // the pointer's motion along the ring; the sun follows the pointer
+        if let Some((s, l0, part, last)) = self.light_drag {
+            use crate::view3d::CompassPart;
+            let cur = hover.unwrap_or(last);
+            let (dir, part) = match part {
+                CompassPart::Ring(a, t) => {
+                    let dt = compass.ring_step(proj, a, t, cur - last);
+                    let mut axis = [0.0; 3];
+                    axis[a] = 1.0;
+                    let cur_l = self.doc.spaces.iter().find(|x| x.id == s).and_then(|x| x.light).unwrap_or(l0);
+                    (rotate_about(cur_l.dir(), axis, dt), CompassPart::Ring(a, t + dt))
+                }
+                CompassPart::Sun { front } => (compass.sun_dir(proj, cur, front), part),
+                CompassPart::Body => (l0.dir(), part),
+            };
+            if cur != last {
+                let ambient = l0.ambient;
                 if let Some(sp) = self.doc.spaces.iter_mut().find(|x| x.id == s) {
-                    sp.light = Some(nl);
+                    sp.light = Some(crate::persp::Light::from_dir(dir, ambient));
                 }
             }
+            self.light_drag = Some((s, l0, part, cur));
+            ctx.request_repaint();
         }
         if cancel {
-            if let Some((s, l0, _)) = self.light_rot.take() {
+            if let Some((s, l0, _, _)) = self.light_drag.take() {
                 if let Some(sp) = self.doc.spaces.iter_mut().find(|x| x.id == s) {
                     sp.light = Some(l0);
                 }
             }
             self.cancel_modal3d();
         } else if let Some(p) = click {
-            if self.light_rot.take().is_some() || self.modal3d.take().is_some() {
+            if self.modal3d.take().is_some() {
                 self.mark();
-            } else {
-                // the light gizmo first
-                let cam_l = sid.and_then(|s| self.doc.spaces.iter().find(|x| x.id == s)).and_then(|x| x.light.and_then(|l| crate::persp::solve(x).ok().map(|c| (l, c))));
-                let on_light = cam_l.and_then(|(l, c)| proj.project(crate::view3d::light_handle(&c, &l).0)).is_some_and(|q| q.distance(p) < 16.0);
-                if on_light {
-                    self.select_only(None);
-                    self.light_sel = true;
-                    self.status = "빛 · R: 회전".into();
-                } else {
-                    self.light_sel = false;
-                    let id = match proj.canvas_xf() {
-                        Some(xf) => self.hit_layer(xf.s2w(p), 6.0 / xf.zoom),
-                        None => sid.and_then(|s| crate::view3d::pick(&self.doc, proj, s, p)),
-                    };
-                    self.select_only(id);
-                }
+            } else if !compass.contains(p) {
+                let id = match proj.canvas_xf() {
+                    Some(xf) => self.hit_layer(xf.s2w(p), 6.0 / xf.zoom),
+                    None => sid.and_then(|s| crate::view3d::pick(&self.doc, proj, s, p)),
+                };
+                self.select_only(id);
             }
         }
     }
@@ -5219,7 +5276,7 @@ impl App {
             };
             theme::draw_void(&clip, pr);
             let proj = crate::view3d::Proj::new(&view, &cam, pr);
-            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel, self.light_sel);
+            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel);
         }
         p.rect_stroke(pr, 12.0, Stroke::new(1.5, INK_3()), StrokeKind::Outside);
         p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), INK_2());
@@ -7244,10 +7301,14 @@ impl App {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
                 ui.label(l.kind_label());
-                if !matches!(l.kind, LayerKind::Text(_)) {
-                    changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width() - 52.0)).changed();
-                }
-                want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
+                // the button keeps its place; the name field takes what is left
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
+                    if !matches!(l.kind, LayerKind::Text(_)) {
+                        let w = ui.available_width() - 8.0; // the field's own margins
+                        changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(w.max(24.0))).changed();
+                    }
+                });
             });
             changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).mixed(mxc(ch::OPA))).changed();
             if l.place.is_none() {
@@ -8358,7 +8419,7 @@ impl App {
                     let room = (max_h - 30.0).max(80.0);
                     let want = self.col_h[2].min(room);
                     let out = egui::ScrollArea::vertical().id_salt("layers").max_height(room).min_scrolled_height(want).show(ui, |ui| {
-                        self.layers_panel(ui);
+                        fixed_width(ui, |ui| self.layers_panel(ui));
                     });
                     self.col_h[2] = out.content_size.y;
                 });
@@ -8377,13 +8438,15 @@ impl App {
                     // floating areas size from the previous frame: ask for last frame's content height
                     let want = self.col_h[0].min(max_h);
                     let out = egui::ScrollArea::vertical().id_salt("props").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
-                        if Self::fold_section(ui, "도구", &mut self.s.folded[0]) {
-                            self.tool_options(ui);
-                            ui.add_space(SPACE_MD);
-                        }
-                        if Self::fold_section(ui, "선택한 항목", &mut self.s.folded[1]) {
-                            self.properties(ui);
-                        }
+                        fixed_width(ui, |ui| {
+                            if Self::fold_section(ui, "도구", &mut self.s.folded[0]) {
+                                self.tool_options(ui);
+                                ui.add_space(SPACE_MD);
+                            }
+                            if Self::fold_section(ui, "선택한 항목", &mut self.s.folded[1]) {
+                                self.properties(ui);
+                            }
+                        });
                     });
                     self.col_h[0] = out.content_size.y;
                 });
@@ -8400,7 +8463,7 @@ impl App {
                         ui.set_width(side_w);
                         let want = self.col_h[1].min(max_h);
                         let out = egui::ScrollArea::vertical().id_salt("props2").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
-                            self.cameras_panel(ui);
+                            fixed_width(ui, |ui| self.cameras_panel(ui));
                         });
                         self.col_h[1] = out.content_size.y;
                     });
@@ -8896,7 +8959,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             for sp in &self.doc.spaces {
-                let name = elided(sp.name.clone(), egui::TextStyle::Body.resolve(ui.style()), INK(), 150.0);
+                let name = elide(ui, sp.name.clone(), 150.0);
                 if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, name).clicked() {
                     pick = Some(sp.id);
                 }
@@ -9056,7 +9119,7 @@ impl App {
             ui.horizontal(|ui| {
                 let mut on = true;
                 // a long photo name is cut, not allowed to widen the panel
-                let label = elided(format!("사진 따라가기 · {n}"), egui::TextStyle::Body.resolve(ui.style()), INK(), ui.available_width() - 28.0);
+                let label = elide(ui, format!("사진 따라가기 · {n}"), ui.available_width() - 28.0);
                 if ui.checkbox(&mut on, label).on_hover_text(format!("{n}\n사진을 옮기거나 크기·회전을 바꾸면 공간 전체가 함께")).changed() {
                     unfollow = true;
                 }
@@ -9079,7 +9142,7 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
             ui.label("벽");
             for (wid, name) in &walls {
-                let short = elided(name.clone(), egui::TextStyle::Body.resolve(ui.style()), INK(), 150.0);
+                let short = elide(ui, name.clone(), 150.0);
                 if ui.selectable_label(self.wall_sel == Some(*wid), short).clicked() {
                     wall_pick = Some(*wid);
                 }
@@ -9654,8 +9717,33 @@ impl App {
                 // hide egui's own caret/selection: they would be upright
                 ui.visuals_mut().text_cursor.stroke.color = Color32::TRANSPARENT;
                 ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
-                let out = te.show(ui);
+                let mut out = te.show(ui);
                 let resp = out.response.response.clone();
+                // Clicks and drags place the caret from the renderer's layout (egui's
+                // own rows are rounded and never rotated): the pointer is turned back
+                // into the text's frame and matched to the nearest caret spot.
+                let (ptr, pressed, down) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down()));
+                let spot = ptr.map(|p| crate::doc::rot_about(p, c, -rot)).filter(|p| r.expand(4.0).contains(*p)).map(|p| lay.caret_at(pos2((p.x - r.min.x) / xf.zoom - lay.pad, (p.y - r.min.y) / xf.zoom - lay.pad)));
+                if pressed {
+                    // shift extends from the selection's fixed end
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    self.edit_press = if shift { out.cursor_range.map(|r| r.secondary.index.0).or(spot) } else { spot };
+                }
+                if !down && !pressed {
+                    self.edit_press = None;
+                }
+                // a click on rotated text can miss egui's upright rows: keep the focus
+                if spot.is_some() && ui.input(|i| i.pointer.primary_released()) {
+                    resp.request_focus();
+                }
+                if let (Some(a), Some(b), true) = (self.edit_press, spot, down || pressed) {
+                    use egui::text::{CCursor, CCursorRange};
+                    let range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+                    out.state.cursor.set_char_range(Some(range));
+                    out.state.clone().store(ui.ctx(), resp.id);
+                    out.cursor_range = Some(range);
+                    resp.request_focus();
+                }
                 if self.edit_focus {
                     resp.request_focus();
                     self.edit_focus = false;
@@ -10230,6 +10318,28 @@ fn key_mark(a: Option<&crate::anim::Anim>, t: f64, tol: f64, c: u16) -> crate::d
     }
 }
 
+/// A name for a widget, cut with an ellipsis at `width`. Widgets overwrite a
+/// `LayoutJob`'s wrapping with the Ui's own, so this hands them a finished galley;
+/// its colour is the widget's own (placeholder).
+fn elide(ui: &egui::Ui, text: String, width: f32) -> egui::WidgetText {
+    let job = elided(text, egui::TextStyle::Body.resolve(ui.style()), Color32::PLACEHOLDER, width);
+    egui::WidgetText::Galley(ui.fonts_mut(|f| f.layout_job(job)))
+}
+
+/// Lays out `add` at the Ui's current width and never wider: what does not fit
+/// is clipped, so a long line cannot widen a floating panel.
+fn fixed_width<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let w = ui.available_width();
+    let r = ui.available_rect_before_wrap();
+    let rect = Rect::from_min_size(r.min, vec2(w, r.height()));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+    child.set_clip_rect(ui.clip_rect().intersect(Rect::from_x_y_ranges(rect.x_range(), egui::Rangef::EVERYTHING)));
+    let out = add(&mut child);
+    let h = child.min_rect().height();
+    ui.advance_cursor_after_rect(Rect::from_min_size(rect.min, vec2(w, h)));
+    out
+}
+
 /// One line of text cut with an ellipsis at `width`.
 fn elided(text: String, font: FontId, color: Color32, width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat::simple(font, color));
@@ -10745,5 +10855,38 @@ mod tests {
         assert_eq!(other.opacity, 0.5);
         assert_eq!(t.color, Color32::RED);
         assert_eq!(t.text, "ab", "text itself is not copied");
+    }
+
+    #[test]
+    fn similar_colour_regions_are_never_split_at_the_sides() {
+        // a region touching both side edges must be a full band (every column)
+        let mut split = Vec::new();
+        for hi in 0..24 {
+            for (s, v) in [(0.3, 0.6), (0.6, 0.8), (0.9, 0.5), (0.15, 0.9), (0.5, 0.3)] {
+                let r = (hi as f32 / 24.0, s, v);
+                for m in [GamutMap::Value, GamutMap::Chroma, GamutMap::Near] {
+                    let win = m.fit(r);
+                    let (w, h) = (96, 48);
+                    let (_, keep) = m.sample(r, win, w, h);
+                    // a full-hue window wraps: a kept pixel on a side edge whose
+                    // neighbour across the seam matches too must have it kept
+                    if win.x1 - win.x0 < 0.999 {
+                        continue;
+                    }
+                    let lch = crate::okhsv::lch_of(crate::okhsv::to_rgb(r.0, r.1, r.2), r.0);
+                    let cut = (0..h).any(|j| {
+                        let y = win.y0 + (j as f32 + 0.5) / h as f32 * (win.y1 - win.y0);
+                        [(0, w - 1), (w - 1, 0)].iter().any(|&(i, o)| {
+                            let x = win.x0 + (o as f32 + 0.5) / w as f32 * (win.x1 - win.x0);
+                            keep[j * w + i] && !keep[j * w + o] && m.eval(r, lch, x, y).1
+                        })
+                    });
+                    if cut {
+                        split.push((r, m as u8));
+                    }
+                }
+            }
+        }
+        assert!(split.is_empty(), "{} split: {:?}", split.len(), &split[..split.len().min(6)]);
     }
 }

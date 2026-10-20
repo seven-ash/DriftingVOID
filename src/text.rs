@@ -54,6 +54,21 @@ impl TextLayout {
     pub fn rect(&self, pos: Pos2) -> Rect {
         Rect::from_min_size(pos, self.size)
     }
+
+    /// The character index whose caret spot is nearest to `p` (content
+    /// coordinates, like `carets`): the line under `p` (clamped to the first and
+    /// last), then the nearest spot on it.
+    pub fn caret_at(&self, p: Pos2) -> usize {
+        let Some(first) = self.carets.first() else { return 0 };
+        let last = self.carets.last().map_or(first.1, |c| c.1);
+        let row = (((p.y - first.1) / self.line_h.max(1e-3)).floor() * self.line_h + first.1).clamp(first.1, last);
+        self.carets
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| (c.1 - row).abs() < self.line_h * 0.5)
+            .min_by(|a, b| (a.1 .0 - p.x).abs().total_cmp(&(b.1 .0 - p.x).abs()))
+            .map_or(0, |(i, _)| i)
+    }
 }
 
 pub fn font_for(t: &TextLayer) -> FontArc {
@@ -318,5 +333,19 @@ mod caret_tests {
         let c = layout(&t);
         assert!(c.carets[3].0 > 0.0);
         assert!((c.carets[0].0).abs() < 1e-3, "the longest line stays put");
+    }
+
+    #[test]
+    fn clicks_find_the_caret_on_the_line() {
+        let t = TextLayer { pos: Pos2::ZERO, text: "ab
+cd".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+        let lay = layout(&t);
+        let (x1, y0) = lay.carets[1];
+        assert_eq!(lay.caret_at(Pos2::new(x1 + 1.0, y0 + lay.line_h * 0.5)), 1);
+        // the second line, past its end: after d
+        assert_eq!(lay.caret_at(Pos2::new(1000.0, y0 + lay.line_h * 1.5)), 5);
+        // above and below the text clamp to the first and last line
+        assert_eq!(lay.caret_at(Pos2::new(-50.0, -100.0)), 0);
+        assert_eq!(lay.caret_at(Pos2::new(-50.0, 1000.0)), 3);
     }
 }
