@@ -3128,7 +3128,11 @@ impl App {
         // interaction
         let pointer = resp.interact_pointer_pos();
         if resp.drag_started() || resp.clicked() {
-            if let Some(pp) = pointer {
+            // what was pressed is judged where the press began: a drag starts only
+            // after the pointer has moved a few pixels, enough to miss a key or a
+            // clip's 5 px trim handle
+            let origin = ui.input(|i| i.pointer.press_origin());
+            if let Some(pp) = origin.or(pointer) {
                 let mut drag = TlDrag::Scrub;
                 let shift = ui.input(|i| i.modifiers.shift);
                 // Shift on the playhead drags it (snapping to keys); elsewhere it boxes keys

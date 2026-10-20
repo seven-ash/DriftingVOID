@@ -294,8 +294,56 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         cleanup();
         Err(msg)
     };
+    // Frames go to a writer thread that converts them and feeds the encoder (or
+    // saves PNGs), so the next frame renders meanwhile. Two frames may wait.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, tiny_skia::Pixmap)>(2);
+    let mut stdin = child.as_mut().and_then(|c| c.stdin.take());
+    let png_out = png_base.clone();
+    let writer = std::thread::spawn(move || -> Result<f64, String> {
+        let mut spent = 0.0;
+        for (i, pm) in rx {
+            let t = std::time::Instant::now();
+            let mut rgba = crate::export::to_rgba(&pm);
+            if rgba.dimensions() != (w, h) {
+                rgba = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
+            }
+            match stdin.as_mut() {
+                Some(si) => si.write_all(rgba.as_raw()).map_err(|_| "pipe".to_string())?,
+                None => {
+                    let p = PathBuf::from(format!("{}_{:05}.png", png_out.display(), i + 1));
+                    rgba.save(&p).map_err(|e| e.to_string())?;
+                }
+            }
+            spent += t.elapsed().as_secs_f64();
+        }
+        // closing the encoder's input ends the video
+        drop(stdin);
+        Ok(spent)
+    });
+    let encoder_err = |child: &mut Option<std::process::Child>| {
+        let mut err = String::new();
+        if let Some(e) = child.as_mut().and_then(|c| c.stderr.take()) {
+            use std::io::Read;
+            let mut e = e;
+            let _ = e.read_to_string(&mut err);
+        }
+        format!("인코더 중단: {}", err.lines().last().unwrap_or("").trim())
+    };
+    // DV_TIMING=1: time spent per stage, printed at the end (prepare, render; the
+    // writer thread's convert + write overlap the rendering)
+    let timing = std::env::var_os("DV_TIMING").is_some();
+    // flattened 3D layers kept across frames (re-made only when they change)
+    let flat = Arc::new(crate::export::FlatCache::default());
+    let mut tm = [0f64; 2];
+    let mut clock = std::time::Instant::now();
+    let mut lap = |k: usize, clock: &mut std::time::Instant| {
+        tm[k] += clock.elapsed().as_secs_f64();
+        *clock = std::time::Instant::now();
+    };
     for i in 0..total {
         if pr.cancel.load(Ordering::Relaxed) {
+            drop(tx);
+            let _ = writer.join();
             return fail(&mut child, "취소됨".into());
         }
         let t = job.t0 + i as f64 / job.fps;
@@ -331,34 +379,34 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let scale = w as f32 / r.width();
         let size = vec2(w as f32 / scale, h as f32 / scale);
         let bg = if job.codec.alpha() { job.bg } else { Some(job.bg.unwrap_or(Color32::BLACK)) };
-        let pm = match crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss) {
+        lap(0, &mut clock);
+        flat.sweep();
+        let pm = match crate::export::with_frame_cache(&flat, || crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss)) {
             Ok(pm) => pm,
             Err(e) => return fail(&mut child, e),
         };
-        let mut rgba = crate::export::to_rgba(&pm);
-        if rgba.dimensions() != (w, h) {
-            rgba = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
-        }
-        match child.as_mut() {
-            Some(c) => {
-                let ok = c.stdin.as_mut().is_some_and(|s| s.write_all(rgba.as_raw()).is_ok());
-                if !ok {
-                    let mut err = String::new();
-                    if let Some(mut e) = c.stderr.take() {
-                        use std::io::Read;
-                        let _ = e.read_to_string(&mut err);
-                    }
-                    return fail(&mut child, format!("인코더 중단: {}", err.lines().last().unwrap_or("").trim()));
-                }
-            }
-            None => {
-                let p = PathBuf::from(format!("{}_{:05}.png", png_base.display(), i + 1));
-                if let Err(e) = rgba.save(&p) {
-                    return fail(&mut child, e.to_string());
-                }
-            }
+        lap(1, &mut clock);
+        if tx.send((i, pm)).is_err() {
+            // the writer stopped: the encoder quit, or a PNG could not be saved
+            let msg = match writer.join() {
+                Ok(Err(e)) if e != "pipe" => e,
+                _ => encoder_err(&mut child),
+            };
+            return fail(&mut child, msg);
         }
         pr.done.store(i + 1, Ordering::Relaxed);
+    }
+    drop(tx);
+    let spent = match writer.join() {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            let msg = if e == "pipe" { encoder_err(&mut child) } else { e };
+            return fail(&mut child, msg);
+        }
+        Err(_) => return fail(&mut child, "내보내기 스레드 오류".into()),
+    };
+    if timing {
+        eprintln!("export timing (s): prepare {:.2} render {:.2} (convert + write {:.2}, overlapped) for {total} frames", tm[0], tm[1], spent);
     }
     if let Some(mut c) = child {
         drop(c.stdin.take());
@@ -532,5 +580,63 @@ mod tests {
                 assert!(px[1] > 230, "frame {i} outside ({x},{y}) {px:?}");
             }
         }
+    }
+
+    /// Times a 1080p, 60 fps, 2 s export of a project (DV_BENCH_VOID=path.void),
+    /// with DV_TIMING's stage breakdown. `cargo test --release bench_export -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_export() {
+        let Some(path) = std::env::var_os("DV_BENCH_VOID") else { return };
+        let mut doc = crate::io::load_project(std::path::Path::new(&path)).unwrap();
+        let region = doc.content_bounds().unwrap();
+        // DV_BENCH_LINES="x1,y1,x2,y2,axis;…" (photo pixels): a space on the first
+        // photo with two thick texts in it (DV_BENCH_THICK, default 30), animated
+        if let Ok(v) = std::env::var("DV_BENCH_LINES") {
+            let im = doc.layers.iter().find_map(|l| match &l.kind {
+                LayerKind::Image(im) => Some(im.clone()),
+                _ => None,
+            }).unwrap();
+            let sid = doc.new_id();
+            let mut sp = crate::persp::Space::new(sid, "s".into(), Rect::from_points(&im.corners()));
+            for part in v.split(';') {
+                let n: Vec<f32> = part.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if n.len() == 5 {
+                    sp.lines.push(crate::persp::VLine { a: im.src_to_world(pos2(n[0], n[1])), b: im.src_to_world(pos2(n[2], n[3])), axis: n[4] as u8 });
+                }
+            }
+            let cam = crate::persp::solve(&sp).unwrap();
+            sp.light = Some(crate::persp::Light::facing(&cam));
+            doc.spaces.push(sp);
+            let thick: f64 = std::env::var("DV_BENCH_THICK").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+            for (k, txt) in ["Drifting VOID", "벽에 붙인 글자"].iter().enumerate() {
+                let c = im.center + egui::vec2(-150.0, 60.0 + 70.0 * k as f32);
+                let t = crate::doc::TextLayer { pos: c, text: txt.to_string(), size: 48.0, color: Color32::from_rgb(255, 214, 90), family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+                let id = doc.insert("t".into(), LayerKind::Text(t), None);
+                let l = doc.get_mut(id).unwrap();
+                let b = l.bounds().unwrap();
+                let mut pl = crate::persp::Placement::facing(sid, &cam, b.center());
+                pl.thick = thick;
+                l.place = Some(pl);
+                // turns over the two seconds (re-projected every frame)
+                let k0 = crate::anim::key_of(l, 0.0);
+                let mut k1 = k0;
+                k1.t = 2.0;
+                if let Some(p) = k1.place.as_mut() {
+                    p.rot[1] += 40.0;
+                }
+                l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], ..Default::default() });
+            }
+        }
+        let ss: u8 = std::env::var("DV_BENCH_SS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+        let gpu = std::env::var_os("DV_BENCH_CPU").is_none();
+        let out = std::env::temp_dir().join("dv_bench.mp4");
+        let job = Job { doc, region: Region::Fixed(region), size: (1920, 1080), fps: 60.0, t0: 0.0, t1: 2.0, codec: Codec::H264, quality: 23, mbps: None, gpu, bg: None, audio: vec![], ss, out };
+        let t = std::time::Instant::now();
+        let p = start(job);
+        while p.result.lock().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        eprintln!("total {:.2} s, ss {ss}, gpu {gpu}: {:?}", t.elapsed().as_secs_f64(), p.result.lock().unwrap());
     }
 }

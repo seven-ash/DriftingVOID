@@ -107,7 +107,7 @@ pub fn apply_mask(pm: &mut Pixmap, doc: &Document, m: &Layer, region: Rect, scal
 /// transform as the whole picture moved up by whole pixels, so bands put
 /// together match a single render exactly.
 #[allow(clippy::too_many_arguments)]
-fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0: u32, h: u32, flat: &FlatCache) -> Result<Pixmap, String> {
+fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0: u32, h: u32, flat: &FlatCache, side_cache: &SideCache) -> Result<Pixmap, String> {
     let (w, _) = output_size(region, scale);
     let full = region;
     // the band's own world rect (a pixel of margin for culling and source windows)
@@ -134,7 +134,7 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
             let mut one = layer.clone();
             one.mask_of = None;
             let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
-            let mut pm = render_band(&mini, full, scale, None, y0, h, flat)?;
+            let mut pm = render_band(&mini, full, scale, None, y0, h, flat, side_cache)?;
             apply_mask(&mut pm, doc, m, region, scale);
             out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             continue;
@@ -149,7 +149,7 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
                 _ => {}
             }
             let mini = Document { layers: vec![one], spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), ..Default::default() };
-            let tmp = render_band(&mini, full, scale, None, y0, h, flat)?;
+            let tmp = render_band(&mini, full, scale, None, y0, h, flat, side_cache)?;
             blend_onto(&mut out, &tmp, mode, op, bg);
             continue;
         }
@@ -167,14 +167,22 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
             // flattened once per export and shared by every band
             if let Some(fl) = flat.get(layer, pl, res) {
                 let (src, rect, res) = (&fl.0, fl.1, fl.2);
-                let to_out = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * scale, (p.y - full.min.y) * scale - dy));
                 if pl.thick <= 0.0 {
                     warp_onto(&mut out, src, rect, res, &h, layer.opacity, clip, 1.0);
                 } else {
                     let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
                     if let Some(edges) = &fl.3 {
-                        let sides = crate::extrude::sides(edges, pl, &to_out, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE);
-                        fill_sides(&mut out, &sides, layer.opacity, clip);
+                        // the sides in full-image pixels, once per render
+                        let sides = {
+                            let mut m = side_cache.map.lock().unwrap();
+                            m.entry(layer.id)
+                                .or_insert_with(|| {
+                                    let to_full = |w: crate::persp::V3| cam.project(w).map(|p| egui::pos2((p.x - full.min.x) * scale, (p.y - full.min.y) * scale));
+                                    std::sync::Arc::new(crate::extrude::sides(edges, pl, &to_full, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE))
+                                })
+                                .clone()
+                        };
+                        fill_sides(&mut out, &sides, layer.opacity, clip, dy);
                     }
                     let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
                     let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
@@ -203,21 +211,52 @@ fn render_band(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, y0
     Ok(out)
 }
 
-/// Flattened 3D layers (and their extrusion outlines) for one export, shared by
-/// its bands.
+/// Flattened 3D layers (and their extrusion outlines), shared by an export's
+/// bands. A video export keeps one across its frames (`with_frame_cache`), so a
+/// layer whose content, resolution and outline settings stay the same is
+/// flattened and traced once, not every frame.
 #[derive(Default)]
 pub struct FlatCache {
     #[allow(clippy::type_complexity)]
-    map: std::sync::Mutex<HashMap<(u64, u32), std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>>>,
+    map: std::sync::Mutex<HashMap<(u64, u32, u64, u8, bool), (std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>, u64)>>,
+    frame: std::sync::atomic::AtomicU64,
+}
+
+/// Extrusion sides of one render, in full-image pixels: computed by the first
+/// band that needs them, then shifted and culled by every band.
+#[derive(Default)]
+struct SideCache {
+    map: std::sync::Mutex<HashMap<u64, std::sync::Arc<Vec<crate::extrude::Side>>>>,
+}
+
+thread_local! {
+    /// The frame-spanning cache of the video export running on this thread.
+    static FRAME_CACHE: std::cell::RefCell<Option<std::sync::Arc<FlatCache>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `cache` used by every render on this thread (video export).
+pub fn with_frame_cache<R>(cache: &std::sync::Arc<FlatCache>, f: impl FnOnce() -> R) -> R {
+    FRAME_CACHE.with(|c| *c.borrow_mut() = Some(cache.clone()));
+    let r = f();
+    FRAME_CACHE.with(|c| *c.borrow_mut() = None);
+    r
 }
 
 impl FlatCache {
+    /// Next frame: entries unused in the last two frames are dropped.
+    pub fn sweep(&self) {
+        let g = self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.map.lock().unwrap().retain(|_, v| v.1 + 1 >= g);
+    }
+
     #[allow(clippy::type_complexity)]
     fn get(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<Vec<crate::extrude::Edge>>)>> {
-        let key = (layer.id, res.to_bits());
+        let key = (layer.id, res.to_bits(), crate::canvas::content_key(layer), pl.segs.clamp(1, 4), pl.thick > 0.0);
+        let g = self.frame.load(std::sync::atomic::Ordering::Relaxed);
         let mut m = self.map.lock().unwrap();
-        if let Some(v) = m.get(&key) {
-            return Some(v.clone());
+        if let Some(v) = m.get_mut(&key) {
+            v.1 = g;
+            return Some(v.0.clone());
         }
         let (src, rect, res) = flatten_layer(layer, res)?;
         let segs = pl.segs.clamp(1, 4);
@@ -230,7 +269,7 @@ impl FlatCache {
             }
         });
         let v = std::sync::Arc::new((src, rect, res, edges));
-        m.insert(key, v.clone());
+        m.insert(key, (v.clone(), g));
         Some(v)
     }
 }
@@ -238,7 +277,8 @@ impl FlatCache {
 /// Extrusion side quads (output pixels, far to near) filled with their colours.
 /// Each quad is stretched a little along its edge so neighbours overlap instead
 /// of leaving anti-aliasing seams.
-fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, clip: Option<Rect>) {
+fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, clip: Option<Rect>, dy: f32) {
+    let band_h = out.height() as f32;
     let mask = clip.and_then(|c| {
         let mut m = tiny_skia::Mask::new(out.width(), out.height())?;
         let r = tiny_skia::Rect::from_ltrb(c.min.x, c.min.y, c.max.x, c.max.y)?;
@@ -246,7 +286,12 @@ fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, cl
         Some(m)
     });
     for sd in sides {
-        let [a, b, c, d] = sd.q;
+        // full-image pixels to this band; sides outside it are skipped
+        let [a, b, c, d] = sd.q.map(|p| egui::pos2(p.x, p.y - dy));
+        let (ylo, yhi) = [a.y, b.y, c.y, d.y].iter().fold((f32::MAX, f32::MIN), |m, y| (m.0.min(*y), m.1.max(*y)));
+        if yhi < -2.0 || ylo > band_h + 2.0 {
+            continue;
+        }
         let grow = |p: Pos2, q: Pos2| {
             let v = q - p;
             let l = v.length();
@@ -267,7 +312,8 @@ fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, cl
         let (ca, cb) = (to8(sd.ca), to8(sd.cb));
         // colours (and smooth shading) change along the edge: a gradient from end a
         // to end b, as the canvas mesh interpolates them
-        let (ma, mb) = (sd.q[0].lerp(sd.q[3], 0.5), sd.q[1].lerp(sd.q[2], 0.5));
+        let sh = |p: Pos2| egui::pos2(p.x, p.y - dy);
+        let (ma, mb) = (sh(sd.q[0]).lerp(sh(sd.q[3]), 0.5), sh(sd.q[1]).lerp(sh(sd.q[2]), 0.5));
         let grad = (ca != cb && ma.distance(mb) > 0.5)
             .then(|| {
                 tiny_skia::LinearGradient::new(
@@ -302,10 +348,13 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
     if w > MAX_SIDE || h > MAX_SIDE || w as u64 * h as u64 > MAX_PIXELS {
         return Err(format!("너무 큼: {w}×{h}px"));
     }
-    let flat = FlatCache::default();
+    let flat = FRAME_CACHE.with(|c| c.borrow().clone()).unwrap_or_default();
+    let flat = &*flat;
+    let side_cache = SideCache::default();
+    let side_cache = &side_cache;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads == 1 || (w as u64 * h as u64) < 600_000 {
-        return render_band(doc, region, scale, bg, 0, h, &flat);
+        return render_band(doc, region, scale, bg, 0, h, flat, side_cache);
     }
     let n = (threads * 3).min(h as usize).max(1);
     let bh = h.div_ceil(n as u32);
@@ -322,7 +371,7 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
                     if y0 >= h {
                         break;
                     }
-                    let r = render_band(doc, region, scale, bg, y0, bh.min(h - y0), &flat);
+                    let r = render_band(doc, region, scale, bg, y0, bh.min(h - y0), flat, side_cache);
                     bands.lock().unwrap().push((y0, r));
                 }
             });
@@ -373,8 +422,11 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
     let (w, h) = (big.width() / k, big.height() / k);
     let mut out = Pixmap::new(w.max(1), h.max(1)).ok_or("이미지 버퍼를 만들 수 없음")?;
     let (bw, src) = (big.width() as usize, big.data());
-    // average in linear light (premultiplied), then back to sRGB
+    // average in linear light (premultiplied), then back to sRGB; both ways by
+    // table (the way back: 16-bit linear steps, well under an 8-bit level)
     let lut: Vec<f32> = (0..256).map(|i| srgb_to_lin(i as f32 / 255.0)).collect();
+    static BACK: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let back = BACK.get_or_init(|| (0..=65535u32).map(|i| lin_to_srgb(i as f32 / 65535.0)).collect());
     let n = (k * k) as f32;
     let row_bytes = w as usize * 4;
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -383,6 +435,7 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
     std::thread::scope(|sc| {
         for (ci, chunk) in out.data_mut().chunks_mut(rows_per * row_bytes).enumerate() {
             let lut = &lut;
+            let back = &back;
             sc.spawn(move || {
                 let y_start = ci * rows_per;
                 for (ry, dst_row) in chunk.chunks_mut(row_bytes).enumerate() {
@@ -395,6 +448,14 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
                                 let i = (row + x * k + dx) * 4;
                                 let a = src[i + 3];
                                 if a == 0 {
+                                    continue;
+                                }
+                                if a == 255 {
+                                    // opaque (the usual case): nothing to un-premultiply
+                                    for c in 0..3 {
+                                        acc[c] += lut[src[i + c] as usize];
+                                    }
+                                    acc[3] += 1.0;
                                     continue;
                                 }
                                 let af = a as f32 / 255.0;
@@ -414,7 +475,8 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
                         }
                         for c in 0..3 {
                             let lin = (acc[c] / n) / a;
-                            dst_row[o + c] = ((lin_to_srgb(lin.clamp(0.0, 1.0)) * a * 255.0).round().min(a * 255.0)) as u8;
+                            let sv = back[(lin.clamp(0.0, 1.0) * 65535.0).round() as usize];
+                            dst_row[o + c] = ((sv * a * 255.0).round().min(a * 255.0)) as u8;
                         }
                         dst_row[o + 3] = (a * 255.0).round() as u8;
                     }
@@ -898,7 +960,7 @@ mod ss_tests {
             doc.insert(format!("s{i}"), LayerKind::Shape(sh), None);
         }
         let region = Rect::from_min_size(egui::pos2(0.3, 0.7), egui::vec2(1000.0, 800.0));
-        let one = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, output_size(region, 1.0).1, &FlatCache::default()).unwrap();
+        let one = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, output_size(region, 1.0).1, &FlatCache::default(), &SideCache::default()).unwrap();
         let par = render(&doc, region, 1.0, Some(Color32::WHITE)).unwrap();
         assert_eq!((one.width(), one.height()), (par.width(), par.height()));
         // tiny-skia's edge coverage depends a little on where a path is clipped, so
@@ -928,7 +990,7 @@ mod ss_tests {
         }
         let region = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(3840.0, 2160.0));
         let t = std::time::Instant::now();
-        let _ = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, 2160, &FlatCache::default()).unwrap();
+        let _ = render_band(&doc, region, 1.0, Some(Color32::WHITE), 0, 2160, &FlatCache::default(), &SideCache::default()).unwrap();
         let one = t.elapsed();
         let t = std::time::Instant::now();
         let _ = render(&doc, region, 1.0, Some(Color32::WHITE)).unwrap();
