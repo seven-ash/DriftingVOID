@@ -785,6 +785,9 @@ struct VideoExportDlg {
     bg_color: Color32,
     audio: bool,
     ss: u8,
+    /// The size was picked by hand; until then it follows the region's own
+    /// pixels (one canvas pixel per output pixel).
+    size_set: bool,
 }
 
 pub struct App {
@@ -1511,6 +1514,13 @@ impl App {
         }
         if let Ok(t) = std::env::var("DV_THEME") {
             app.s.theme = t.parse().unwrap_or(1);
+        }
+        // DV_EXPORT_FRAME="x,y,w,h": an export frame (export dialog captures)
+        if let Ok(v) = std::env::var("DV_EXPORT_FRAME") {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if n.len() == 4 {
+                app.doc.export_frame = Some(Rect::from_min_size(pos2(n[0], n[1]), vec2(n[2], n[3])));
+            }
         }
         if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
             app.open_video_export();
@@ -3691,11 +3701,13 @@ impl App {
             quality: 20,
             use_mbps: false,
             mbps: 12.0,
-            gpu: false,
+            // NVENC when the export GPU is NVIDIA's
+            gpu: crate::gpu::with_gpu(|g| g.vendor == 0x10de).unwrap_or(false),
             bg: ExportBg::White,
             bg_color: Color32::BLACK,
             audio: true,
             ss: 1,
+            size_set: false,
         });
         // a camera if there is one, else the export frame
         let region_ok = match d.region {
@@ -3754,6 +3766,11 @@ impl App {
         let mut go = false;
         let running = self.vjob.clone();
         let region = self.video_region(&d);
+        if let (false, Some((_, r))) = (d.size_set, &region) {
+            // the region's own size, until a size is picked
+            d.by_width = true;
+            d.n = (r.width().round() as u32).clamp(16, 8192);
+        }
         let voices = self.timeline_voices().len();
         egui::Window::new("영상 내보내기")
             .title_bar(false)
@@ -3801,8 +3818,9 @@ impl App {
                     ui.add_space(SPACE_SM);
                     ui.horizontal(|ui| {
                         ui.label("크기");
-                        ui.selectable_value(&mut d.by_width, true, "가로 기준");
-                        ui.selectable_value(&mut d.by_width, false, "세로 기준");
+                        let a = ui.selectable_value(&mut d.by_width, true, "가로 기준").clicked();
+                        let b = ui.selectable_value(&mut d.by_width, false, "세로 기준").clicked();
+                        d.size_set |= a || b;
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
@@ -3814,9 +3832,12 @@ impl App {
                         for (v, l) in presets {
                             if ui.selectable_label(d.n == *v, *l).clicked() {
                                 d.n = *v;
+                                d.size_set = true;
                             }
                         }
-                        ui.add(crate::calc::drag(&mut d.n).range(16..=8192).suffix(" px"));
+                        if ui.add(crate::calc::drag(&mut d.n).range(16..=8192).suffix(" px")).changed() {
+                            d.size_set = true;
+                        }
                     });
                     let (w, h) = match &region {
                         Some((_, r)) => crate::vexport::size_for(r.width() / r.height().max(1.0), d.by_width, d.n, d.codec.even()),
