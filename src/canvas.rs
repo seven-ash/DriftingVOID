@@ -290,9 +290,15 @@ pub fn sound_gizmo(painter: &Painter, r: Rect, mute: bool) {
     let rad = r.width().min(r.height()) * 0.5;
     let col = if mute { crate::theme::INK_3() } else { crate::theme::INK_2() };
     let u = rad * 0.4;
-    // speaker: a box and a cone
-    let body = [c + vec2(-1.6 * u, -0.55 * u), c + vec2(-0.9 * u, -0.55 * u), c + vec2(0.1 * u, -1.25 * u), c + vec2(0.1 * u, 1.25 * u), c + vec2(-0.9 * u, 0.55 * u), c + vec2(-1.6 * u, 0.55 * u)];
-    painter.add(Shape::convex_polygon(body.to_vec(), col, Stroke::NONE));
+    // speaker: one hexagon (a box and a cone). It is not convex, so it goes in
+    // as one mesh of four triangles on its six corners: no inner edge, no seam.
+    let p = |x: f32, y: f32| c + vec2(x, y) * u;
+    let mut m = Mesh::default();
+    for q in [p(-1.6, -0.55), p(-0.9, -0.55), p(0.1, -1.25), p(0.1, 1.25), p(-0.9, 0.55), p(-1.6, 0.55)] {
+        m.colored_vertex(q, col);
+    }
+    m.indices.extend_from_slice(&[0, 1, 4, 0, 4, 5, 1, 2, 3, 1, 3, 4]);
+    painter.add(Shape::mesh(m));
     let w = Stroke::new((rad * 0.07).clamp(1.0, 3.0), col);
     if mute {
         let o = c + vec2(1.05 * u, 0.0);
