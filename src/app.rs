@@ -1578,6 +1578,9 @@ impl App {
                 app.doc.timeline.on = true;
                 app.doc.timeline.duration = app.doc.timeline.duration.max(n[1] + 1.0);
                 app.select_only(Some(id));
+                // as moving the playhead does: paused videos show their frame
+                let t = app.doc.timeline.time;
+                app.set_time(t);
             }
         }
         if std::env::var_os("DV_SHOW_VEXPORT").is_some() {

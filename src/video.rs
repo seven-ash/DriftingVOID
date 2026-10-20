@@ -193,8 +193,13 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
         .map_err(|e| e.to_string())?;
     let need = (size.0 * size.1 * 4) as usize;
     if out.stdout.len() < need {
-        // past the end: step back a little
+        // at or past the last frame (a seek there finds nothing): the last frame
+        // itself, from decoding the final second (stepping back a fixed time
+        // would land several frames early)
         if t > 0.05 && out.stdout.is_empty() {
+            if let Some(img) = last_frame(path, size) {
+                return Ok(img);
+            }
             return frame_at(path, (t - 0.25).max(0.0), size);
         }
         return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("프레임 읽기 실패").to_string());
@@ -202,6 +207,28 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
     let mut px = out.stdout;
     px.truncate(need);
     image::RgbaImage::from_raw(size.0, size.1, px).ok_or_else(|| "프레임 크기 불일치".into())
+}
+
+/// The video's very last frame, at `size`.
+fn last_frame(path: &Path, size: (u32, u32)) -> Option<image::RgbaImage> {
+    let tl = tools()?;
+    let mut args: Vec<std::ffi::OsString> = Vec::new();
+    for s in ["-v", "error", "-nostdin", "-hwaccel", "auto", "-sseof", "-1", "-i"] {
+        args.push(s.into());
+    }
+    args.push(path.into());
+    args.push("-vf".into());
+    args.push(format!("scale={}:{}:flags=bicubic", size.0, size.1).into());
+    for s in ["-an", "-sn", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"] {
+        args.push(s.into());
+    }
+    let out = no_window(Command::new(&tl.ffmpeg).args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())).output().ok()?;
+    let need = (size.0 * size.1 * 4) as usize;
+    let n = out.stdout.len() / need;
+    if n == 0 {
+        return None;
+    }
+    image::RgbaImage::from_raw(size.0, size.1, out.stdout[(n - 1) * need..n * need].to_vec())
 }
 
 /// Streaming playback decoder: frames from `t0` on, at `size`, through a small
@@ -307,6 +334,32 @@ mod tests {
     fn timecodes() {
         assert_eq!(timecode(75.5), "01:15.50");
         assert_eq!(timecode(3725.0), "1:02:05.00");
+    }
+
+    /// Past the last frame, a still is the last frame itself, not one a few
+    /// frames earlier (skipped without ffmpeg).
+    #[test]
+    fn past_the_end_is_the_last_frame() {
+        let Some(t) = tools() else { return };
+        let dir = std::env::temp_dir().join("dv_video_end");
+        let _ = std::fs::create_dir_all(&dir);
+        let clip = dir.join("count.mp4");
+        // 10 frames at 10 fps, each a different hue (36° apart)
+        let ok = Command::new(&t.ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:size=64x48:rate=10:duration=1,hue=h=t*360", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-crf", "10"])
+            .arg(&clip)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok);
+        // mean difference per channel (decoders may differ by a level or two)
+        let diff = |a: &image::RgbaImage, b: &image::RgbaImage| a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as f64).sum::<f64>() / a.as_raw().len() as f64;
+        let last = frame_at(&clip, 0.89, (64, 48)).unwrap();
+        let before = frame_at(&clip, 0.79, (64, 48)).unwrap();
+        assert!(diff(&last, &before) > 5.0, "frames differ: {}", diff(&last, &before));
+        for t in [0.95, 1.0, 1.5] {
+            let d = diff(&frame_at(&clip, t, (64, 48)).unwrap(), &last);
+            assert!(d < 1.5, "at {t}: mean difference {d} from the last frame");
+        }
     }
 
     /// Real decode through ffmpeg (skipped when ffmpeg is not installed).
