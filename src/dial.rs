@@ -71,6 +71,9 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
 /// Width of a < or > beside the key mark.
 const NAV_W: f32 = 8.0;
 
+/// Extra room after a keyable row's label, so the > never touches the ring.
+const NAV_GAP: f32 = 6.0;
+
 /// `label_cell` with the key navigator: when the value has keys, a < just left
 /// of its key mark and a > in the gap after it jump the playhead to the key
 /// before or after (`go` turns -1 or 1). The row keeps its widths: the < takes
@@ -273,6 +276,7 @@ impl Widget for Dial<'_> {
                 // a fixed-height row, so every item centres on the same line
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let label_w = label_width(&text, key.is_some());
+                let key_cell = key.is_some();
                 if label_w > 0.0 {
                     let mut dummy = false;
                     let (mark, hit) = match key {
@@ -281,9 +285,13 @@ impl Widget for Dial<'_> {
                     };
                     label_cell_nav(ui, &text, mark, hit, nav);
                 }
+                // keyable rows leave the key navigator's > room before the ring (on
+                // every keyable row, keyed or not, so their rings line up)
+                let nav_gap = if key_cell { NAV_GAP } else { 0.0 };
+                ui.add_space(nav_gap);
                 let value_w = 52.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
                 let pin_w = if default.is_some() { 16.0 } else { 0.0 };
-                let ring_w = (width - label_w - value_w - pin_w - 18.0).max(60.0);
+                let ring_w = (width - label_w - nav_gap - value_w - pin_w - 18.0).max(60.0);
 
                 // ---- the ring
                 let (r, resp) = ui.allocate_exact_size(vec2(ring_w, row_h - 4.0), Sense::click_and_drag());
