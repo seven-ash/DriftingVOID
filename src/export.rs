@@ -243,6 +243,11 @@ pub struct FlatCache {
     #[allow(clippy::type_complexity)]
     edges: std::sync::Mutex<HashMap<(u64, u64, u8, u32), (std::sync::Arc<Vec<crate::extrude::Edge>>, u64)>>,
     frame: std::sync::atomic::AtomicU64,
+    /// Frames an unused entry is kept (0: the default, 2; the canvas keeps them
+    /// longer, so a layer panned out of view and back isn't made again).
+    keep: std::sync::atomic::AtomicU64,
+    /// Pictures being made on a worker thread (`request`).
+    pending: std::sync::Mutex<std::collections::HashSet<(u64, u32, u64, u8, bool)>>,
 }
 
 /// Extrusion sides of one render, in full-image pixels: computed by the first
@@ -269,8 +274,47 @@ impl FlatCache {
     /// Next frame: entries unused in the last two frames are dropped.
     pub fn sweep(&self) {
         let g = self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.map.lock().unwrap().retain(|_, v| v.1 + 1 >= g);
-        self.edges.lock().unwrap().retain(|_, v| v.1 + 1 >= g);
+        let keep = match self.keep.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => 1,
+            k => k,
+        };
+        self.map.lock().unwrap().retain(|_, v| v.1 + keep >= g);
+        self.edges.lock().unwrap().retain(|_, v| v.1 + keep >= g);
+    }
+
+    /// Keep unused entries for `frames` sweeps.
+    pub fn set_keep(&self, frames: u64) {
+        self.keep.store(frames, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn key(layer: &Layer, pl: &crate::persp::Placement, res: f32) -> ((u64, u32, u64, u8, bool), f32) {
+        let res = 2f32.powf((res.max(1e-3).log2() * 8.0).ceil() / 8.0);
+        ((layer.id, res.to_bits(), crate::canvas::content_key(layer), pl.segs.clamp(1, 4), pl.thick > 0.0), res)
+    }
+
+    /// The picture at this resolution if it is made already (nothing is made).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn peek(&self, layer: &Layer, pl: &crate::persp::Placement, res: f32) -> Option<std::sync::Arc<(Pixmap, Rect, f32, Option<std::sync::Arc<Vec<crate::extrude::Edge>>>)>> {
+        let (key, _) = Self::key(layer, pl, res);
+        let g = self.frame.load(std::sync::atomic::Ordering::Relaxed);
+        let mut m = self.map.lock().unwrap();
+        let v = m.get_mut(&key)?;
+        v.1 = g;
+        Some(v.0.clone())
+    }
+
+    /// Makes the picture at this resolution on a worker thread (once), for a
+    /// later frame; the canvas meanwhile shows one it has.
+    pub(crate) fn request(self: &std::sync::Arc<Self>, layer: &Layer, pl: &crate::persp::Placement, res: f32) {
+        let (key, _) = Self::key(layer, pl, res);
+        if !self.pending.lock().unwrap().insert(key) {
+            return;
+        }
+        let (me, layer, pl) = (self.clone(), layer.clone(), pl.clone());
+        std::thread::spawn(move || {
+            let _ = me.get(&layer, &pl, res);
+            me.pending.lock().unwrap().remove(&key);
+        });
     }
 
     /// While the view is zooming: any picture of this layer already made (the
@@ -291,14 +335,13 @@ impl FlatCache {
         // in steps of 2^(1/8), rounded up: a layer turning or moving in depth keeps
         // its flattened picture (and outline) for a while instead of re-making
         // them every frame, and never gets less sharp than asked
-        let res = 2f32.powf((res.max(1e-3).log2() * 8.0).ceil() / 8.0);
-        let key = (layer.id, res.to_bits(), crate::canvas::content_key(layer), pl.segs.clamp(1, 4), pl.thick > 0.0);
+        let (key, res) = Self::key(layer, pl, res);
         let g = self.frame.load(std::sync::atomic::Ordering::Relaxed);
-        let mut m = self.map.lock().unwrap();
-        if let Some(v) = m.get_mut(&key) {
+        if let Some(v) = self.map.lock().unwrap().get_mut(&key) {
             v.1 = g;
             return Some(v.0.clone());
         }
+        // made without holding the lock (a worker may be making another)
         let (src, rect, res) = flatten_layer(layer, res)?;
         let segs = pl.segs.clamp(1, 4);
         let edges = (pl.thick > 0.0).then(|| {
@@ -307,8 +350,7 @@ impl FlatCache {
             // doublings, and tracing stays cheap when zoomed far in
             let re = 2f32.powf(res.max(1e-3).log2().ceil()).min(4.0);
             let key = (layer.id, crate::canvas::content_key(layer), segs, re.to_bits());
-            let mut em = self.edges.lock().unwrap();
-            if let Some(e) = em.get_mut(&key) {
+            if let Some(e) = self.edges.lock().unwrap().get_mut(&key) {
                 e.1 = g;
                 return e.0.clone();
             }
@@ -319,11 +361,11 @@ impl FlatCache {
                 flatten_layer(layer, tr).map_or_else(|| crate::extrude::trace(&src, rect, res), |(f, fr, fres)| crate::extrude::trace(&f, fr, fres))
             };
             let e = std::sync::Arc::new(e);
-            em.insert(key, (e.clone(), g));
+            self.edges.lock().unwrap().insert(key, (e.clone(), g));
             e
         });
         let v = std::sync::Arc::new((src, rect, res, edges));
-        m.insert(key, (v.clone(), g));
+        self.map.lock().unwrap().insert(key, (v.clone(), g));
         Some(v)
     }
 }

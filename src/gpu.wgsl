@@ -323,3 +323,19 @@ fn fs_ground(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     c = d + c * (1.0 - d.a);
     return vec4f(c.rgb, 1.0);
 }
+
+// A group texture (tex0) cut by a mask layer's tiles (tex1, its own pixels):
+// h0/h1 map a target pixel centre to a mask pixel; the mask's alpha there (0
+// outside) hides it, inverted when p1.x, times the strength p1.y.
+@fragment
+fn fs_mask_atlas(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let s = load(tex0, vec2i(floor(pos.xy)));
+    let q = vec3f(pos.xy, 1.0);
+    let m = vec2f(dot(u.h0.xyz, q), dot(u.h1.xyz, q));
+    let a = load(tex1, vec2i(floor(m))).a;
+    var hide = a;
+    if u.p1.x > 0.5 {
+        hide = 1.0 - a;
+    }
+    return s * (1.0 - hide * u.p1.y);
+}

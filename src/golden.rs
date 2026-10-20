@@ -233,3 +233,63 @@ fn write_flat_void() {
         crate::io::save_project(&doc, std::path::Path::new(&p)).unwrap();
     }
 }
+
+/// DV_INSPECT=path.void: lists a project's layers and how the scene draws them.
+#[test]
+#[ignore]
+fn inspect_project() {
+    let Some(p) = std::env::var_os("DV_INSPECT") else { return };
+    let doc = crate::io::load_project(std::path::Path::new(&p)).unwrap();
+    let cams = crate::persp::cameras(&doc.spaces);
+    for (i, l) in doc.layers.iter().enumerate() {
+        let kind = match &l.kind {
+            LayerKind::Text(t) => format!("text {:?} blend {:?} size {}", t.text, t.blend, t.size),
+            LayerKind::Raster(r) => format!("brush blend {:?}", r.blend),
+            LayerKind::Image(im) => format!("image video {}", im.video.is_some()),
+            k => format!("{:?}", std::mem::discriminant(k)),
+        };
+        let pl = l.place.as_ref().map(|p| format!("space {} thick {} segs {} smooth {} rest {:?}", p.space, p.thick, p.segs, p.smooth, p.rest));
+        eprintln!("{i:2} id {} {:?} vis {} op {} mask_of {:?} | {kind} | {pl:?} | span {:?}", l.id, l.name, l.visible, l.opacity, l.mask_of, l.anim.as_ref().and_then(|a| a.span));
+    }
+    eprintln!("draw order:");
+    for l in doc.draw_order(&cams) {
+        eprintln!("  {} {:?}", l.id, l.name);
+    }
+    let scene = crate::scene::build(&doc);
+    for it in &scene.items {
+        let what = match &it.draw {
+            crate::scene::Draw::Flat(l) => format!("Flat {:?}", l.name),
+            crate::scene::Draw::Blend(l, b) => format!("Blend {:?} {b:?}", l.name),
+            crate::scene::Draw::Group { mode, opacity, inner } => format!("Group {mode:?} {opacity} inner {}", match inner.as_ref() { crate::scene::Draw::Projected(p) => format!("Projected {:?}", p.layer.name), crate::scene::Draw::Flat(l) => format!("Flat {:?}", l.name), _ => "other".into() }),
+            crate::scene::Draw::Masked { .. } => "Masked".into(),
+            crate::scene::Draw::Projected(p) => format!("Projected {:?} thick {}", p.layer.name, p.pl.thick),
+        };
+        eprintln!("  item {what} bounds {:?}", it.bounds);
+    }
+}
+
+/// A masked layer with a blend mode mixes with what is below it (the mask cuts
+/// it first), on the CPU export and the GPU: a white brush layer in difference
+/// over red shows cyan where the mask keeps it, red where it hides it.
+#[test]
+fn masked_layer_keeps_its_blend_mode() {
+    let mut doc = Document::default();
+    doc.insert("bg".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(0.0, 0.0), pos2(100.0, 100.0), Color32::RED, Some(Color32::RED), 0.0)), None);
+    let mut r = crate::raster::RasterLayer { blend: Blend::Difference, ..Default::default() };
+    r.fill_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0)), true);
+    let owner = doc.insert("w".into(), LayerKind::Raster(r), None);
+    let mut m = crate::raster::RasterLayer::default();
+    m.fill_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 100.0)), true);
+    let mid = doc.insert("m".into(), LayerKind::Raster(m), None);
+    doc.get_mut(mid).unwrap().mask_of = Some(owner);
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+    let check = |pm: &Pixmap, what: &str| {
+        let (hid, kept) = (pm.pixel(25, 50).unwrap(), pm.pixel(75, 50).unwrap());
+        assert!(hid.red() > 240 && hid.green() < 15 && hid.blue() < 15, "{what}: hidden half {hid:?}");
+        assert!(kept.red() < 15 && kept.green() > 240 && kept.blue() > 240, "{what}: kept half {kept:?}");
+    };
+    check(&render(&doc, region, 1.0, Some(Color32::BLACK)).unwrap(), "CPU");
+    if let Some(Ok(pm)) = crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, 1.0, Some(Color32::BLACK), 1)) {
+        check(&pm, "GPU");
+    }
+}

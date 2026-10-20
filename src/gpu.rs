@@ -94,6 +94,10 @@ enum Node {
     Sides { verts: Vec<[f32; 6]>, rect: [i32; 4], scissor: [u32; 4] },
     /// Drawn alone, then multiplied by a mask's keep values.
     Masked { inner: Vec<Node>, keep: Img, off: [i32; 2], rect: [i32; 4], outside: f32 },
+    /// Drawn alone, then cut by a mask sampled from its tile atlas: `a` maps a
+    /// target pixel to an atlas pixel (the mask's own pixels; nearest, as
+    /// export::mask_hide), `invert` and `strength` as the mask layer's.
+    MaskedGpu { inner: Vec<Node>, atlas: Arc<wgpu::Texture>, a: [[f32; 3]; 2], rect: [i32; 4], invert: bool, strength: f32 },
 }
 
 /// A texture: cached, or still to be rasterized (index into the job list).
@@ -147,6 +151,7 @@ pub struct Gpu {
     uv_plane: wgpu::RenderPipeline,
     from_nv12: wgpu::RenderPipeline,
     ground: wgpu::RenderPipeline,
+    mask_atlas: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
     pub max_side: u32,
     pub adapter: String,
@@ -345,6 +350,7 @@ impl Gpu {
         let uv_plane = pipe_fmt("fs_uv", None, wgpu::TextureFormat::Rg8Unorm);
         let from_nv12 = pipe("fs_from_nv12", None);
         let ground = pipe("fs_ground", None);
+        let mask_atlas = pipe("fs_mask_atlas", Some(over_blend));
         let over = pipe("fs_over", Some(over_blend));
         let warp = pipe("fs_warp", Some(over_blend));
         let blend = pipe("fs_blend", None);
@@ -401,6 +407,7 @@ impl Gpu {
             uv_plane,
             from_nv12,
             ground,
+            mask_atlas,
             dummy,
             max_side,
             adapter,
@@ -665,11 +672,14 @@ impl Gpu {
         let full = Rect::from_min_size(Pos2::new(ox / s, oy / s), vec2(tw as f32 / s, th as f32 / s));
         self.frame += 1;
         let g = self.frame;
-        // the canvas keeps pictures a little longer (a few frames of panning)
+        // the canvas keeps pictures a little longer (a few frames of panning);
+        // 3D layers' flattened pictures, outlines and sides much longer (they
+        // are dear to make again when a layer comes back into view)
+        self.flat.set_keep(1800);
         self.rasters.retain(|_, v| v.1 + 30 >= g);
-        self.flats.retain(|_, v| v.2 + 30 >= g);
-        self.atlases.retain(|_, a| a.used + 30 >= g);
-        self.sides.retain(|_, v| v.1 + 30 >= g);
+        self.flats.retain(|_, v| v.2 + 1800 >= g);
+        self.atlases.retain(|_, a| a.used + 600 >= g);
+        self.sides.retain(|_, v| v.1 + 1800 >= g);
         self.flat.sweep();
         let t0 = std::time::Instant::now();
         let scene = crate::scene::build(doc);
@@ -822,6 +832,29 @@ impl Gpu {
                 self.prepare(*inner, bounds, v, jobs, &mut nodes);
                 let Some(rect) = v.px(bounds) else { return };
                 let strength = mask.opacity.clamp(0.0, 1.0);
+                // on the GPU from the mask's tiles (nothing to compute per pixel
+                // on the CPU, so zooming costs nothing); the CPU keep values
+                // only when the mask is too big for one texture
+                if let Some((atlas, o)) = self.atlas_of(&mask) {
+                    // target pixel -> canvas -> (the mask's own place) -> atlas pixel
+                    let sv = v.s;
+                    let f = v.full.min;
+                    let (r, sc, c, last) = match map {
+                        Some(m) => (m.th, m.s.max(1e-6), m.c, m.last),
+                        None => (0.0, 1.0, Pos2::ZERO, Pos2::ZERO),
+                    };
+                    let (sn, cs) = (-r).sin_cos();
+                    // q = last + R(-th)·((F + P/sv) − c)/s − O
+                    let k = 1.0 / (sv * sc);
+                    let (dx, dy) = ((f.x - c.x) / sc, (f.y - c.y) / sc);
+                    let a = [
+                        [cs * k, -sn * k, last.x + cs * dx - sn * dy - o.x],
+                        [sn * k, cs * k, last.y + sn * dx + cs * dy - o.y],
+                    ];
+                    out.push(Node::MaskedGpu { inner: nodes, atlas, a, rect, invert: mask.mask_invert, strength });
+                    return;
+                }
+                let strength = mask.opacity.clamp(0.0, 1.0);
                 let outside = 1.0 - if mask.mask_invert { strength } else { 0.0 };
                 let keep = self.keep(mask, map, rect, v, jobs);
                 out.push(Node::Masked { inner: nodes, keep, off: [rect[0], rect[1]], rect, outside });
@@ -863,20 +896,44 @@ impl Gpu {
         let (iw, ih) = im.src.px_size();
         let (iw, ih) = (iw as f32, ih as f32);
         let k = iw / im.src.size().x.max(1.0);
-        let ts = target / k;
+        let mut ts = target / k;
+        if v.origin.is_some() && ts < 0.5 {
+            // the canvas: the smaller copy in halvings only (zooming out does
+            // not re-make a 4K photo's copy every step)
+            let f = 2f32.powf((ts * 1.5).log2().ceil());
+            ts = if f >= 1.0 { 0.5 } else { f / 1.5 };
+        }
         let crop_px = [
             ((im.crop.min.x * k).round()).clamp(0.0, iw - 1.0),
             ((im.crop.min.y * k).round()).clamp(0.0, ih - 1.0),
         ];
         let cw0 = ((im.crop.max.x * k).round()).clamp(crop_px[0] + 1.0, iw) - crop_px[0];
         let ch0 = ((im.crop.max.y * k).round()).clamp(crop_px[1] + 1.0, ih) - crop_px[1];
-        let (sw, sh, factor) = if ts < 0.5 {
+        let (mut sw, mut sh, mut factor) = if ts < 0.5 {
             let nw = ((cw0 * ts * 1.5).round()).max(1.0);
             let nh = ((ch0 * ts * 1.5).round()).max(1.0);
             (nw, nh, (1.0 / k) * (cw0 / nw))
         } else {
             (cw0, ch0, 1.0 / k)
         };
+        // the source as it is, whatever size it is copied at
+        let src_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (im.src.id, im.adjust.key()).hash(&mut h);
+            for x in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y] {
+                x.to_bits().hash(&mut h);
+            }
+            h.finish()
+        };
+        if v.zooming && !self.rasters.contains_key(&Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [0; 4] }) {
+            // zooming: a copy already made (the largest) until the zoom rests
+            let have = self.rasters.keys().filter(|q| q.id == layer.id && q.content == src_key && q.view == [0; 4]).max_by_key(|q| q.rect[0]).copied();
+            if let Some(q) = have {
+                (sw, sh) = (q.rect[0] as f32, q.rect[1] as f32);
+                factor = (1.0 / k) * (cw0 / sw);
+            }
+        }
         // source pixel -> target pixel
         let (sn, cs) = im.rotation.sin_cos();
         let (cw, ch) = (sw * factor, sh * factor);
@@ -901,16 +958,7 @@ impl Gpu {
         }
         let nearest = (im.scale * v.s / v.k - 1.0).abs() < 1e-4 && im.rotation == 0.0;
         let px_per_src = (m.sx * m.sy - m.kx * m.ky).abs().sqrt();
-        let content = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (im.src.id, im.adjust.key(), sw as u32, sh as u32).hash(&mut h);
-            for x in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y] {
-                x.to_bits().hash(&mut h);
-            }
-            h.finish()
-        };
-        let key = Key { id: layer.id, content, rect: [0; 4], view: [0; 4] };
+        let key = Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [0; 4] };
         let img = match self.rasters.get_mut(&key) {
             Some(e) => {
                 e.1 = self.frame;
@@ -964,6 +1012,23 @@ impl Gpu {
     /// A brush layer from its tile atlas (canvas): sampled as a photo is, nearest
     /// at 1:1 and bicubic otherwise. None when it would not fit one texture.
     fn atlas(&mut self, layer: &Layer, v: &View) -> Option<Node> {
+        let (tex, o) = self.atlas_of(layer)?;
+        let a = self.atlases.get(&layer.id)?;
+        let s = v.s;
+        let (fx, fy) = ((o.x - v.full.min.x) * s, (o.y - v.full.min.y) * s);
+        let inv = [[1.0 / s, 0.0, -fx / s], [0.0, 1.0 / s, -fy / s]];
+        let (w, h) = ((a.n.0 * crate::raster::TILE) as f32 * s, (a.n.1 * crate::raster::TILE) as f32 * s);
+        let rect = [(fx.floor() as i32).max(0), (fy.floor() as i32).max(0), ((fx + w).ceil() as i32).min(v.tw as i32), ((fy + h).ceil() as i32).min(v.th as i32)];
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
+            return None;
+        }
+        let nearest = (s - 1.0).abs() < 1e-4;
+        Some(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src: s })
+    }
+
+    /// A brush (or mask) layer's tiles in one texture, updated tile by tile:
+    /// the texture and the canvas point of its top left.
+    fn atlas_of(&mut self, layer: &Layer) -> Option<(Arc<wgpu::Texture>, Pos2)> {
         let crate::doc::LayerKind::Raster(r) = &layer.kind else { return None };
         use crate::raster::TILE;
         let (mut tx0, mut ty0, mut tx1, mut ty1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
@@ -1012,18 +1077,9 @@ impl Gpu {
                 a.revs.insert(*k, t.rev);
             }
         }
-        // atlas pixel -> target pixel: one canvas unit per atlas pixel
+        // one canvas unit per atlas pixel
         let o = Pos2::new(r.offset.x + (a.t0.0 * TILE) as f32, r.offset.y + (a.t0.1 * TILE) as f32);
-        let s = v.s;
-        let (fx, fy) = ((o.x - v.full.min.x) * s, (o.y - v.full.min.y) * s);
-        let inv = [[1.0 / s, 0.0, -fx / s], [0.0, 1.0 / s, -fy / s]];
-        let (w, h) = ((a.n.0 * TILE) as f32 * s, (a.n.1 * TILE) as f32 * s);
-        let rect = [(fx.floor() as i32).max(0), (fy.floor() as i32).max(0), ((fx + w).ceil() as i32).min(v.tw as i32), ((fy + h).ceil() as i32).min(v.th as i32)];
-        if rect[2] <= rect[0] || rect[3] <= rect[1] {
-            return None;
-        }
-        let nearest = (s - 1.0).abs() < 1e-4;
-        Some(Node::Image { img: Img::Ready(a.tex.clone()), inv, rect, opacity: layer.opacity, nearest, px_per_src: s })
+        Some((a.tex.clone(), o))
     }
 
     /// A mask's keep values (1 − hidden) over `rect`.
@@ -1071,7 +1127,17 @@ impl Gpu {
         let clip = clip.map(|m| Rect::from_min_max(((m.min - full.min) * v.s).to_pos2(), ((m.max - full.min) * v.s).to_pos2()));
         // (not when it has got much too coarse: past half the scale needed, one
         // new picture is made even while zooming)
-        let fl = if v.zooming { self.flat.nearest(&layer, &pl).filter(|f| f.2 >= res * 0.5) } else { None };
+        let fl = match v.zooming {
+            true => self.flat.peek(&layer, &pl, res).or_else(|| {
+                // the one it has, while the sharp one is made on a worker
+                let near = self.flat.nearest(&layer, &pl);
+                if near.is_some() {
+                    self.flat.request(&layer, &pl, res);
+                }
+                near
+            }),
+            false => None,
+        };
         let Some(fl) = fl.or_else(|| self.flat.get(&layer, &pl, res)) else { return };
         let ptr = Arc::as_ptr(&fl) as usize;
         let tex = match self.flats.get_mut(&ptr) {
@@ -1331,6 +1397,18 @@ impl Gpu {
                 let mut u = Uniform::new(r, tw, th);
                 u.p0 = [rect[0] as f32, rect[1] as f32, 0.0, 0.0];
                 self.pass(enc, &self.over, target, &u, &res, &self.dummy);
+            }
+            Node::MaskedGpu { inner, atlas, a, rect, invert, strength } => {
+                let g = self.pooled(tw, th, 2 + depth * 2);
+                self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
+                for n in inner {
+                    self.run(enc, n, &g, depth + 1, ready, v, bgp);
+                }
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.h0 = [a[0][0], a[0][1], a[0][2], 0.0];
+                u.h1 = [a[1][0], a[1][1], a[1][2], 0.0];
+                u.p1 = [*invert as u8 as f32, *strength, 0.0, 0.0];
+                self.pass(enc, &self.mask_atlas, target, &u, &g, atlas);
             }
             Node::Masked { inner, keep, off, rect, outside } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);

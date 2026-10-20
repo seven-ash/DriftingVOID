@@ -59,12 +59,30 @@ pub fn build(doc: &Document) -> Scene {
         let Some(bounds) = timed.shown_bounds(&cams) else { continue };
         let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
         let draw = match mask {
-            Some((mask, map)) => Draw::Masked { inner: Box::new(classify(doc, &cams, timed)), mask, map },
+            Some((mask, map)) => masked(classify(doc, &cams, timed), mask, map),
             None => classify(doc, &cams, timed),
         };
         items.push(Item { bounds, draw });
     }
     Scene { items }
+}
+
+/// A mask on a layer. The layer is cut by the mask first and only then mixed
+/// with what is below: a blend mode (or a group's opacity) goes outside the
+/// mask, else it would mix with nothing but the layer's own empty buffer.
+fn masked(d: Draw, mask: Layer, map: Option<MaskMap>) -> Draw {
+    match d {
+        Draw::Group { inner, mode, opacity } => Draw::Group { inner: Box::new(Draw::Masked { inner, mask, map }), mode, opacity },
+        Draw::Blend(mut layer, mode) => {
+            let opacity = layer.opacity;
+            layer.opacity = 1.0;
+            if let LayerKind::Text(t) = &mut layer.kind {
+                t.blend = Blend::Normal;
+            }
+            Draw::Group { inner: Box::new(Draw::Masked { inner: Box::new(Draw::Flat(layer)), mask, map }), mode, opacity }
+        }
+        d => Draw::Masked { inner: Box::new(d), mask, map },
+    }
 }
 
 fn classify(doc: &Document, cams: &std::collections::HashMap<u64, Camera>, layer: Layer) -> Draw {
