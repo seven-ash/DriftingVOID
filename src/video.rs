@@ -204,7 +204,8 @@ impl Player {
             .spawn()
             .map_err(|e| e.to_string())?;
         let mut out = child.stdout.take().ok_or("ffmpeg 출력 없음")?;
-        let (tx, rx) = sync_channel(3);
+        // a few frames ahead: a pre-roll fills it, and a late frame doesn't stall
+        let (tx, rx) = sync_channel(6);
         let stop = Arc::new(AtomicBool::new(false));
         let ended = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(Some(child)));
@@ -300,5 +301,28 @@ mod tests {
         assert_eq!(img.dimensions(), (160, 90));
         let n = p.rx.iter().count();
         assert!(n > 20, "{n} frames");
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    /// Time to the first frame and to the tenth of a streaming decoder
+    /// (DV_BENCH_VIDEO=path). `cargo test --release decoder_start -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decoder_start() {
+        let Some(p) = std::env::var_os("DV_BENCH_VIDEO") else { return };
+        let p = std::path::PathBuf::from(p);
+        let info = super::probe(&p).unwrap();
+        for t0 in [0.0, info.duration * 0.5] {
+            let t = std::time::Instant::now();
+            let pl = super::Player::start(&p, t0, info.fps, info.preview_size(super::PREVIEW_SIDE)).unwrap();
+            let _ = pl.rx.recv().unwrap();
+            let first = t.elapsed().as_secs_f64() * 1e3;
+            for _ in 0..9 {
+                let _ = pl.rx.recv().unwrap();
+            }
+            eprintln!("{} at {t0:.1}s ({}x{} @ {:.1} fps): first frame {first:.0} ms, ten frames {:.0} ms", p.display(), info.width, info.height, info.fps, t.elapsed().as_secs_f64() * 1e3);
+        }
     }
 }

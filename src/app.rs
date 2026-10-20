@@ -907,6 +907,17 @@ pub struct App {
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
+    /// Pre-roll: wall time the play button was pressed, while the video decoders
+    /// fill up; the clock waits at its start until every one has a frame.
+    tl_arm: Option<f64>,
+    /// Decoders started ahead at the paused playhead (video time, player), so play
+    /// starts at once; and when the playhead last moved.
+    warm: HashMap<LayerId, (f64, crate::video::Player)>,
+    warm_moved: f64,
+    /// DV_TL_PLAY=s: start timeline playback s seconds after launch; DV_TIMING
+    /// then prints the pre-roll and the frames shown / skipped in the first 2 s.
+    dv_play_at: Option<f64>,
+    play_stats: Option<(f64, u32, u32)>,
     tl_key: Option<(TlRow, f64)>,
     /// Keys picked on the timeline (click, Shift-drag box).
     tl_sel: Vec<(TlRow, f64)>,
@@ -1045,6 +1056,11 @@ impl App {
             col_h: [200.0; 3],
             tl_h: 120.0,
             tl_play: None,
+            tl_arm: None,
+            warm: HashMap::new(),
+            warm_moved: 0.0,
+            dv_play_at: std::env::var("DV_TL_PLAY").ok().and_then(|v| v.parse().ok()),
+            play_stats: None,
             tl_key: None,
             tl_sel: Vec::new(),
             mask_rect: None,
@@ -1996,6 +2012,10 @@ impl App {
         if self.scrub_busy > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+        if self.tl_arm.is_some() {
+            // pre-roll: the decoders fill up; their clocks start with the timeline's
+            return;
+        }
         let ids: Vec<LayerId> = self.playing.keys().copied().collect();
         for id in ids {
             let Some(v) = self.video_of(id) else {
@@ -2023,6 +2043,11 @@ impl App {
                     }
                 }
                 if pb.pending.as_ref().is_some_and(|(t, _)| *t <= clock + 1e-6) {
+                    if show.is_some() {
+                        if let Some(st) = self.play_stats.as_mut() {
+                            st.2 += 1; // a due frame skipped for a later one
+                        }
+                    }
                     show = pb.pending.take();
                 } else {
                     break;
@@ -2030,6 +2055,9 @@ impl App {
             }
             let done = drained && pb.player.ended.load(std::sync::atomic::Ordering::Relaxed);
             if let Some((t, img)) = show {
+                if let Some(st) = self.play_stats.as_mut() {
+                    st.1 += 1;
+                }
                 self.set_video_frame(id, t, img);
             }
             if done || clock > v.info.duration + 1.0 {
@@ -2047,6 +2075,12 @@ impl App {
                     }
                     self.video_play(id, true);
                 }
+            }
+        }
+        if let Some((t0, shown, skipped)) = self.play_stats {
+            if self.now - t0 >= 2.0 {
+                eprintln!("first 2 s: {shown} frames shown, {skipped} skipped");
+                self.play_stats = None;
             }
         }
         if !self.playing.is_empty() {
@@ -2075,6 +2109,7 @@ impl App {
     /// Moves the playhead: keyed layers and cameras take their sampled state, and
     /// (when not playing) video layers show their frame for that time.
     fn set_time(&mut self, t: f64) {
+        self.warm_moved = self.now;
         let tl = &mut self.doc.timeline;
         tl.time = t.clamp(0.0, tl.duration.max(0.0));
         crate::anim::evaluate(&mut self.doc);
@@ -2107,6 +2142,7 @@ impl App {
 
     fn tl_toggle_play(&mut self) {
         if self.tl_play.take().is_some() {
+            self.tl_arm = None;
             if let Some(o) = &self.audio_out {
                 o.stop();
             }
@@ -2118,26 +2154,102 @@ impl App {
         if self.doc.timeline.time >= self.doc.timeline.duration - self.doc.timeline.frame_len() {
             self.set_time(0.0);
         }
+        // Pre-roll: the button reads as playing at once, but the clock (and the
+        // sound) start only when every video decoder has its first frame, so the
+        // picture doesn't stutter while ffmpeg starts and seeks (~0.3–0.5 s).
+        // Decoders already warmed at this playhead are taken over as they are.
         self.tl_play = Some((self.doc.timeline.time, self.now));
-        let voices = self.timeline_voices();
-        if !voices.is_empty() {
-            let t = self.doc.timeline.time;
-            if let Some(o) = self.audio_output() {
-                o.play(voices, t);
-            }
-        }
+        // DV_NO_PREROLL: start at once, as before 0.58 (for comparisons)
+        self.tl_arm = Some(if std::env::var_os("DV_NO_PREROLL").is_some() { self.now - 10.0 } else { self.now });
         for (id, vt) in self.timeline_videos() {
             if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                 if let Some(v) = im.video.as_mut() {
                     v.time = vt.clamp(0.0, v.info.duration);
                 }
             }
-            self.video_play(id, true);
+            let fl = self.video_of(id).map_or(0.03, |v| v.info.frame_len());
+            match self.warm.remove(&id) {
+                Some((wt, player)) if (wt - vt).abs() <= fl * 0.5 => {
+                    let speed = self.video_of(id).map_or(1.0, |v| v.speed);
+                    self.playing.insert(id, Playback { player, t0: wt, wall0: self.now, speed, pending: None });
+                }
+                _ => self.video_play(id, true),
+            }
+        }
+    }
+
+    /// While paused: a decoder per video layer, started at the playhead once it has
+    /// rested for a moment, waiting with its first frames (the channel is full, so
+    /// ffmpeg idles). Play takes them over.
+    fn warm_decoders(&mut self) {
+        if self.tl_play.is_some() || !self.doc.timeline.on || std::env::var_os("DV_NO_PREROLL").is_some() {
+            return;
+        }
+        let want = self.timeline_videos();
+        self.warm.retain(|id, _| want.iter().any(|(w, _)| w == id));
+        if self.now - self.warm_moved < 0.25 {
+            return;
+        }
+        for (id, vt) in want {
+            let Some(v) = self.video_of(id) else { continue };
+            let fl = v.info.frame_len();
+            if self.warm.get(&id).is_some_and(|(wt, _)| (wt - vt).abs() <= fl * 0.5) {
+                continue;
+            }
+            let (path, fps, size) = (v.path.clone(), v.info.fps, v.info.preview_size(crate::video::PREVIEW_SIDE));
+            let vt = vt.clamp(0.0, (v.info.duration - fl).max(0.0));
+            if let Ok(player) = crate::video::Player::start(std::path::Path::new(&path), vt, fps, size) {
+                self.warm.insert(id, (vt, player));
+            }
         }
     }
 
     fn tick_timeline(&mut self, ctx: &egui::Context) {
+        if let Some(at) = self.dv_play_at {
+            // the timeline is on from the start, as when Ash plays it
+            self.doc.timeline.on = true;
+            ctx.request_repaint();
+            if self.now >= at {
+                self.dv_play_at = None;
+                self.tl_toggle_play();
+            }
+        }
+        self.warm_decoders();
         let Some((t0, w0)) = self.tl_play else { return };
+        if let Some(armed) = self.tl_arm {
+            // every playing video needs a frame in hand (at most 2 s of waiting)
+            let mut ready = true;
+            for pb in self.playing.values_mut() {
+                if pb.pending.is_none() {
+                    pb.pending = pb.player.rx.try_recv().ok();
+                }
+                ready &= pb.pending.is_some() || pb.player.ended.load(std::sync::atomic::Ordering::Relaxed);
+            }
+            if !ready && self.now - armed < 2.0 {
+                self.tl_play = Some((t0, self.now));
+                ctx.request_repaint();
+                return;
+            }
+            // go: clock, videos and sound from the same instant
+            if std::env::var_os("DV_TIMING").is_some() {
+                eprintln!("pre-roll {:.0} ms ({} videos)", (self.now - armed) * 1e3, self.playing.len());
+                self.play_stats = Some((self.now, 0, 0));
+            }
+            self.tl_arm = None;
+            self.tl_play = Some((t0, self.now));
+            let now = self.now;
+            for pb in self.playing.values_mut() {
+                pb.wall0 = now;
+            }
+            let voices = self.timeline_voices();
+            if !voices.is_empty() {
+                if let Some(o) = self.audio_output() {
+                    o.play(voices, t0);
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
         // the sound card is the clock while sound plays
         let t = self.audio_out.as_ref().and_then(|o| o.pos()).unwrap_or(t0 + (self.now - w0));
         if t >= self.doc.timeline.duration {
