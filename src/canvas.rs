@@ -283,14 +283,13 @@ pub fn content_key(l: &Layer) -> u64 {
     h.finish()
 }
 
-/// A sound layer in the editor: a round badge with a speaker (never exported).
+/// A sound layer in the editor: a plain speaker glyph in the ink colour, no
+/// badge or colour (Ash, 10-20). Never exported.
 pub fn sound_gizmo(painter: &Painter, r: Rect, mute: bool) {
     let c = r.center();
     let rad = r.width().min(r.height()) * 0.5;
-    let col = if mute { crate::theme::INK_3() } else { Color32::from_rgb(90, 200, 170) };
-    painter.circle_filled(c, rad, Color32::from_black_alpha(110));
-    painter.circle_stroke(c, rad, Stroke::new((rad * 0.06).clamp(1.0, 2.5), col));
-    let u = rad * 0.32;
+    let col = if mute { crate::theme::INK_3() } else { crate::theme::INK_2() };
+    let u = rad * 0.4;
     // speaker: a box and a cone
     let body = [c + vec2(-1.6 * u, -0.55 * u), c + vec2(-0.9 * u, -0.55 * u), c + vec2(0.1 * u, -1.25 * u), c + vec2(0.1 * u, 1.25 * u), c + vec2(-0.9 * u, 0.55 * u), c + vec2(-1.6 * u, 0.55 * u)];
     painter.add(Shape::convex_polygon(body.to_vec(), col, Stroke::NONE));
