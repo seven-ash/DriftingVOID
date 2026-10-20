@@ -450,7 +450,7 @@ fn color_row(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut Pa
     }
     let id = ui.id().with(("hex", format!("{target:?}")));
     let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| hex_of(*c));
-    let te = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(84.0).font(egui::TextStyle::Monospace));
+    let te = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(76.0).font(egui::TextStyle::Monospace)); // "#RRGGBBAA" fits
     if te.changed() {
         if let Some(nc) = parse_hex(&buf) {
             *c = nc;
@@ -1308,6 +1308,11 @@ impl App {
                         for t in [t1, t2] {
                             if let Some(pl) = app.doc.get_mut(t).and_then(|l| l.place.as_mut()) {
                                 pl.thick = th;
+                                // DV_SEGS=n, DV_SMOOTH=1: outline detail and smooth sides
+                                if let Some(n) = std::env::var("DV_SEGS").ok().and_then(|v| v.parse::<u8>().ok()) {
+                                    pl.segs = n.clamp(1, 4);
+                                }
+                                pl.smooth = std::env::var_os("DV_SMOOTH").is_some();
                             }
                         }
                     }
@@ -1475,6 +1480,14 @@ impl App {
         }
         if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
             app.open_video_export();
+        }
+        // DV_TOOL=n: start with the n-th tool of the rail (panel captures)
+        if let Some(t) = std::env::var("DV_TOOL").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| TOOLS.get(i)) {
+            app.tool = t.0;
+        }
+        // DV_FOLD_TOOL=1: the tool section starts folded (captures of the selection)
+        if std::env::var_os("DV_FOLD_TOOL").is_some() {
+            app.s.folded[0] = true;
         }
         if let Ok(v) = std::env::var("DV_SHOW_PALETTE") {
             if let Ok(n) = u32::from_str_radix(v.trim_start_matches('#'), 16) {
@@ -3999,6 +4012,8 @@ impl App {
         let mut pl = crate::persp::Placement::standing(sid, &cam, at, b.center_bottom());
         if let Some(old) = &self.doc.layers[i].place {
             pl.thick = old.thick;
+            pl.segs = old.segs;
+            pl.smooth = old.smooth;
         }
         self.doc.layers[i].place = Some(pl);
         if let Some(top) = self.doc.layers.iter().rposition(|l| l.id != id && l.place.as_ref().is_some_and(|p| p.space == sid)) {
@@ -4027,6 +4042,8 @@ impl App {
         };
         if let Some(old) = &self.doc.layers[i].place {
             pl.thick = old.thick;
+            pl.segs = old.segs;
+            pl.smooth = old.smooth;
         }
         self.doc.layers[i].place = Some(pl);
         let same = |l: &Layer| l.id != id && l.place.as_ref().is_some_and(|p| p.wall == Some(wid));
@@ -4127,6 +4144,10 @@ impl App {
     }
 
     fn save_prefs(&mut self) {
+        // debug runs (DV_* flags) set up scenes and panels; they never touch Ash's prefs
+        if std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("DV_")) {
+            return;
+        }
         let out = PrefsOut { settings: &self.s, recent: &self.recent, export: self.last_export.as_ref() };
         let Ok(text) = serde_json::to_string_pretty(&out) else { return };
         if text != self.prefs_saved {
@@ -7093,7 +7114,7 @@ impl App {
                     layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     layer_changed |= align_row(ui, &mut t.align);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         let mut has = t.bg.is_some();
                         if ui.checkbox(&mut has, "배경 상자").changed() {
                             t.bg = has.then_some(s.text_bg_color);
@@ -7120,7 +7141,7 @@ impl App {
                     ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).step(2.0).text("크기"));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     align_row(ui, &mut s.text_align);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.checkbox(&mut s.text_bg, "배경 상자");
                         color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
                     });
@@ -7132,7 +7153,7 @@ impl App {
                 if let Some(LayerKind::Shape(sh)) = sel_shape.map(|i| &mut self.doc.layers[i].kind) {
                     layer_changed |= ui.add(crate::dial::Dial::new(&mut sh.width, 0.0..=60.0).text("선 굵기")).changed();
                     if matches!(sh.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = sh.fill.is_some();
                             if ui.checkbox(&mut has, "채우기").changed() {
                                 sh.fill = has.then_some(s.fill_color);
@@ -7151,7 +7172,7 @@ impl App {
                 } else {
                     ui.add(crate::dial::Dial::new(&mut s.shape_width, 0.0..=60.0).text("선 굵기"));
                     if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             ui.checkbox(&mut s.shape_fill, "채우기");
                             color_row(ui, &mut s.fill_color, PalTarget::DefaultFill, &mut pal_req);
                         });
@@ -7472,7 +7493,7 @@ impl App {
                         changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).mixed(mxc(ch::SIZE))).changed();
                         changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
                         changed |= align_row(ui, &mut t.align);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = t.bg.is_some();
                             if ui.checkbox(&mut has, "배경 상자").changed() {
                                 t.bg = has.then_some(self.s.text_bg_color);
@@ -7483,7 +7504,7 @@ impl App {
                             }
                         });
                     }
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.label("색");
                         changed |= color_row(ui, &mut t.color, PalTarget::TextColor(id), &mut pal_req);
                     });
@@ -7524,7 +7545,7 @@ impl App {
                     }
                 }
                 LayerKind::Shape(s) => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.label("색");
                         changed |= color_row(ui, &mut s.color, PalTarget::ShapeColor(id), &mut pal_req);
                     });
@@ -7541,7 +7562,7 @@ impl App {
                         }
                     }
                     if !shape_tool && matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = s.fill.is_some();
                             if ui.checkbox(&mut has, "채우기").changed() {
                                 s.fill = has.then_some(self.s.fill_color);
@@ -7653,6 +7674,15 @@ impl App {
                     {
                         pl.thick = th as f64;
                         changed = true;
+                    }
+                    // with thickness: outline detail and smooth sides
+                    if pl.thick > 0.0 {
+                        let mut sg = pl.segs.clamp(1, 4) as f32;
+                        if ui.add(crate::dial::Dial::new(&mut sg, 1.0..=4.0).step(1.0).integer().text("세그먼트").default(1.0)).on_hover_text("외곽선 정밀도 (배율)").changed() {
+                            pl.segs = sg.round().clamp(1.0, 4.0) as u8;
+                            changed = true;
+                        }
+                        changed |= ui.checkbox(&mut pl.smooth, "스무스 셰이딩").on_hover_text("완만한 굽이의 옆면 명암을 부드럽게 · 날카로운 모서리는 유지").changed();
                     }
                     let on_wall = pl.wall.is_some();
                     if !on_wall {
@@ -10770,6 +10800,15 @@ fn spread_to(before: &Layer, after: &Layer, l: &mut Layer) {
         }
         if c & ch::P_THICK != 0 {
             p.thick = a.thick;
+        }
+    }
+    // not keyed: outline detail and smooth shading spread as plain settings
+    if let (Some(b), Some(a), Some(p)) = (before.place.as_ref(), after.place.as_ref(), l.place.as_mut()) {
+        if a.segs != b.segs {
+            p.segs = a.segs;
+        }
+        if a.smooth != b.smooth {
+            p.smooth = a.smooth;
         }
     }
     crate::anim::apply_key(l, &k);

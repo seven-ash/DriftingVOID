@@ -82,6 +82,10 @@ pub fn load_settings() {
 }
 
 pub fn save_settings() {
+    // debug runs (DV_* flags) never touch the saved settings
+    if std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("DV_")) {
+        return;
+    }
     let Some(p) = settings_path() else { return };
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);

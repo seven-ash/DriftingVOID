@@ -77,6 +77,8 @@ impl TexCache {
 
     /// Outline of a layer's content for its extrusion sides (same `res` as `placed`).
     pub fn outline(&mut self, layer: &Layer, res: f32) -> Option<std::sync::Arc<Vec<crate::extrude::Edge>>> {
+        // more segments: the outline is traced from a finer picture
+        let res = res * layer.place.as_ref().map_or(1, |p| p.segs.clamp(1, 4)) as f32;
         let key = content_key(layer) ^ (res.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let frame = self.frame;
         if let Some(e) = self.outlines.get_mut(&layer.id) {

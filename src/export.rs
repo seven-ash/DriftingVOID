@@ -220,7 +220,15 @@ impl FlatCache {
             return Some(v.clone());
         }
         let (src, rect, res) = flatten_layer(layer, res)?;
-        let edges = (pl.thick > 0.0).then(|| crate::extrude::trace(&src, rect, res));
+        let segs = pl.segs.clamp(1, 4);
+        let edges = (pl.thick > 0.0).then(|| {
+            if segs > 1 {
+                // the outline from a finer picture (more segments)
+                flatten_layer(layer, res * segs as f32).map_or_else(|| crate::extrude::trace(&src, rect, res), |(f, fr, fres)| crate::extrude::trace(&f, fr, fres))
+            } else {
+                crate::extrude::trace(&src, rect, res)
+            }
+        });
         let v = std::sync::Arc::new((src, rect, res, edges));
         m.insert(key, v.clone());
         Some(v)
@@ -253,9 +261,34 @@ fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opacity: f32, cl
         pb.line_to(d.x, d.y);
         pb.close();
         let Some(path) = pb.finish() else { continue };
-        let rgb = [0, 1, 2].map(|k| ((sd.ca[k] + sd.cb[k]) * 0.5 * 255.0).round().clamp(0.0, 255.0) as u8);
+        let to8 = |c: [f32; 3]| c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+        let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         let mut paint = Paint::default();
-        paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], (opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let (ca, cb) = (to8(sd.ca), to8(sd.cb));
+        // colours (and smooth shading) change along the edge: a gradient from end a
+        // to end b, as the canvas mesh interpolates them
+        let (ma, mb) = (sd.q[0].lerp(sd.q[3], 0.5), sd.q[1].lerp(sd.q[2], 0.5));
+        let grad = (ca != cb && ma.distance(mb) > 0.5)
+            .then(|| {
+                tiny_skia::LinearGradient::new(
+                    tiny_skia::Point::from_xy(ma.x, ma.y),
+                    tiny_skia::Point::from_xy(mb.x, mb.y),
+                    vec![
+                        tiny_skia::GradientStop::new(0.0, tiny_skia::Color::from_rgba8(ca[0], ca[1], ca[2], alpha)),
+                        tiny_skia::GradientStop::new(1.0, tiny_skia::Color::from_rgba8(cb[0], cb[1], cb[2], alpha)),
+                    ],
+                    tiny_skia::SpreadMode::Pad,
+                    Transform::identity(),
+                )
+            })
+            .flatten();
+        match grad {
+            Some(g) => paint.shader = g,
+            None => {
+                let rgb = [0, 1, 2].map(|k| ((ca[k] as u16 + cb[k] as u16) / 2) as u8);
+                paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], alpha);
+            }
+        }
         paint.anti_alias = true;
         out.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), mask.as_ref());
     }

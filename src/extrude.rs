@@ -9,15 +9,24 @@ use tiny_skia::Pixmap;
 use crate::persp::{Light, Placement, V3, add, dot, mul_mv, normalize, scale, sub};
 
 /// One outline segment in content coordinates; `n` points out of the solid and
-/// `ca`/`cb` are the (unpremultiplied) colours just inside its ends.
+/// `ca`/`cb` are the (unpremultiplied) colours just inside its ends. `na`/`nb` are
+/// the smooth normals at its ends: blended with the neighbouring segment across a
+/// gentle bend, its own `n` at a sharp corner.
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     pub a: Pos2,
     pub b: Pos2,
     pub n: [f32; 2],
+    pub na: [f32; 2],
+    pub nb: [f32; 2],
     pub ca: [u8; 3],
     pub cb: [u8; 3],
 }
+
+/// Bends sharper than this (degrees) stay hard edges under smooth shading.
+const SMOOTH_MAX_DEG: f32 = 60.0;
+/// How far (texels) a blended vertex normal reaches along a segment.
+const SMOOTH_REACH: f32 = 4.0;
 
 /// Longest edge piece, in texels (side colours follow the picture this closely).
 const PIECE: f32 = 3.0;
@@ -46,20 +55,34 @@ pub fn trace(pm: &Pixmap, rect: Rect, res: f32) -> Vec<Edge> {
     let loops = march(w, h, &alpha);
     let mut out = Vec::new();
     for lp in loops {
-        let lp = simplify_closed(&lp, 0.3);
+        let mut lp = simplify_closed(&lp, 0.3);
+        lp.dedup_by(|a, b| a.distance(*b) < 1e-4);
         let n = lp.len();
         if n < 3 {
             continue;
         }
+        // segment normals (out of the solid; see `march` for the orientation), and
+        // vertex normals shared by gentle bends
+        let seg_n: Vec<egui::Vec2> = (0..n)
+            .map(|i| {
+                let d = (lp[(i + 1) % n] - lp[i]).normalized();
+                vec2(d.y, -d.x)
+            })
+            .collect();
+        let cos_max = SMOOTH_MAX_DEG.to_radians().cos();
+        // the normal at vertex i as seen from segment `own`
+        let vert_n = |i: usize, own: usize| {
+            let (p, q) = (seg_n[(i + n - 1) % n], seg_n[i]);
+            if p.dot(q) >= cos_max { (p + q).normalized() } else { seg_n[own] }
+        };
         for i in 0..n {
             let (a, b) = (lp[i], lp[(i + 1) % n]);
             let len = a.distance(b);
             if len < 1e-4 {
                 continue;
             }
-            let dir = (b - a) / len;
-            // out of the solid (see `march` for the orientation)
-            let nn = vec2(dir.y, -dir.x);
+            let nn = seg_n[i];
+            let (n0, n1) = (vert_n(i, i), vert_n((i + 1) % n, i));
             let pieces = (len / PIECE).ceil().max(1.0) as usize;
             let colour = |p: Pos2| -> [u8; 3] {
                 for k in [1.2f32, 2.5, 4.0] {
@@ -71,11 +94,28 @@ pub fn trace(pm: &Pixmap, rect: Rect, res: f32) -> Vec<Edge> {
             };
             let mut prev = a;
             let mut cprev = colour(a);
+            // a vertex's blended normal fades back to this segment's own within
+            // SMOOTH_REACH texels (or half the segment), so a long flat side next
+            // to a gentle bend stays flat; short curve segments blend throughout
+            let reach = (len * 0.5).min(SMOOTH_REACH);
+            let lerp_n = |t: f32| {
+                let (da, db) = (t * len, (1.0 - t) * len);
+                let v = if da < reach {
+                    n0 + (nn - n0) * (da / reach)
+                } else if db < reach {
+                    n1 + (nn - n1) * (db / reach)
+                } else {
+                    nn
+                };
+                let v = v.normalized();
+                [v.x, v.y]
+            };
             for j in 1..=pieces {
-                let p = a + (b - a) * (j as f32 / pieces as f32);
+                let (t0, t1) = ((j - 1) as f32 / pieces as f32, j as f32 / pieces as f32);
+                let p = a + (b - a) * t1;
                 let cp = colour(p);
                 let to = |q: Pos2| rect.min + (q.to_vec2() - vec2(0.5, 0.5)) / res + vec2(0.5, 0.5) / res;
-                out.push(Edge { a: to(prev), b: to(p), n: [nn.x, nn.y], ca: cprev, cb: cp });
+                out.push(Edge { a: to(prev), b: to(p), n: [nn.x, nn.y], na: lerp_n(t0), nb: lerp_n(t1), ca: cprev, cb: cp });
                 prev = p;
                 cprev = cp;
             }
@@ -256,9 +296,16 @@ pub fn sides(
             continue;
         }
         let (Some(p0), Some(p1), Some(p2), Some(p3)) = (project(wa), project(wb), project(bb), project(ba)) else { continue };
-        let s = light.map_or(flat_shade, |l| l.shade(sn));
-        let f = |c: [u8; 3]| c.map(|v| v as f32 / 255.0 * s);
-        out.push(Side { q: [p0, p1, p2, p3], ca: f(e.ca), cb: f(e.cb), depth: depth(mid) });
+        // smooth: each end lit by its blended normal (in the plane, so it stays
+        // square to the extrusion like the face itself)
+        let shade_at = |n2: [f32; 2]| match light {
+            Some(l) if pl.smooth => l.shade(normalize(mul_mv(&m, [n2[0] as f64, n2[1] as f64, 0.0]))),
+            Some(l) => l.shade(sn),
+            None => flat_shade,
+        };
+        let (sa, sb) = (shade_at(e.na), shade_at(e.nb));
+        let f = |c: [u8; 3], s: f32| c.map(|v| v as f32 / 255.0 * s);
+        out.push(Side { q: [p0, p1, p2, p3], ca: f(e.ca, sa), cb: f(e.cb, sb), depth: depth(mid) });
     }
     out.sort_by(|a, b| b.depth.total_cmp(&a.depth));
     out
@@ -323,6 +370,35 @@ mod tests {
         for e in inner {
             let m = pos2((e.a.x + e.b.x) / 2.0, (e.a.y + e.b.y) / 2.0);
             assert!(vec2(e.n[0], e.n[1]).dot(m - pos2(c, c)) < 0.0);
+        }
+    }
+
+    #[test]
+    fn smooth_normals_blend_on_curves_and_keep_corners() {
+        // a disc: neighbouring pieces share their end normals
+        let pm = disc(20.0);
+        let n = pm.width() as f32;
+        let edges = trace(&pm, Rect::from_min_size(Pos2::ZERO, vec2(n, n)), 1.0);
+        for w in edges.windows(2) {
+            if w[0].b.distance(w[1].a) < 1e-4 {
+                let (p, q) = (vec2(w[0].nb[0], w[0].nb[1]), vec2(w[1].na[0], w[1].na[1]));
+                assert!(p.dot(q) > 0.999, "{p:?} {q:?}");
+            }
+        }
+        // a square: blending stays within the one-texel chamfer marching squares
+        // cuts at each corner; the flat sides keep their face normal
+        let mut sq = Pixmap::new(40, 40).unwrap();
+        sq.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
+        let corners = [pos2(0.0, 0.0), pos2(40.0, 0.0), pos2(40.0, 40.0), pos2(0.0, 40.0)];
+        let near = |p: Pos2| corners.iter().any(|c| c.distance(p) < 1.5 + SMOOTH_REACH);
+        for e in trace(&sq, Rect::from_min_size(Pos2::ZERO, vec2(40.0, 40.0)), 1.0) {
+            let (f, a, b) = (vec2(e.n[0], e.n[1]), vec2(e.na[0], e.na[1]), vec2(e.nb[0], e.nb[1]));
+            if !near(e.a) {
+                assert!(f.dot(a) > 0.999, "{:?}", e.a);
+            }
+            if !near(e.b) {
+                assert!(f.dot(b) > 0.999, "{:?}", e.b);
+            }
         }
     }
 

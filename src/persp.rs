@@ -1157,6 +1157,17 @@ pub struct Placement {
     /// Where the plane origin sits on the wall (wall units).
     #[serde(default)]
     pub wall_uv: [f64; 2],
+    /// Outline detail of the extrusion: the outline is traced at this many times
+    /// the texture's resolution (1–4).
+    #[serde(default = "one_seg")]
+    pub segs: u8,
+    /// Smooth shading of the sides: normals blend across gentle bends.
+    #[serde(default)]
+    pub smooth: bool,
+}
+
+fn one_seg() -> u8 {
+    1
 }
 
 impl Placement {
@@ -1179,6 +1190,8 @@ impl Placement {
             thick: 0.0,
             wall: None,
             wall_uv: [0.0; 2],
+            segs: 1,
+            smooth: false,
         }
     }
 
@@ -1217,6 +1230,8 @@ impl Placement {
             thick: 0.0,
             wall: None,
             wall_uv: [0.0; 2],
+            segs: 1,
+            smooth: false,
         }
     }
 
@@ -1239,6 +1254,8 @@ impl Placement {
             thick: 0.0,
             wall: Some(wall.id),
             wall_uv: [dot(d, u), dot(d, v)],
+            segs: 1,
+            smooth: false,
         })
     }
 
@@ -1759,7 +1776,7 @@ mod tests {
         // a 100-unit square outline, outward normals
         let sq = [pos2(650.0, 400.0), pos2(750.0, 400.0), pos2(750.0, 500.0), pos2(650.0, 500.0)];
         let ns = [[0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
-        let edges: Vec<crate::extrude::Edge> = (0..4).map(|i| crate::extrude::Edge { a: sq[i], b: sq[(i + 1) % 4], n: ns[i], ca: [255; 3], cb: [255; 3] }).collect();
+        let edges: Vec<crate::extrude::Edge> = (0..4).map(|i| crate::extrude::Edge { a: sq[i], b: sq[(i + 1) % 4], n: ns[i], na: ns[i], nb: ns[i], ca: [255; 3], cb: [255; 3] }).collect();
         let to_eye = |w: V3| sub(t.center, w);
         // facing the camera: the front cap shows
         assert_eq!(crate::extrude::visible_cap(&pl, &to_eye).0, 0.0);
