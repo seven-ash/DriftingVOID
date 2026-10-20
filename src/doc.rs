@@ -427,6 +427,30 @@ pub struct VectorLayer {
     pub strokes: Vec<Arc<VStroke>>,
 }
 
+/// A sound on the canvas: transparent, shown in the editor as a gizmo at `pos`
+/// (never exported). Its time on the timeline is the layer's span, and the
+/// source time at the span's start is `anim.video_start`, as for a video.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct AudioLayer {
+    pub path: String,
+    pub pos: Pos2,
+    /// Length of the source in seconds; 0 until it is decoded the first time.
+    pub len: f64,
+    #[serde(default = "unit_f32")]
+    pub volume: f32,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+impl AudioLayer {
+    /// The gizmo's box (world units; it scales with the canvas like any layer).
+    pub const SIZE: f32 = 64.0;
+
+    pub fn rect(&self) -> Rect {
+        Rect::from_center_size(self.pos, Vec2::splat(Self::SIZE))
+    }
+}
+
 #[derive(Clone)]
 pub enum LayerKind {
     Image(ImageLayer),
@@ -434,6 +458,7 @@ pub enum LayerKind {
     Shape(ShapeLayer),
     Vector(VectorLayer),
     Raster(RasterLayer),
+    Audio(AudioLayer),
 }
 
 #[derive(Clone)]
@@ -506,6 +531,7 @@ impl Layer {
             LayerKind::Shape(_) => "도형",
             LayerKind::Vector(_) => "펜",
             LayerKind::Raster(_) => "브러시",
+            LayerKind::Audio(_) => "소리",
         }
     }
 
@@ -547,6 +573,7 @@ impl Layer {
                 acc
             }
             LayerKind::Raster(r) => r.bounds(),
+            LayerKind::Audio(a) => Some(a.rect()),
         }
     }
 
@@ -560,6 +587,7 @@ impl Layer {
             }
             LayerKind::Vector(v) => v.offset += d,
             LayerKind::Raster(r) => r.offset = (r.offset + d).round(),
+            LayerKind::Audio(a) => a.pos += d,
         }
     }
 }
@@ -574,8 +602,6 @@ pub struct Document {
     pub timeline: crate::anim::Timeline,
     /// Canvas cameras (regions over time).
     pub cameras: Vec<crate::anim::CanvasCam>,
-    /// Sound files on the timeline.
-    pub audio: Vec<crate::anim::AudioClip>,
 }
 
 impl Document {
@@ -686,7 +712,8 @@ impl Document {
     pub fn content_bounds(&self) -> Option<Rect> {
         let cams = crate::persp::cameras(&self.spaces);
         let mut acc: Option<Rect> = None;
-        for l in self.layers.iter().filter(|l| l.visible && l.mask_of.is_none()) {
+        // sounds draw nothing in a picture
+        for l in self.layers.iter().filter(|l| l.visible && l.mask_of.is_none() && !matches!(l.kind, LayerKind::Audio(_))) {
             // layers in a space only show inside its mask
             let clip = l.place.as_ref().and_then(|pl| self.spaces.iter().find(|s| s.id == pl.space)).map(|s| s.clip());
             if let Some(b) = l.shown_bounds(&cams).map(|b| clip.map_or(b, |c| b.intersect(c))).filter(|b| b.is_positive()) {

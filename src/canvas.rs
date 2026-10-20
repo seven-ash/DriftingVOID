@@ -274,8 +274,41 @@ pub fn content_key(l: &Layer) -> u64 {
                 f(&mut h, v);
             }
         }
+        LayerKind::Audio(a) => {
+            (5u8, &a.path, a.mute).hash(&mut h);
+            f(&mut h, a.pos.x);
+            f(&mut h, a.pos.y);
+        }
     }
     h.finish()
+}
+
+/// A sound layer in the editor: a round badge with a speaker (never exported).
+pub fn sound_gizmo(painter: &Painter, r: Rect, mute: bool) {
+    let c = r.center();
+    let rad = r.width().min(r.height()) * 0.5;
+    let col = if mute { crate::theme::INK_3() } else { Color32::from_rgb(90, 200, 170) };
+    painter.circle_filled(c, rad, Color32::from_black_alpha(110));
+    painter.circle_stroke(c, rad, Stroke::new((rad * 0.06).clamp(1.0, 2.5), col));
+    let u = rad * 0.32;
+    // speaker: a box and a cone
+    let body = [c + vec2(-1.6 * u, -0.55 * u), c + vec2(-0.9 * u, -0.55 * u), c + vec2(0.1 * u, -1.25 * u), c + vec2(0.1 * u, 1.25 * u), c + vec2(-0.9 * u, 0.55 * u), c + vec2(-1.6 * u, 0.55 * u)];
+    painter.add(Shape::convex_polygon(body.to_vec(), col, Stroke::NONE));
+    let w = Stroke::new((rad * 0.07).clamp(1.0, 3.0), col);
+    if mute {
+        let o = c + vec2(1.05 * u, 0.0);
+        painter.line_segment([o + vec2(-0.5 * u, -0.5 * u), o + vec2(0.5 * u, 0.5 * u)], w);
+        painter.line_segment([o + vec2(-0.5 * u, 0.5 * u), o + vec2(0.5 * u, -0.5 * u)], w);
+    } else {
+        // two sound arcs
+        for k in [0.75f32, 1.3] {
+            let pts: Vec<Pos2> = (0..=10).map(|i| {
+                let a = -0.8 + 1.6 * i as f32 / 10.0;
+                c + vec2(0.1 * u, 0.0) + vec2(a.cos(), a.sin()) * k * u
+            }).collect();
+            painter.add(Shape::line(pts, w));
+        }
+    }
 }
 
 /// Side colour of an extrusion without a light: the content darkened.
@@ -564,6 +597,11 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
         }
         let op = layer.opacity;
         match &layer.kind {
+            LayerKind::Audio(a) => {
+                if a.rect().intersects(view_w) {
+                    sound_gizmo(painter, xf.rect_w2s(a.rect()), a.mute);
+                }
+            }
             LayerKind::Image(im) => {
                 if !Rect::from_points(&im.corners()).intersects(view_w) {
                     return;

@@ -357,17 +357,6 @@ pub struct AudioClip {
     pub anim: Anim,
 }
 
-impl AudioClip {
-    pub fn end(&self) -> f64 {
-        self.start + self.len
-    }
-
-    /// A key holding this clip's volume at `t`.
-    pub fn vol_key(&self, t: f64) -> Key {
-        Key { t, center: [0.0; 2], ext: [0.0; 2], rot: 0.0, opacity: 1.0, place: None, ease: Ease::default(), follow: None, ch: ch::VOL, vol: self.gain }
-    }
-}
-
 /// Volume over timeline time from keys (`None` when nothing is keyed): samples
 /// every 10 ms from `t0` to `t1`, for the sound mixer.
 pub fn vol_envelope(anim: &Anim, t0: f64, t1: f64) -> Option<crate::audio::Envelope> {
@@ -489,6 +478,7 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         LayerKind::Shape(s) => (s.a + (s.b - s.a) * 0.5, s.b - s.a, s.rotation),
         LayerKind::Vector(v) => (v.offset.to_pos2(), Vec2::ZERO, 0.0),
         LayerKind::Raster(r) => (r.offset.to_pos2(), Vec2::ZERO, 0.0),
+        LayerKind::Audio(a) => (a.pos, Vec2::ZERO, 0.0),
     };
     Key {
         t,
@@ -499,16 +489,17 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         place: l.place.as_ref().map(|p| PlaceKey { pos: p.pos, rot: p.rot, scale: p.scale, thick: p.thick }),
         ease: Ease::default(),
         follow: None,
-        // only video layers have a volume to key
-        ch: if video_vol(l).is_some() { ch::ALL } else { ch::ALL & !ch::VOL },
-        vol: video_vol(l).unwrap_or(1.0),
+        // only video and sound layers have a volume to key
+        ch: if sound_vol(l).is_some() { ch::ALL } else { ch::ALL & !ch::VOL },
+        vol: sound_vol(l).unwrap_or(1.0),
     }
 }
 
-/// A video layer's sound volume.
-fn video_vol(l: &Layer) -> Option<f32> {
+/// A video or sound layer's volume.
+fn sound_vol(l: &Layer) -> Option<f32> {
     match &l.kind {
         LayerKind::Image(im) => im.video.as_ref().map(|v| v.volume),
+        LayerKind::Audio(a) => Some(a.volume),
         _ => None,
     }
 }
@@ -539,6 +530,10 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
         }
         LayerKind::Vector(v) => v.offset = c.to_vec2(),
         LayerKind::Raster(r) => r.offset = c.to_vec2().round(),
+        LayerKind::Audio(a) => {
+            a.pos = c;
+            a.volume = k.vol.max(0.0);
+        }
     }
     l.opacity = k.opacity.clamp(0.0, 1.0);
     if let (Some(p), Some(pk)) = (l.place.as_mut(), k.place) {
@@ -551,13 +546,6 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
 
 /// Writes every keyed layer's and camera's state at the playhead.
 pub fn evaluate(doc: &mut Document) {
-    let t = doc.timeline.time;
-    for a in doc.audio.iter_mut() {
-        let base = a.vol_key(t);
-        if let Some(k) = a.anim.sample_on(t, &base) {
-            a.gain = k.vol.max(0.0);
-        }
-    }
     let t = doc.timeline.time;
     for l in &mut doc.layers {
         let base = key_of(l, t);
@@ -623,13 +611,20 @@ mod tests {
 
     #[test]
     fn clip_volume_keys_make_an_envelope() {
-        let mut a = AudioClip { id: 1, name: "a".into(), path: "a.wav".into(), start: 1.0, offset: 0.0, len: 4.0, gain: 1.0, mute: false, anim: Anim::default() };
-        let mut k0 = a.vol_key(1.0);
+        // a sound layer keys its volume like a video layer
+        let mut doc = Document::default();
+        let id = doc.insert("a".into(), LayerKind::Audio(crate::doc::AudioLayer { path: "a.wav".into(), pos: pos2(0.0, 0.0), len: 4.0, volume: 1.0, mute: false }), None);
+        let l = doc.get_mut(id).unwrap();
+        let mut anim = Anim::default();
+        let mut k0 = key_of(l, 1.0);
+        assert!(k0.ch & ch::VOL != 0);
         k0.ease = Ease::Linear;
-        a.anim.set_key(k0);
-        a.gain = 0.0;
-        a.anim.set_key(a.vol_key(3.0));
-        let e = vol_envelope(&a.anim, a.start, a.end()).unwrap();
+        anim.set_key(k0);
+        if let LayerKind::Audio(a) = &mut l.kind {
+            a.volume = 0.0;
+        }
+        anim.set_key(key_of(l, 3.0));
+        let e = vol_envelope(&anim, 1.0, 5.0).unwrap();
         assert!((e.at(1.0) - 1.0).abs() < 1e-3);
         assert!((e.at(2.0) - 0.5).abs() < 1e-2, "{}", e.at(2.0));
         assert!(e.at(4.5).abs() < 1e-3, "holds after the last key");

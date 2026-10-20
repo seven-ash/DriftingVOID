@@ -482,6 +482,7 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg:
 
 fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
     match &layer.kind {
+        LayerKind::Audio(_) => {}
         LayerKind::Image(im) => draw_image(pm, im, base, scale, region),
         LayerKind::Raster(r) => {
             let local = region.translate(-r.offset);

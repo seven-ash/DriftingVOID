@@ -251,7 +251,6 @@ struct Playback {
 enum TlRow {
     Layer(LayerId),
     Cam(u64),
-    Audio(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -260,14 +259,14 @@ enum TlDrag {
     Key { row: TlRow, from: f64 },
     SpanIn(TlRow),
     SpanOut(TlRow),
-    /// Audio clip: move (grabbed at `grab` seconds into it) or trim either end.
-    AudioMove { id: u64, grab: f64 },
+    /// Sound layer: move (grabbed at `grab` seconds into it) or trim either end.
+    AudioMove { id: LayerId, grab: f64 },
     /// Shift-drag box over the tracks.
     Marquee { start: Pos2 },
     /// Several selected keys moving together (last snapped time under the pointer).
     Keys { last: f64 },
-    AudioIn(u64),
-    AudioOut(u64),
+    AudioIn(LayerId),
+    AudioOut(LayerId),
 }
 
 /// Audio clip colour on the timeline.
@@ -929,7 +928,6 @@ pub struct App {
     audio_cache: std::collections::HashMap<String, Option<Arc<crate::audio::AudioData>>>,
     audio_tx: std::sync::mpsc::Sender<(String, Result<crate::audio::AudioData, String>)>,
     audio_rx: std::sync::mpsc::Receiver<(String, Result<crate::audio::AudioData, String>)>,
-    aud_sel: Option<u64>,
     voice_sig: u64,
     /// Stroke recording: the record switch, and for the stroke being drawn its clock
     /// (wall start, timeline start, live timing or instant) with the points' times
@@ -1058,7 +1056,6 @@ impl App {
             audio_cache: Default::default(),
             audio_tx: audio_ch.0,
             audio_rx: audio_ch.1,
-            aud_sel: None,
             voice_sig: 0,
             rec_on: false,
             rec_clock: None,
@@ -1364,6 +1361,19 @@ impl App {
             if std::env::var_os("DV_PLAY").is_some() {
                 if let Some(id) = app.sel {
                     app.video_play(id, true);
+                }
+            }
+            // DV_SOUND_KEYS=1: volume keys at 0.5 s (1.0) and 1.5 s (0.2) on the first sound
+            if std::env::var_os("DV_SOUND_KEYS").is_some() {
+                if let Some(l) = app.doc.layers.iter_mut().find(|l| matches!(l.kind, LayerKind::Audio(_))) {
+                    let mut an = l.anim.clone().unwrap_or_default();
+                    for (t, v) in [(0.5, 1.0f32), (1.5, 0.2)] {
+                        let mut k = crate::anim::key_of(l, t);
+                        k.ch = crate::anim::ch::VOL;
+                        k.vol = v;
+                        an.set_key(k);
+                    }
+                    l.anim = Some(an);
                 }
             }
         }
@@ -1810,7 +1820,8 @@ impl App {
                 return;
             }
             if crate::audio::AUDIO_EXTS.contains(&ext.as_str()) {
-                self.add_audio(&p);
+                self.add_audio(&p, pos);
+                pos += vec2(crate::doc::AudioLayer::SIZE * 1.5, 0.0);
                 n += 1;
                 continue;
             }
@@ -2657,7 +2668,6 @@ impl App {
 
     fn row_anim(&self, row: TlRow) -> Option<&crate::anim::Anim> {
         match row {
-            TlRow::Audio(id) => self.doc.audio.iter().find(|a| a.id == id).map(|a| &a.anim),
             TlRow::Layer(id) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
             TlRow::Cam(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
         }
@@ -2665,7 +2675,6 @@ impl App {
 
     fn row_anim_mut(&mut self, row: TlRow) -> Option<&mut crate::anim::Anim> {
         match row {
-            TlRow::Audio(id) => self.doc.audio.iter_mut().find(|a| a.id == id).map(|a| &mut a.anim),
             TlRow::Layer(id) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
             TlRow::Cam(id) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
         }
@@ -2941,44 +2950,15 @@ impl App {
                 None => self.tl_key = None,
             }
         }
-        if let Some(i) = self.aud_sel.and_then(|id| self.doc.audio.iter().position(|a| a.id == id)) {
-            let mut del = false;
-            ui.horizontal(|ui| {
-                let a = &mut self.doc.audio[i];
-                ui.label(egui::RichText::new(format!("소리 · {}", a.name)).color(AUDIO_COLOR));
-                let tt = self.doc.timeline.time;
-                let mark = if a.anim.keys.iter().any(|k| (k.t - tt).abs() < 1e-3 && k.ch & crate::anim::ch::VOL != 0) {
-                    crate::dial::KeyMark::Here
-                } else if a.anim.keys.is_empty() {
-                    crate::dial::KeyMark::None
-                } else {
-                    crate::dial::KeyMark::Keyed
-                };
-                let mut hit = false;
-                crate::dial::label_cell(ui, "볼륨", Some(mark), &mut hit);
-                let vr = ui.add(crate::calc::drag(&mut a.gain).range(0.0..=4.0).speed(0.01).max_decimals(2));
-                changed |= vr.changed();
-                // auto-key: a changed volume keys itself
-                if hit || (vr.changed() && self.doc.timeline.autokey) {
-                    let k = a.vol_key(tt);
-                    a.anim.set_key(k);
-                    changed = true;
-                }
-                changed |= ui.checkbox(&mut a.mute, "음소거").changed();
-                ui.label(egui::RichText::new(format!("{} ~ {}", crate::video::timecode(a.start), crate::video::timecode(a.end()))).monospace().color(INK_3()));
-                del = ui.button("삭제").clicked();
-            });
-            if del {
-                self.doc.audio.remove(i);
-                self.aud_sel = None;
-                changed = true;
-            }
-        }
         // rows: cameras, then layers with keys or a span, then the selection
         let sel = self.selected_ids();
         let mut rows: Vec<(TlRow, String, bool)> = self.doc.cameras.iter().map(|c| (TlRow::Cam(c.id), c.name.clone(), true)).collect();
-        rows.extend(self.doc.audio.iter().map(|a| (TlRow::Audio(a.id), a.name.clone(), false)));
         for l in self.doc.layers.iter().rev() {
+            // sound layers always have a row (their clip and volume keys)
+            if matches!(l.kind, LayerKind::Audio(_)) {
+                rows.push((TlRow::Layer(l.id), l.display_name(), false));
+                continue;
+            }
             let recorded = match &l.kind {
                 LayerKind::Vector(v) => v.strokes.iter().any(|s| s.rec.is_some()),
                 LayerKind::Raster(r) => !r.recs.is_empty(),
@@ -3036,14 +3016,20 @@ impl App {
             let selected = match row {
                 TlRow::Layer(id) => sel.contains(id),
                 TlRow::Cam(id) => self.cam_sel == Some(*id),
-                TlRow::Audio(id) => self.aud_sel == Some(*id),
+            };
+            let sound = match row {
+                TlRow::Layer(id) => self.doc.get(*id).and_then(|l| match &l.kind {
+                    LayerKind::Audio(a) => Some((a.clone(), l.anim.as_ref().and_then(|an| an.span).unwrap_or([0.0, 0.0]), l.anim.as_ref().map_or(0.0, |an| an.video_start))),
+                    _ => None,
+                }),
+                _ => None,
             };
             if selected {
                 p.rect_filled(rr, 6.0, FILL_1());
             }
             let col = if *cam {
                 CAM_COLOR
-            } else if matches!(row, TlRow::Audio(_)) {
+            } else if sound.is_some() {
                 AUDIO_COLOR
             } else {
                 INK_2()
@@ -3051,31 +3037,28 @@ impl App {
             let g = p.layout_job(elided(name.to_string(), FontId::proportional(theme::TEXT_SMALL + 0.5), col, label_w - 14.0));
             p.galley(pos2(rr.left() + 6.0, rr.center().y - g.size().y * 0.5), g, col);
             let cy = rr.center().y;
-            if let TlRow::Audio(aid) = row {
-                if let Some(a) = self.doc.audio.iter().find(|a| a.id == *aid) {
-                    let bar = Rect::from_min_max(pos2(x_of(a.start), rr.top() + 3.0), pos2(x_of(a.end()).max(x_of(a.start) + 2.0), rr.bottom() - 3.0));
-                    p.rect_filled(bar, 3.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.08 } else { 0.22 }));
-                    // waveform
-                    if let Some(Some(d)) = self.audio_cache.get(&a.path) {
-                        let x0 = bar.left().max(tr.left());
-                        let x1 = bar.right().min(tr.right());
-                        let mut x = x0;
-                        while x < x1 {
-                            let src = a.offset + t_of(x) - a.start;
-                            let i = (src / crate::audio::PEAK_SEC) as usize;
-                            let pk = d.peaks.get(i).copied().unwrap_or(0.0) * a.gain.min(1.5);
-                            let hh = (bar.height() * 0.5 - 1.0) * pk.min(1.0);
-                            p.line_segment([pos2(x, cy - hh), pos2(x, cy + hh)], Stroke::new(1.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.3 } else { 0.9 })));
-                            x += 2.0;
-                        }
-                    } else if !a.path.is_empty() {
-                        p.text(bar.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "불러오는 중…", FontId::proportional(10.0), INK_3());
+            if let Some((a, [s0, e0], src0)) = &sound {
+                let bar = Rect::from_min_max(pos2(x_of(*s0), rr.top() + 3.0), pos2(x_of(*e0).max(x_of(*s0) + 2.0), rr.bottom() - 3.0));
+                p.rect_filled(bar, 3.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.08 } else { 0.22 }));
+                // waveform
+                if let Some(Some(d)) = self.audio_cache.get(&a.path) {
+                    let x0 = bar.left().max(tr.left());
+                    let x1 = bar.right().min(tr.right());
+                    let mut x = x0;
+                    while x < x1 {
+                        let src = src0 + t_of(x) - s0;
+                        let i = (src / crate::audio::PEAK_SEC) as usize;
+                        let pk = d.peaks.get(i).copied().unwrap_or(0.0) * a.volume.min(1.5);
+                        let hh = (bar.height() * 0.5 - 1.0) * pk.min(1.0);
+                        p.line_segment([pos2(x, cy - hh), pos2(x, cy + hh)], Stroke::new(1.0, AUDIO_COLOR.gamma_multiply(if a.mute { 0.3 } else { 0.9 })));
+                        x += 2.0;
                     }
-                    if self.aud_sel == Some(*aid) {
-                        p.rect_stroke(bar, 3.0, Stroke::new(1.2, AUDIO_COLOR), StrokeKind::Inside);
-                    }
+                } else if !a.path.is_empty() {
+                    p.text(bar.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "불러오는 중…", FontId::proportional(10.0), INK_3());
                 }
-                continue;
+                if selected {
+                    p.rect_stroke(bar, 3.0, Stroke::new(1.2, AUDIO_COLOR), StrokeKind::Inside);
+                }
             }
             if let TlRow::Layer(lid) = row {
                 // recorded strokes: thin red marks along the bottom of the row
@@ -3086,7 +3069,8 @@ impl App {
                 }
             }
             let anim = self.row_anim(*row);
-            match anim.and_then(|a| a.span) {
+            // a sound's span is its clip bar (drawn above)
+            match anim.and_then(|a| a.span).filter(|_| sound.is_none()) {
                 Some([a, b]) => {
                     let bar = Rect::from_min_max(pos2(x_of(a), cy - 4.0), pos2(x_of(b), cy + 4.0));
                     p.rect_filled(bar, 3.0, col.gamma_multiply(0.35));
@@ -3094,9 +3078,10 @@ impl App {
                         p.rect_filled(Rect::from_center_size(pos2(x, cy), vec2(4.0, 12.0)), 1.5, col);
                     }
                 }
-                None => {
+                None if sound.is_none() => {
                     p.line_segment([pos2(tr.left(), cy), pos2(tr.right(), cy)], Stroke::new(1.0, col.gamma_multiply(0.25)));
                 }
+                None => {}
             }
             if let Some(a) = anim {
                 // the curve between keys shows how it eases: straight, S-shaped or a step
@@ -3144,22 +3129,15 @@ impl App {
                 if shift && pp.y > rect.top() + ruler_h && pp.x >= tr.left() {
                     drag = TlDrag::Marquee { start: pp };
                 } else if pp.y > rect.top() + ruler_h {
-                    if let Some((TlRow::Audio(aid), _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
-                        self.aud_sel = Some(aid);
-                        if let Some(a) = self.doc.audio.iter().find(|a| a.id == aid) {
-                            let t = t_of(pp.x);
-                            if (x_of(a.start) - pp.x).abs() <= 5.0 {
-                                drag = TlDrag::AudioIn(aid);
-                            } else if (x_of(a.end()) - pp.x).abs() <= 5.0 {
-                                drag = TlDrag::AudioOut(aid);
-                            } else if t >= a.start && t <= a.end() {
-                                drag = TlDrag::AudioMove { id: aid, grab: t - a.start };
-                            }
-                        }
-                    } else if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
+                    if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
                         let anim = self.row_anim(row);
                         let key = anim.and_then(|a| a.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
                         let span = anim.and_then(|a| a.span);
+                        let sound_id = match row {
+                            TlRow::Layer(id) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) => Some(id),
+                            _ => None,
+                        };
+                        let t_at = t_of(pp.x);
                         if let Some(kt) = key {
                             let picked = self.tl_sel.iter().any(|(r, t)| *r == row && (t - kt).abs() < 1e-6);
                             self.tl_key = Some((row, kt));
@@ -3168,6 +3146,18 @@ impl App {
                             } else {
                                 self.tl_sel = vec![(row, kt)];
                                 drag = TlDrag::Key { row, from: kt };
+                            }
+                        } else if let (Some(id), Some([a, b])) = (sound_id, span.filter(|_| pp.x >= tr.left())) {
+                            // a sound's clip: trim either end, or move it
+                            if (x_of(a) - pp.x).abs() <= 5.0 {
+                                drag = TlDrag::AudioIn(id);
+                            } else if (x_of(b) - pp.x).abs() <= 5.0 {
+                                drag = TlDrag::AudioOut(id);
+                            } else if t_at >= a && t_at <= b {
+                                drag = TlDrag::AudioMove { id, grab: t_at - a };
+                            }
+                            if drag != TlDrag::Scrub {
+                                self.select_only(Some(id));
                             }
                         } else if span.is_some_and(|[a, _]| (x_of(a) - pp.x).abs() <= 5.0) {
                             drag = TlDrag::SpanIn(row);
@@ -3181,7 +3171,6 @@ impl App {
                                     self.cam_sel = Some(id);
                                     self.tool = Tool::Frame;
                                 }
-                                TlRow::Audio(id) => self.aud_sel = Some(id),
                             }
                             self.tl_drag = None;
                             return;
@@ -3244,30 +3233,41 @@ impl App {
                 }
                 TlDrag::AudioMove { id, grab } => {
                     let fl = tl.frame_len();
-                    if let Some(a) = self.doc.audio.iter_mut().find(|a| a.id == id) {
-                        let ns = tl.snap(t_of(pp.x) - grab).max(0.0);
-                        if (ns - a.start).abs() > fl * 0.5 {
-                            a.start = ns;
-                            changed = true;
+                    if let Some(an) = self.doc.get_mut(id).and_then(|l| l.anim.as_mut()) {
+                        if let Some([s0, e0]) = an.span {
+                            let ns = tl.snap(t_of(pp.x) - grab).max(0.0);
+                            let dlt = ns - s0;
+                            if dlt.abs() > fl * 0.5 {
+                                an.span = Some([ns, e0 + dlt]);
+                                for k in &mut an.keys {
+                                    k.t += dlt;
+                                }
+                                changed = true;
+                            }
                         }
                     }
                 }
                 TlDrag::AudioIn(id) | TlDrag::AudioOut(id) => {
                     let fl = tl.frame_len();
-                    let src_len = self.doc.audio.iter().find(|a| a.id == id).and_then(|a| self.audio_cache.get(&a.path)).and_then(|d| d.as_ref()).map(|d| d.duration());
-                    if let Some(a) = self.doc.audio.iter_mut().find(|a| a.id == id) {
-                        if matches!(d, TlDrag::AudioIn(_)) {
-                            // trim the head: the sound stays where it is in time
-                            let ns = t.clamp(a.start - a.offset, a.end() - fl);
-                            let dlt = ns - a.start;
-                            a.start = ns;
-                            a.offset += dlt;
-                            a.len -= dlt;
-                        } else {
-                            let max_end = src_len.map_or(f64::MAX, |l| a.start + (l - a.offset));
-                            a.len = (t.min(max_end) - a.start).max(fl);
+                    if let Some(l) = self.doc.get_mut(id) {
+                        let src_len = match &l.kind {
+                            LayerKind::Audio(a) if a.len > 0.0 => Some(a.len),
+                            _ => None,
+                        };
+                        if let Some(an) = l.anim.as_mut() {
+                            if let Some([s0, e0]) = an.span {
+                                if matches!(d, TlDrag::AudioIn(_)) {
+                                    // trim the head: the sound stays where it is in time
+                                    let ns = t.clamp(s0 - an.video_start, e0 - fl);
+                                    an.video_start += ns - s0;
+                                    an.span = Some([ns, e0]);
+                                } else {
+                                    let max_end = src_len.map_or(f64::MAX, |len| s0 + (len - an.video_start));
+                                    an.span = Some([s0, t.min(max_end).max(s0 + fl)]);
+                                }
+                                changed = true;
+                            }
                         }
-                        changed = true;
                     }
                 }
                 TlDrag::SpanIn(row) | TlDrag::SpanOut(row) => {
@@ -3315,7 +3315,8 @@ impl App {
         if resp.secondary_clicked() {
             if let Some(pp) = pointer.or(resp.hover_pos()) {
                 if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
-                    if pp.x >= tr.left() {
+                    let sound = matches!(row, TlRow::Layer(id) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))));
+                    if pp.x >= tr.left() && !sound {
                         let t = tl.snap(t_of(pp.x));
                         if let Some(a) = self.row_anim_mut(row) {
                             let [x, y] = a.span.unwrap_or([0.0, dur]);
@@ -3380,14 +3381,20 @@ impl App {
         });
     }
 
-    /// A sound file goes on the timeline at the playhead (the timeline turns on).
-    fn add_audio(&mut self, p: &std::path::Path) {
-        let id = self.doc.new_id();
+    /// A sound file becomes a sound layer: a gizmo at `at` (where it was dropped,
+    /// or the middle of the view), its span starting at the playhead (the timeline
+    /// turns on). The span's end is set once the file is decoded.
+    fn add_audio(&mut self, p: &std::path::Path, at: Pos2) {
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("소리").to_string();
         let path = p.to_string_lossy().to_string();
-        self.doc.audio.push(crate::anim::AudioClip { id, name, path: path.clone(), start: self.doc.timeline.time, offset: 0.0, len: 0.0, gain: 1.0, mute: false, anim: Default::default() });
+        let kind = LayerKind::Audio(crate::doc::AudioLayer { path: path.clone(), pos: at, len: 0.0, volume: 1.0, mute: false });
+        let id = self.doc.insert(name, kind, None);
+        let t0 = self.doc.timeline.time;
+        if let Some(l) = self.doc.get_mut(id) {
+            l.anim = Some(crate::anim::Anim { span: Some([t0, t0]), ..Default::default() });
+        }
         self.doc.timeline.on = true;
-        self.aud_sel = Some(id);
+        self.select_only(Some(id));
         self.ensure_audio(&path);
         self.mark();
     }
@@ -3396,13 +3403,14 @@ impl App {
     fn voices_sig(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for a in &self.doc.audio {
-            // keyed volume: the keys, not the sampled value that moves while playing
-            let keyed = a.anim.keys.iter().any(|k| k.ch & crate::anim::ch::VOL != 0);
-            (a.id, a.start.to_bits(), a.offset.to_bits(), a.len.to_bits(), if keyed { 0 } else { a.gain.to_bits() }, a.mute).hash(&mut h);
-            vol_keys_hash(&a.anim, &mut h);
-        }
         for l in &self.doc.layers {
+            if let (LayerKind::Audio(a), Some(an)) = (&l.kind, l.anim.as_ref()) {
+                // keyed volume: the keys, not the sampled value that moves while playing
+                let keyed = an.keys.iter().any(|k| k.ch & crate::anim::ch::VOL != 0);
+                let span = an.span.map(|s| (s[0].to_bits(), s[1].to_bits()));
+                (l.id, l.visible, span, an.video_start.to_bits(), a.len.to_bits(), if keyed { 0 } else { a.volume.to_bits() }, a.mute).hash(&mut h);
+                vol_keys_hash(an, &mut h);
+            }
             if let LayerKind::Image(im) = &l.kind {
                 if let Some(v) = &im.video {
                     (l.id, l.visible, v.mute, v.speed.to_bits(), l.anim.as_ref().and_then(|a| a.span).map(|s| (s[0].to_bits(), s[1].to_bits()))).hash(&mut h);
@@ -3440,11 +3448,20 @@ impl App {
                 Ok(d) => {
                     let dur = d.duration();
                     self.audio_cache.insert(path.clone(), Some(Arc::new(d)));
-                    // first decode sets the clip length; a long clip stretches the timeline
+                    // first decode sets the source length (and a new layer's span end);
+                    // a long sound stretches the timeline
                     let mut grow = 0.0f64;
-                    for a in self.doc.audio.iter_mut().filter(|a| a.path == path && a.len <= 0.0) {
-                        a.len = (dur - a.offset).max(0.0);
-                        grow = grow.max(a.end());
+                    for l in &mut self.doc.layers {
+                        let LayerKind::Audio(a) = &mut l.kind else { continue };
+                        if a.path != path || a.len > 0.0 {
+                            continue;
+                        }
+                        a.len = dur;
+                        let an = l.anim.get_or_insert_with(Default::default);
+                        let [s0, e0] = an.span.unwrap_or([0.0, 0.0]);
+                        let e = if e0 <= s0 { s0 + (dur - an.video_start).max(0.0) } else { e0 };
+                        an.span = Some([s0, e]);
+                        grow = grow.max(e);
                     }
                     if grow > self.doc.timeline.duration {
                         self.doc.timeline.duration = grow.ceil();
@@ -3452,7 +3469,7 @@ impl App {
                 }
                 Err(e) => {
                     self.audio_cache.remove(&path);
-                    if self.doc.audio.iter().any(|a| a.path == path) {
+                    if self.doc.layers.iter().any(|l| matches!(&l.kind, LayerKind::Audio(a) if a.path == path)) {
                         self.status = format!("소리 읽기 실패: {e}");
                     }
                     // keep video files without sound from retrying
@@ -3461,8 +3478,11 @@ impl App {
             }
         }
         // decode what the document needs (clips, videos with sound)
-        let mut need: Vec<String> = self.doc.audio.iter().map(|a| a.path.clone()).collect();
+        let mut need: Vec<String> = Vec::new();
         for l in &self.doc.layers {
+            if let LayerKind::Audio(a) = &l.kind {
+                need.push(a.path.clone());
+            }
             if let LayerKind::Image(im) = &l.kind {
                 if let Some(v) = im.video.as_ref().filter(|v| v.info.audio) {
                     need.push(v.path.clone());
@@ -3477,10 +3497,15 @@ impl App {
     /// Everything that sounds on the timeline right now.
     fn timeline_voices(&self) -> Vec<crate::audio::Voice> {
         let mut out = Vec::new();
-        for a in self.doc.audio.iter().filter(|a| !a.mute && a.len > 0.0) {
+        for l in self.doc.layers.iter().filter(|l| l.visible) {
+            let (LayerKind::Audio(a), Some(an)) = (&l.kind, l.anim.as_ref()) else { continue };
+            let Some([s0, e0]) = an.span.filter(|s| s[1] > s[0]) else { continue };
+            if a.mute || a.len <= 0.0 {
+                continue;
+            }
             if let Some(Some(d)) = self.audio_cache.get(&a.path) {
-                let env = crate::anim::vol_envelope(&a.anim, a.start, a.end()).map(Arc::new);
-                out.push(crate::audio::Voice { data: d.clone(), t0: a.start, src0: a.offset, speed: 1.0, span: (a.start, a.end()), gain: a.gain, env });
+                let env = crate::anim::vol_envelope(an, s0, e0).map(Arc::new);
+                out.push(crate::audio::Voice { data: d.clone(), t0: s0, src0: an.video_start, speed: 1.0, span: (s0, e0), gain: a.volume, env });
             }
         }
         for l in &self.doc.layers {
@@ -3980,6 +4005,10 @@ impl App {
     /// Puts a layer into a space on a camera-facing plane, so it looks exactly as
     /// before; the layer moves next to the space's other members in the stack.
     fn put_in_space(&mut self, id: LayerId, sid: u64) {
+        // sounds have no picture to place
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+            return;
+        }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
         let name = sp.name.clone();
         let cam = match crate::persp::solve(sp) {
@@ -4004,6 +4033,9 @@ impl App {
     /// Stands a layer upright on the floor where canvas point `w` shows, facing the
     /// camera, its bottom middle on the floor (AR-style placing).
     fn stand_on_floor(&mut self, id: LayerId, sid: u64, w: Pos2) {
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+            return;
+        }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
         let Ok(cam) = crate::persp::solve(sp) else {
             self.status = "공간 카메라 계산 불가".into();
@@ -4034,6 +4066,9 @@ impl App {
     /// Puts a layer on a wall: its plane lies on the wall where its centre shows, and it
     /// moves along the wall from then on.
     fn put_in_wall(&mut self, id: LayerId, sid: u64, wid: u64) {
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+            return;
+        }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
         let Ok(cam) = crate::persp::solve(sp) else {
             self.status = "공간 카메라 계산 불가".into();
@@ -4141,6 +4176,7 @@ impl App {
                 LayerKind::Shape(s) => shape_hit(s, w, tol),
                 LayerKind::Vector(v) => v.strokes.iter().any(|s| s.hit(w - v.offset, tol)),
                 LayerKind::Raster(r) => r.alpha_at_world(w) > 8,
+                LayerKind::Audio(a) => a.rect().expand(tol).contains(w),
             };
             if hit {
                 return Some(l.id);
@@ -7351,14 +7387,18 @@ impl App {
                 ui.label(l.kind_label());
                 // the button keeps its place; the name field takes what is left
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
+                    if !matches!(l.kind, LayerKind::Audio(_)) {
+                        want_mask = ui.button("마스크").on_hover_text("마스크 추가·선택").clicked();
+                    }
                     if !matches!(l.kind, LayerKind::Text(_)) {
                         let w = ui.available_width() - 8.0; // the field's own margins
                         changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(w.max(24.0))).changed();
                     }
                 });
             });
-            changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).mixed(mxc(ch::OPA))).changed();
+            if !matches!(l.kind, LayerKind::Audio(_)) {
+                changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).mixed(mxc(ch::OPA))).changed();
+            }
             if l.place.is_none() {
                 // 2D position (the centre); placed layers use the 3D fields below
                 let c0 = crate::anim::key_of(l, 0.0).center;
@@ -7380,7 +7420,19 @@ impl App {
                 }
             }
             let is_mask = l.mask_of.is_some();
+            let span = l.anim.as_ref().and_then(|a| a.span);
             match &mut l.kind {
+                LayerKind::Audio(a) => {
+                    changed |= ui.add(crate::dial::Dial::new(&mut a.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).mixed(mxc(ch::VOL))).changed();
+                    changed |= ui.checkbox(&mut a.mute, "소리 끔").changed();
+                    if let Some([s0, e0]) = span {
+                        ui.small(egui::RichText::new(format!("{} ~ {} · 원본 {}", crate::video::timecode(s0), crate::video::timecode(e0), crate::video::timecode(a.len))).monospace().color(INK_3()));
+                    }
+                    let file = std::path::Path::new(&a.path).file_name().map_or(a.path.clone(), |f| f.to_string_lossy().to_string());
+                    let w = ui.available_width();
+                    ui.label(elide(ui, file, w)).on_hover_text(&a.path);
+                    ui.small(egui::RichText::new("타임라인: 막대 끌기로 이동 · 양 끝으로 자르기").color(INK_3()));
+                }
                 LayerKind::Image(im) => {
                     if let Some(v) = &mut im.video {
                         ui.horizontal(|ui| {
@@ -7631,7 +7683,7 @@ impl App {
                     }
                 }
             }
-            if !spaces.is_empty() {
+            if !spaces.is_empty() && !matches!(l.kind, LayerKind::Audio(_)) {
                 ui.separator();
                 let cur = l.place.as_ref().map(|p| (p.space, p.wall));
                 let shown = match cur {
@@ -8052,7 +8104,8 @@ impl App {
             // mask button (not on masks themselves)
             let mask_r = Rect::from_center_size(pos2(r.right() - 42.0, r.center().y), vec2(24.0, 26.0));
             let has_mask = l.mask_of.is_none() && masked_ids.contains(&l.id);
-            let mask_b = (l.mask_of.is_none()).then(|| ui.interact(mask_r, ui.id().with(("mask", l.id)), Sense::click()));
+            let is_sound = matches!(l.kind, LayerKind::Audio(_));
+            let mask_b = (l.mask_of.is_none() && !is_sound).then(|| ui.interact(mask_r, ui.id().with(("mask", l.id)), Sense::click()));
             let p = ui.painter().clone();
             let dragging_this = self.layer_drag == Some(l.id);
             if selected || dragging_this {
@@ -8075,6 +8128,10 @@ impl App {
                     let k = (thumb_r.width() / size.x).min(thumb_r.height() / size.y);
                     let ir = Rect::from_center_size(thumb_r.center(), size * k);
                     p.image(tid, ir, uv, Color32::WHITE.gamma_multiply(dim));
+                }
+                None if is_sound => {
+                    let mute = matches!(&l.kind, LayerKind::Audio(a) if a.mute);
+                    crate::canvas::sound_gizmo(&p, thumb_r.shrink(2.0), mute);
                 }
                 None => {
                     let glyph = match l.kind {
@@ -9133,7 +9190,7 @@ impl App {
                         }
                     }
                 });
-                let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked).map(|l| l.id);
+                let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked && !matches!(l.kind, LayerKind::Audio(_))).map(|l| l.id);
                 if let Some(lid) = placeable {
                     let armed = self.space_place == Some(lid);
                     if ui.selectable_label(armed, "바닥에 세우기").on_hover_text("선택한 레이어 · 사진 속 바닥 클릭").clicked() {
@@ -10140,6 +10197,7 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
                 })
                 .collect();
         }
+        LayerKind::Audio(a) => a.pos = map(a.pos),
         LayerKind::Raster(r) => {
             if let Some(n) = crate::raster::transformed(r, c, s, th) {
                 *r = n;

@@ -57,7 +57,8 @@ struct FileDoc {
     timeline: crate::anim::Timeline,
     #[serde(default)]
     cameras: Vec<crate::anim::CanvasCam>,
-    #[serde(default)]
+    /// Sound clips of files before 0.54.0; they load as sound layers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     audio: Vec<crate::anim::AudioClip>,
 }
 
@@ -125,6 +126,7 @@ enum FileKind {
         rotation: f32,
     },
     Vector { offset: [f32; 2], strokes: Vec<FileStroke> },
+    Audio(crate::doc::AudioLayer),
     Raster {
         offset: [f32; 2],
         tiles: Vec<[i32; 2]>,
@@ -254,10 +256,11 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     };
                     FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, blend: r.blend, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
                 }
+                LayerKind::Audio(a) => FileKind::Audio(a.clone()),
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert });
         }
-        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: doc.audio.clone() };
+        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         zip.finish().map_err(|e| e.to_string())?;
@@ -276,7 +279,8 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     };
     let fd: FileDoc = serde_json::from_slice(&read("doc.json")?).map_err(|e| e.to_string())?;
     let mut images: HashMap<String, ImageSource> = HashMap::new();
-    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras, audio: fd.audio };
+    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras };
+    let old_audio = fd.audio;
     for fl in fd.layers {
         let kind = match fl.kind {
             FileKind::Image { file, center, scale, rotation, crop, adjust, video } => {
@@ -340,12 +344,33 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 }
                 LayerKind::Raster(r)
             }
+            FileKind::Audio(a) => LayerKind::Audio(a),
         };
         doc.next_id = doc.next_id.max(fl.id);
         doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert });
     }
+    clips_to_layers(&mut doc, old_audio);
     crate::persp::to_eye_level(&mut doc);
     Ok(doc)
+}
+
+/// Sound clips of older files become sound layers: same time, trim, volume and
+/// keys; their gizmos stand in a column left of the content.
+fn clips_to_layers(doc: &mut Document, clips: Vec<crate::anim::AudioClip>) {
+    if clips.is_empty() {
+        return;
+    }
+    let content = doc.layers.iter().filter_map(|l| l.bounds()).reduce(|a, b| a.union(b)).unwrap_or(Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::ZERO));
+    let size = crate::doc::AudioLayer::SIZE;
+    for (i, c) in clips.into_iter().enumerate() {
+        let pos = pos2(content.min.x - size * 1.5, content.min.y + size * 0.5 + i as f32 * size * 1.5);
+        let kind = LayerKind::Audio(crate::doc::AudioLayer { path: c.path, pos, len: 0.0, volume: c.gain, mute: c.mute });
+        let mut anim = c.anim;
+        anim.span = Some([c.start, c.start + c.len]);
+        anim.video_start = c.offset;
+        let id = doc.new_id();
+        doc.layers.push(Layer { id, name: c.name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: Some(anim), mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false });
+    }
 }
 
 #[cfg(test)]
@@ -397,5 +422,20 @@ mod video_tests {
         assert!(br.rec_base.is_some());
         let LayerKind::Vector(bv) = &back.layers[1].kind else { panic!() };
         assert_eq!(bv.strokes[0].rec.as_ref().unwrap().times, vec![0.0, 0.3]);
+    }
+
+    #[test]
+    fn old_sound_clips_become_sound_layers() {
+        let mut doc = Document::default();
+        let mut clip = crate::anim::AudioClip { id: 7, name: "bgm".into(), path: "bgm.wav".into(), start: 2.0, offset: 1.5, len: 3.0, gain: 0.5, mute: false, anim: Default::default() };
+        clip.anim.keys.push(crate::anim::Key { t: 2.5, center: [0.0; 2], ext: [0.0; 2], rot: 0.0, opacity: 1.0, place: None, ease: Default::default(), follow: None, ch: crate::anim::ch::VOL, vol: 0.25 });
+        clips_to_layers(&mut doc, vec![clip]);
+        let l = &doc.layers[0];
+        let an = l.anim.as_ref().unwrap();
+        assert_eq!(an.span, Some([2.0, 5.0]));
+        assert_eq!(an.video_start, 1.5);
+        assert_eq!(an.keys.len(), 1);
+        assert!(matches!(&l.kind, LayerKind::Audio(a) if a.volume == 0.5 && a.path == "bgm.wav"));
+        assert_eq!(l.name, "bgm");
     }
 }
