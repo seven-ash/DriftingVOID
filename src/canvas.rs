@@ -203,6 +203,7 @@ impl TexCache {
         crate::fontdb::families().is_some().hash(&mut h);
         t.bg.hash(&mut h);
         t.wrap.to_bits().hash(&mut h);
+        (t.align as u8).hash(&mut h);
         scale.to_bits().hash(&mut h);
         win.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits)).hash(&mut h);
         let key = h.finish();
@@ -262,7 +263,7 @@ pub fn content_key(l: &Layer) -> u64 {
             }
         }
         LayerKind::Text(t) => {
-            (3u8, &t.text, &t.family, &t.style, t.color, t.bg).hash(&mut h);
+            (3u8, &t.text, &t.family, &t.style, t.color, t.bg, t.align as u8).hash(&mut h);
             for v in [t.size, t.wrap, t.pos.x, t.pos.y, t.rotation] {
                 f(&mut h, v);
             }

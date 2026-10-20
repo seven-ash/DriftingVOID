@@ -1481,6 +1481,12 @@ impl App {
         if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
             app.open_video_export();
         }
+        // DV_SELECT_ALL=1: every unlocked layer selected (group box captures)
+        if std::env::var_os("DV_SELECT_ALL").is_some() {
+            let ids: Vec<LayerId> = app.doc.layers.iter().filter(|l| !l.locked && l.mask_of.is_none()).map(|l| l.id).collect();
+            app.sel = ids.first().copied();
+            app.extra_sel = ids.iter().skip(1).copied().collect();
+        }
         // DV_TOOL=n: start with the n-th tool of the rail (panel captures)
         if let Some(t) = std::env::var("DV_TOOL").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| TOOLS.get(i)) {
             app.tool = t.0;
@@ -4317,11 +4323,14 @@ impl App {
 
     /// Handles of the selection in screen space: (id, position).
     /// Union of the selected layers' bounds (several layers, or one text/shape).
+    /// Layers in a 3D space are left out: the box scales and turns in 2D, and they
+    /// turn and scale in their space (G/R/S, the panel); their own outlines show
+    /// where they are.
     fn group_box(&self) -> Option<Rect> {
         if self.extra_sel.is_empty() && self.sub.is_empty() {
             return self.single_handles().and_then(|_| self.sel_layer()?.bounds());
         }
-        let whole = self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b));
+        let whole = self.selected_ids().iter().filter_map(|id| self.doc.get(*id)).filter(|l| !l.locked && l.place.is_none()).filter_map(|l| l.bounds()).reduce(|a, b| a.union(b));
         match (whole, self.sub_bounds()) {
             (Some(a), Some(b)) => Some(a.union(b)),
             (a, b) => a.or(b),
@@ -4474,7 +4483,8 @@ impl App {
                 for (h, hp) in self.group_handles() {
                     if hp.distance(sp) <= 9.0 {
                         let box_ = self.group_box().unwrap();
-                        let origs = self.sel_parts();
+                        // 2D layers only (see `group_box`)
+                        let origs: Vec<_> = self.sel_parts().into_iter().filter(|(l, _)| l.place.is_none()).collect();
                         self.drag = Some(Drag::Group { rotate: h == 34, center: box_.center(), start: w, box_, origs, s: 1.0, th: 0.0 });
                         return;
                     }
@@ -5977,7 +5987,16 @@ impl App {
                     let inside = |b: Rect| if full { r.contains_rect(b) } else { r.contains(b.center()) };
                     let mut ids = Vec::new();
                     let mut sub = SubSel::default();
+                    let cams = crate::persp::cameras(&self.doc.spaces);
                     for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked && l.mask_of.is_none()) {
+                        // layers in a space: whole, judged where they show (not
+                        // where they sat on the canvas before going in)
+                        if l.place.is_some() {
+                            if l.shown_bounds(&cams).is_some_and(inside) {
+                                ids.push(l.id);
+                            }
+                            continue;
+                        }
                         match &l.kind {
                             LayerKind::Vector(v) => {
                                 let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| inside(v.strokes[i].bounds.translate(v.offset))).collect();
@@ -6034,7 +6053,14 @@ impl App {
                 // brush pixels inside the outline
                 let mut ids = Vec::new();
                 let mut sub = SubSel::default();
+                let cams = crate::persp::cameras(&self.doc.spaces);
                 for l in self.doc.layers.iter().rev().filter(|l| l.visible && !l.locked && l.mask_of.is_none()) {
+                    if l.place.is_some() {
+                        if l.shown_bounds(&cams).is_some_and(|lb| in_poly(lb.center(), &pts)) {
+                            ids.push(l.id);
+                        }
+                        continue;
+                    }
                     match &l.kind {
                         LayerKind::Vector(v) => {
                             let idx: Vec<usize> = (0..v.strokes.len()).filter(|&i| in_poly(v.strokes[i].bounds.translate(v.offset).center(), &pts)).collect();
@@ -6589,9 +6615,10 @@ impl App {
             if placed.is_none() {
                 use crate::view3d::Op;
                 for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
-                    let origs = self.sel_parts();
+                    // turning and scaling are 2D: layers in a space keep theirs (see `group_box`)
+                    let origs: Vec<_> = self.sel_parts().into_iter().filter(|(l, _)| op == Op::Grab || l.place.is_none()).collect();
                     if origs.is_empty() {
-                        break;
+                        continue;
                     }
                     if k(Modifiers::NONE, key) {
                         let center = self.group_box().or_else(|| self.sel_layer().and_then(|l| l.bounds())).map(|b| b.center());
