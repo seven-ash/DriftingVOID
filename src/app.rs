@@ -5740,14 +5740,16 @@ impl App {
                 let cam = orig.place.as_ref().and_then(|pl| self.doc.spaces.iter().find(|s| s.id == pl.space)).and_then(|s| crate::persp::solve(s).ok());
                 match (orig.place.as_ref(), cam) {
                     (Some(o), Some(cam)) => {
-                        // Floor snapping (Alt: free). A layer that touches the floor
-                        // when the drag starts slides along the floor; any other
-                        // slides along its own plane under the pointer and lands on
-                        // the floor once its lowest point comes within 10 px of it.
+                        // Slides along its own plane under the pointer. Alt: floor
+                        // snapping (opt-in; walls are the usual way to place): a
+                        // layer touching the floor when the drag starts slides along
+                        // the floor, any other lands on the floor once its lowest
+                        // point comes within 10 px of it.
+                        let snap = mods.alt;
                         let bx = orig.bounds().unwrap_or(Rect::ZERO);
                         let fz = cam.floor_z;
                         let tol = (cam.origin_depth() * 1e-3).max(0.05);
-                        let on_floor = !mods.alt && (o.lowest(bx)[2] - fz).abs() < tol;
+                        let on_floor = snap && (o.lowest(bx)[2] - fz).abs() < tol;
                         let mut pl = o.clone();
                         if on_floor {
                             if let (Some(a), Some(b)) = (cam.hit_floor(*start), cam.hit_floor(*start + d)) {
@@ -5755,7 +5757,7 @@ impl App {
                             }
                         } else if let (Some(a), Some(b)) = (o.ray_hit(&cam, *start), o.ray_hit(&cam, *start + d)) {
                             pl.shift_world(crate::persp::sub(b, a));
-                            if !mods.alt {
+                            if snap {
                                 let low = pl.lowest(bx);
                                 let on = [low[0], low[1], fz];
                                 if let (Some(p), Some(q)) = (cam.project(low), cam.project(on)) {
