@@ -407,16 +407,14 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         draw_selection(painter, doc, proj, sel);
         return;
     }
-    // floor grid on the floor plane (z = 0 is eye level), under the camera, with
-    // the X and Y axes through the point below it
-    let g = nice(cam.origin_depth().max(1.0) / 4.0);
+    // grid on the zero plane (eye level, the horizon) with the X and Y axes
+    let g = nice(cam.frame.width().max(cam.frame.height()) as f64 / 8.0);
     let n = 20i32;
     let e = g * n as f64;
-    let fz = cam.floor_z;
     for i in -n..=n {
         let t = i as f64 * g;
         let c = if i == 0 { None } else { Some(Color32::from_white_alpha(if i % 5 == 0 { 46 } else { 22 })) };
-        for (a, b, axis) in [([-e, t, fz], [e, t, fz], 0usize), ([t, -e, fz], [t, e, fz], 1)] {
+        for (a, b, axis) in [([-e, t, 0.0], [e, t, 0.0], 0usize), ([t, -e, 0.0], [t, e, 0.0], 1)] {
             if let Some(s) = proj.segment(a, b) {
                 let col = c.unwrap_or(persp::AXIS_COLORS[axis].gamma_multiply(0.85));
                 painter.line_segment(s, Stroke::new(if c.is_none() { 1.4 } else { 1.0 }, col));
@@ -444,8 +442,9 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         .map(|(l, p)| (l, p, proj.to_view(p.world_affine().1)[2]))
         .collect();
     list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let light = doc.spaces.iter().find(|s| s.id == view.space).and_then(|s| s.light);
     for (l, pl, _) in list {
-        draw_plane(painter, ctx, l, pl, proj, cache);
+        draw_plane(painter, ctx, l, pl, proj, cache, light.as_ref());
     }
     draw_selection(painter, doc, proj, sel);
     // origin
@@ -454,7 +453,9 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
     }
 }
 
-fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj: &Proj, cache: &mut TexCache) {
+/// Like the canvas: thick layers are shaded by the space's light (sides and the
+/// cap facing this view), flat ones are not.
+fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj: &Proj, cache: &mut TexCache, light: Option<&persp::Light>) {
     let Some(b) = l.bounds() else { return };
     let (m, t) = pl.world_affine();
     let corners: Vec<Option<Pos2>> = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()]
@@ -485,11 +486,11 @@ fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj:
     let fwd = proj.r[2];
     let to_eye = |w: V3| if proj.ppu.is_some() { scale(fwd, -1.0) } else { sub(proj.eye, w) };
     if let Some(edges) = cache.outline(l, res) {
-        let sides = crate::extrude::sides(&edges, pl, &|w| proj.project(w), &to_eye, &|w| proj.to_view(w)[2], None, crate::canvas::SIDE_SHADE);
+        let sides = crate::extrude::sides(&edges, pl, &|w| proj.project(w), &to_eye, &|w| proj.to_view(w)[2], light, crate::canvas::SIDE_SHADE);
         painter.add(Shape::mesh(crate::canvas::side_mesh(&sides, op)));
     }
-    let (off, _) = crate::extrude::visible_cap(pl, &to_eye);
-    painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, crate::canvas::cap_tint(op, 1.0)));
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, crate::canvas::cap_tint(op, light.map_or(1.0, |l| l.shade(n)))));
 }
 
 fn draw_selection(painter: &Painter, doc: &Document, proj: &Proj, sel: Option<LayerId>) {
