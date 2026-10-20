@@ -27,7 +27,7 @@ pub fn decode_image(bytes: Vec<u8>, ext_hint: Option<&str>) -> Result<ImageSourc
         .and_then(|f| f.extensions_str().first().map(|s| s.to_string()))
         .or_else(|| ext_hint.map(|s| s.to_string()))
         .unwrap_or_else(|| "bin".into());
-    Ok(ImageSource { id: next_rev(), rgba: Arc::new(img.to_rgba8()), encoded: Arc::new(bytes), ext, logical: None })
+    Ok(ImageSource { id: next_rev(), rgba: Arc::new(img.to_rgba8()), encoded: Arc::new(bytes), ext, logical: None, nv12: None })
 }
 
 pub fn load_image_file(path: &Path) -> Result<ImageSource, String> {
@@ -38,7 +38,7 @@ pub fn load_image_file(path: &Path) -> Result<ImageSource, String> {
 pub fn image_from_rgba(img: image::RgbaImage) -> ImageSource {
     let mut png = Vec::new();
     let _ = image::DynamicImage::ImageRgba8(img.clone()).write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png);
-    ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(png), ext: "png".into(), logical: None }
+    ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(png), ext: "png".into(), logical: None, nv12: None }
 }
 
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
@@ -381,7 +381,7 @@ mod video_tests {
     fn video_layer_round_trips() {
         let info = crate::video::VideoInfo { width: 1920, height: 1080, fps: 30.0, duration: 8.0, audio: true, codec: "h264".into() };
         // a preview-sized frame without file bytes, as video frames are
-        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]) };
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]), nv12: None };
         let mut im = ImageLayer::new(src, pos2(10.0, 20.0));
         im.video = Some(VideoRef { path: "C:/v/clip.mp4".into(), info: info.clone(), time: 2.5, speed: 2.0, looping: true, mute: false, volume: 1.0, slot: 1 });
         assert_eq!(im.crop.size(), vec2(1920.0, 1080.0));

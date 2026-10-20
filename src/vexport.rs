@@ -65,6 +65,11 @@ impl Codec {
         matches!(self, Codec::H264 | Codec::Hevc | Codec::Av1)
     }
 
+    /// Frames go to the encoder as NV12 made on the GPU (opaque 4:2:0 codecs).
+    pub fn nv12(self) -> bool {
+        matches!(self, Codec::H264 | Codec::Hevc | Codec::Av1)
+    }
+
     /// Needs even width and height (4:2:0).
     pub fn even(self) -> bool {
         matches!(self, Codec::H264 | Codec::Hevc | Codec::Av1 | Codec::Vp9)
@@ -75,11 +80,11 @@ impl Codec {
         let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let mut a = match (self, gpu) {
             (Codec::H264, false) => v(&["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]),
-            (Codec::H264, true) => v(&["-c:v", "h264_nvenc", "-preset", "p5", "-pix_fmt", "yuv420p"]),
+            (Codec::H264, true) => v(&["-c:v", "h264_nvenc", "-preset", "p5", "-pix_fmt", "nv12"]),
             (Codec::Hevc, false) => v(&["-c:v", "libx265", "-preset", "medium", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]),
-            (Codec::Hevc, true) => v(&["-c:v", "hevc_nvenc", "-preset", "p5", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]),
+            (Codec::Hevc, true) => v(&["-c:v", "hevc_nvenc", "-preset", "p5", "-pix_fmt", "nv12", "-tag:v", "hvc1"]),
             (Codec::Av1, false) => v(&["-c:v", "libsvtav1", "-preset", "8", "-pix_fmt", "yuv420p"]),
-            (Codec::Av1, true) => v(&["-c:v", "av1_nvenc", "-preset", "p5", "-pix_fmt", "yuv420p"]),
+            (Codec::Av1, true) => v(&["-c:v", "av1_nvenc", "-preset", "p5", "-pix_fmt", "nv12"]),
             (Codec::ProRes, _) => v(&["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le"]),
             (Codec::Vp9, _) => v(&["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-row-mt", "1", "-deadline", "good", "-cpu-used", "4"]),
             (Codec::Gif, _) => v(&["-vf", "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer", "-loop", "0"]),
@@ -92,6 +97,10 @@ impl Codec {
                 None if self == Codec::Vp9 => a.extend(v(&["-crf", &q, "-b:v", "0"])),
                 None => a.extend(v(&["-crf", &q])),
             }
+        }
+        if self.nv12() {
+            // what the frames are (BT.709, limited range), written into the file
+            a.extend(v(&["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]));
         }
         if matches!(self, Codec::H264 | Codec::Hevc | Codec::Av1 | Codec::ProRes) {
             a.extend(v(&["-movflags", "+faststart"]));
@@ -180,16 +189,31 @@ struct Feed {
     fps: f64,
     size: (u32, u32),
     player: Option<crate::video::Player>,
+    /// NV12 frames (the GPU path), else RGBA.
+    nv12: Option<crate::video::Player<Vec<u8>>>,
+    use_nv12: bool,
+    hwaccel: &'static str,
     last: f64,
-    cur: Option<(f64, Arc<image::RgbaImage>)>,
-    pending: Option<(f64, image::RgbaImage)>,
+    cur: Option<(f64, FeedFrame)>,
+    pending: Option<(f64, FeedFrame)>,
+}
+
+#[derive(Clone)]
+enum FeedFrame {
+    Rgba(Arc<image::RgbaImage>),
+    Nv12(Arc<crate::doc::Nv12>),
 }
 
 impl Feed {
-    fn frame(&mut self, vt: f64) -> Option<Arc<image::RgbaImage>> {
+    fn frame(&mut self, vt: f64) -> Option<FeedFrame> {
         let ahead = self.cur.as_ref().is_some_and(|c| vt > c.0 + 2.0);
-        if self.player.is_none() || vt < self.last - 1e-6 || ahead {
-            self.player = crate::video::Player::start(&self.path, vt, self.fps, self.size).ok();
+        let none = if self.use_nv12 { self.nv12.is_none() } else { self.player.is_none() };
+        if none || vt < self.last - 1e-6 || ahead {
+            if self.use_nv12 {
+                self.nv12 = crate::video::Player::start_nv12(&self.path, vt, self.fps, self.size, self.hwaccel).ok();
+            } else {
+                self.player = crate::video::Player::start(&self.path, vt, self.fps, self.size).ok();
+            }
             self.cur = None;
             self.pending = None;
         }
@@ -197,14 +221,21 @@ impl Feed {
         let half = 0.5 / self.fps.max(1.0);
         loop {
             if self.pending.is_none() {
-                match self.player.as_ref()?.rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                    Ok(f) => self.pending = Some(f),
-                    Err(_) => break,
+                let timeout = std::time::Duration::from_secs(10);
+                let (w, h) = self.size;
+                let got = if self.use_nv12 {
+                    self.nv12.as_ref()?.rx.recv_timeout(timeout).ok().map(|(t, data)| (t, FeedFrame::Nv12(Arc::new(crate::doc::Nv12 { w, h, data }))))
+                } else {
+                    self.player.as_ref()?.rx.recv_timeout(timeout).ok().map(|(t, img)| (t, FeedFrame::Rgba(Arc::new(img))))
+                };
+                match got {
+                    Some(f) => self.pending = Some(f),
+                    None => break,
                 }
             }
             if self.pending.as_ref().is_some_and(|(t, _)| *t <= vt + half) {
                 let (t, img) = self.pending.take().unwrap();
-                self.cur = Some((t, Arc::new(img)));
+                self.cur = Some((t, img));
             } else {
                 break;
             }
@@ -262,9 +293,15 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         }
     };
     let mut child = None;
+    let nv12 = job.codec.nv12() && w % 2 == 0 && h % 2 == 0;
     if job.codec != Codec::Png {
         let mut cmd = Command::new(&tools.ffmpeg);
-        cmd.args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &format!("{}", job.fps), "-i", "pipe:0"]);
+        let pix = if nv12 { "nv12" } else { "rgba" };
+        cmd.args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pix]);
+        if nv12 {
+            cmd.args(["-colorspace", "bt709", "-color_range", "tv"]);
+        }
+        cmd.args(["-s", &format!("{w}x{h}"), "-r", &format!("{}", job.fps), "-i", "pipe:0"]);
         if let Some(p) = &wav {
             cmd.arg("-i").arg(p);
         }
@@ -276,12 +313,17 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         cmd.arg(&job.out).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
         child = Some(no_window(&mut cmd).spawn().map_err(|e| e.to_string())?);
     }
+    let gpu_render = crate::gpu::with_gpu(|_| ()).is_some();
+    // NVDEC through CUDA on NVIDIA (measured fastest there), else ffmpeg's pick
+    let hwaccel = if crate::gpu::with_gpu(|g| g.vendor) == Some(0x10de) { "cuda" } else { "auto" };
     // video layers: one sequential decoder each
     let mut feeds: std::collections::HashMap<LayerId, Feed> = std::collections::HashMap::new();
     for l in &job.doc.layers {
         if let LayerKind::Image(im) = &l.kind {
             if let Some(v) = &im.video {
-                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, last: f64::MIN, cur: None, pending: None });
+                // NV12 straight to the GPU when it draws (even sizes)
+                let use_nv12 = gpu_render && v.info.width % 2 == 0 && v.info.height % 2 == 0;
+                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None });
             }
         }
     }
@@ -296,13 +338,39 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     };
     // Frames go to a writer thread that converts them and feeds the encoder (or
     // saves PNGs), so the next frame renders meanwhile. Two frames may wait.
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, tiny_skia::Pixmap)>(2);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, crate::gpu::Frame)>(2);
     let mut stdin = child.as_mut().and_then(|c| c.stdin.take());
     let png_out = png_base.clone();
     let writer = std::thread::spawn(move || -> Result<f64, String> {
         let mut spent = 0.0;
-        for (i, pm) in rx {
+        for (i, frame) in rx {
             let t = std::time::Instant::now();
+            let pm = match frame {
+                crate::gpu::Frame::Nv12(data, fw, fh) if (fw, fh) == (w, h) => {
+                    // made on the GPU: straight to the encoder
+                    stdin.as_mut().ok_or("pipe")?.write_all(&data).map_err(|_| "pipe".to_string())?;
+                    spent += t.elapsed().as_secs_f64();
+                    continue;
+                }
+                crate::gpu::Frame::Nv12(..) => return Err("프레임 크기 오류".into()),
+                crate::gpu::Frame::Rgba(pm) => pm,
+            };
+            if nv12 {
+                // drawn by the CPU: converted here, as the GPU would
+                let pm = if (pm.width(), pm.height()) == (w, h) {
+                    pm
+                } else {
+                    let rgba = image::imageops::resize(&crate::export::to_rgba(&pm), w, h, image::imageops::FilterType::Triangle);
+                    let mut q = tiny_skia::Pixmap::new(w, h).ok_or("크기 오류")?;
+                    for (d, s) in q.pixels_mut().iter_mut().zip(rgba.pixels()) {
+                        *d = tiny_skia::ColorU8::from_rgba(s[0], s[1], s[2], s[3]).premultiply();
+                    }
+                    q
+                };
+                stdin.as_mut().ok_or("pipe")?.write_all(&crate::gpu::nv12_of(&pm)).map_err(|_| "pipe".to_string())?;
+                spent += t.elapsed().as_secs_f64();
+                continue;
+            }
             let mut rgba = crate::export::to_rgba(&pm);
             if rgba.dimensions() != (w, h) {
                 rgba = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
@@ -335,11 +403,13 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     // flattened 3D layers kept across frames (re-made only when they change)
     let flat = Arc::new(crate::export::FlatCache::default());
     crate::gpu::end_job();
-    let gpu_render = crate::gpu::with_gpu(|_| ()).is_some();
     if timing {
         eprintln!("export renderer: {}", crate::gpu::with_gpu(|g| g.adapter.clone()).unwrap_or_else(|| "CPU".into()));
     }
     let mut tm = [0f64; 2];
+    let mut in_flight: std::collections::VecDeque<(u64, crate::gpu::Pending)> = Default::default();
+    let mut frames: std::collections::VecDeque<(u64, crate::gpu::Frame)> = Default::default();
+    let mut done_cpu: Vec<(u64, crate::gpu::Frame)> = Vec::new();
     let mut clock = std::time::Instant::now();
     let mut lap = |k: usize, clock: &mut std::time::Instant| {
         tm[k] += clock.elapsed().as_secs_f64();
@@ -367,8 +437,10 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             if let LayerKind::Image(im) = &mut l.kind {
                 if let (Some(v), Some(feed)) = (im.video.as_ref(), feeds.get_mut(&l.id)) {
                     let vt = crate::anim::video_time(anim.as_ref(), v.speed, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
-                    if let Some(img) = feed.frame(vt) {
-                        im.src = ImageSource { id: next_rev(), rgba: img, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
+                    match feed.frame(vt) {
+                        Some(FeedFrame::Rgba(img)) => im.src = ImageSource { id: next_rev(), rgba: img, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None },
+                        Some(FeedFrame::Nv12(f)) => im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: Some(f) },
+                        None => {}
                     }
                 }
             }
@@ -386,22 +458,63 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let bg = if job.codec.alpha() { job.bg } else { Some(job.bg.unwrap_or(Color32::BLACK)) };
         lap(0, &mut clock);
         flat.sweep();
-        // on the GPU (layers kept across frames), else on the CPU
-        let on_gpu = if gpu_render { crate::gpu::with_gpu(|g| g.render_ss(&d, r.center(), size, rot, scale, bg, job.ss)).and_then(|r| r.ok()) } else { None };
-        let pm = match on_gpu.map_or_else(|| crate::export::with_frame_cache(&flat, || crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss)), Ok) {
-            Ok(pm) => pm,
-            Err(e) => return fail(&mut child, e),
-        };
+        // on the GPU (layers kept across frames, up to two frames in flight: this
+        // one is prepared while the GPU draws the one before), else on the CPU
+        let queued = if gpu_render { crate::gpu::with_gpu(|g| g.submit(&d, r.center(), size, rot, scale, bg, job.ss, nv12)).and_then(|r| r.ok()) } else { None };
+        let mut ready = Vec::new();
+        match queued {
+            Some(p) => {
+                in_flight.push_back((i, p));
+                if in_flight.len() > 1 {
+                    ready.push(in_flight.pop_front().unwrap());
+                }
+            }
+            None => {
+                // the CPU: whatever is in flight goes first, in order
+                ready.extend(in_flight.drain(..));
+                let pm = match crate::export::with_frame_cache(&flat, || crate::export::render_ss(&d, r.center(), size, rot, scale, bg, job.ss)) {
+                    Ok(pm) => pm,
+                    Err(e) => return fail(&mut child, e),
+                };
+                done_cpu.push((i, crate::gpu::Frame::Rgba(pm)));
+            }
+        }
+        for (j, p) in ready {
+            match crate::gpu::with_gpu(|g| g.finish(p)) {
+                Some(Ok(f)) => frames.push_back((j, f)),
+                Some(Err(e)) => return fail(&mut child, e),
+                None => return fail(&mut child, "GPU 오류".into()),
+            }
+        }
+        frames.extend(done_cpu.drain(..));
         lap(1, &mut clock);
-        if tx.send((i, pm)).is_err() {
-            // the writer stopped: the encoder quit, or a PNG could not be saved
+        while let Some((j, f)) = frames.pop_front() {
+            if tx.send((j, f)).is_err() {
+                // the writer stopped: the encoder quit, or a PNG could not be saved
+                let msg = match writer.join() {
+                    Ok(Err(e)) if e != "pipe" => e,
+                    _ => encoder_err(&mut child),
+                };
+                return fail(&mut child, msg);
+            }
+            pr.done.store(j + 1, Ordering::Relaxed);
+        }
+    }
+    // the last frames still on the GPU
+    for (j, p) in in_flight.drain(..) {
+        let f = match crate::gpu::with_gpu(|g| g.finish(p)) {
+            Some(Ok(f)) => f,
+            Some(Err(e)) => return fail(&mut child, e),
+            None => return fail(&mut child, "GPU 오류".into()),
+        };
+        if tx.send((j, f)).is_err() {
             let msg = match writer.join() {
                 Ok(Err(e)) if e != "pipe" => e,
                 _ => encoder_err(&mut child),
             };
             return fail(&mut child, msg);
         }
-        pr.done.store(i + 1, Ordering::Relaxed);
+        pr.done.store(j + 1, Ordering::Relaxed);
     }
     drop(tx);
     crate::gpu::end_job();
@@ -417,7 +530,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         eprintln!("export timing (s): prepare {:.2} render {:.2} (convert + write {:.2}, overlapped) for {total} frames", tm[0], tm[1], spent);
         let g = crate::gpu::take_stats();
         if g.iter().any(|x| *x > 0.0) {
-            eprintln!("  GPU path (ms): scene + flatten {:.0}, rasterize {:.0}, GPU draw + read back {:.0}", g[0], g[1], g[2]);
+            eprintln!("  GPU path (ms): scene + flatten {:.0}, rasterize {:.0}, encode GPU work {:.0}, wait + read back {:.0}; NV12 {nv12}", g[0], g[1], g[2], g[3]);
         }
     }
     if let Some(mut c) = child {
@@ -511,7 +624,7 @@ mod tests {
         c.args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:size=64x32:rate=10:duration=1,format=yuv420p"]).arg(&clip);
         assert!(c.status().is_ok_and(|s| s.success()));
         let info = crate::video::probe(&clip).unwrap();
-        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(64, 32)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([64, 32]) };
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(64, 32)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([64, 32]), nv12: None };
         let mut im = crate::doc::ImageLayer::new(src, egui::pos2(0.0, 0.0));
         im.video = Some(crate::doc::VideoRef { path: clip.to_string_lossy().into(), info, time: 0.0, speed: 1.0, looping: false, mute: false, volume: 1.0, slot: 1 });
         let mut doc = Document::default();
@@ -662,7 +775,7 @@ mod tests {
         let info = crate::video::probe(&p).unwrap();
         let size = info.preview_size(crate::video::PREVIEW_SIDE);
         let img = crate::video::frame_at(&p, 0.0, size).unwrap();
-        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]) };
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]), nv12: None };
         let (w, h) = (info.width as f32, info.height as f32);
         let im = crate::doc::ImageLayer { src, center: egui::pos2(w / 2.0, h / 2.0), scale: 1.0, rotation: 0.0, crop: Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h)), adjust: Default::default(), video: None };
         let mut doc = Document::default();
@@ -680,5 +793,77 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         eprintln!("total {:.2} s, ss {ss}: {:?}", t.elapsed().as_secs_f64(), p.result.lock().unwrap());
+    }
+
+    /// Colour patches through the NV12 path and back through ffmpeg's decoder,
+    /// then as a video layer exported again: within a few levels; and the CPU's
+    /// NV12 conversion against the GPU's (skipped without ffmpeg).
+    #[test]
+    fn nv12_colours_round_trip() {
+        if crate::video::tools().is_none() {
+            return;
+        }
+        let cols = [Color32::from_rgb(230, 40, 30), Color32::from_rgb(40, 200, 60), Color32::from_rgb(30, 60, 220), Color32::from_rgb(250, 250, 250), Color32::from_rgb(128, 128, 128), Color32::from_rgb(20, 20, 20), Color32::from_rgb(240, 200, 60), Color32::from_rgb(120, 60, 180)];
+        let mut doc = Document::default();
+        for (i, c) in cols.iter().enumerate() {
+            let x = (i % 4) as f32 * 40.0;
+            let y = (i / 4) as f32 * 40.0;
+            doc.insert("p".into(), LayerKind::Shape(ShapeLayer { kind: ShapeKind::Rect, a: pos2(x, y), b: pos2(x + 40.0, y + 40.0), color: *c, width: 0.0, fill: Some(*c), rotation: 0.0 }), None);
+        }
+        // the CPU's NV12 conversion matches the GPU's (frames the CPU drew)
+        let region = Rect::from_min_max(pos2(0.0, 0.0), pos2(160.0, 80.0));
+        let gpu = crate::gpu::with_gpu(|g| {
+            let p = g.submit(&doc, region.center(), region.size(), 0.0, 1.0, Some(Color32::BLACK), 1, true).unwrap();
+            g.finish(p).unwrap()
+        });
+        if let Some(crate::gpu::Frame::Nv12(data, ..)) = gpu {
+            let pm = crate::export::render(&doc, region, 1.0, Some(Color32::BLACK)).unwrap();
+            let cpu = crate::gpu::nv12_of(&pm);
+            let worst = data.iter().zip(&cpu).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+            assert!(worst <= 2, "CPU and GPU NV12 differ by {worst}");
+        }
+        {
+            let out = std::env::temp_dir().join("dv_nv12_false.mp4");
+            let _ = std::fs::remove_file(&out);
+            let job = Job { doc: doc.clone(), region: Region::Fixed(Rect::from_min_max(pos2(0.0, 0.0), pos2(160.0, 80.0))), size: (160, 80), fps: 10.0, t0: 0.0, t1: 0.5, codec: Codec::H264, quality: 8, mbps: None, gpu: false, bg: Some(Color32::BLACK), audio: vec![], ss: 1, out: out.clone() };
+            let p = start(job);
+            while p.result.lock().unwrap().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(matches!(&*p.result.lock().unwrap(), Some(Ok(_))), "{:?}", p.result.lock().unwrap());
+            let img = crate::video::frame_at(&out, 0.2, (160, 80)).unwrap();
+            for (i, c) in cols.iter().enumerate() {
+                let (x, y) = ((i % 4) as u32 * 40 + 20, (i / 4) as u32 * 40 + 20);
+                let px = img.get_pixel(x, y);
+                let d = (0..3).map(|k| (px[k] as i32 - [c.r(), c.g(), c.b()][k] as i32).abs()).max().unwrap();
+                assert!(d <= 4, "patch {i} {c:?} came back {px:?}");
+            }
+        }
+        // that video as a video layer, exported again: the decoder's NV12 frames
+        // turned into RGB on the GPU keep their colours
+        let src = std::env::temp_dir().join("dv_nv12_false.mp4");
+        let info = crate::video::probe(&src).unwrap();
+        let first = crate::video::frame_at(&src, 0.0, (160, 80)).unwrap();
+        let im = crate::doc::ImageLayer { src: ImageSource { id: next_rev(), rgba: Arc::new(first), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([160, 80]), nv12: None }, center: pos2(80.0, 40.0), scale: 1.0, rotation: 0.0, crop: Rect::from_min_size(pos2(0.0, 0.0), vec2(160.0, 80.0)), adjust: Default::default(), video: None };
+        let mut vd = Document::default();
+        let id = vd.insert("v".into(), LayerKind::Image(im), None);
+        if let Some(LayerKind::Image(im)) = vd.get_mut(id).map(|l| &mut l.kind) {
+            im.video = Some(crate::doc::VideoRef { path: src.to_string_lossy().into(), info, time: 0.0, speed: 1.0, looping: false, mute: true, volume: 1.0, slot: next_rev() });
+        }
+        let out = std::env::temp_dir().join("dv_nv12_again.mp4");
+        let _ = std::fs::remove_file(&out);
+        let job = Job { doc: vd, region: Region::Fixed(Rect::from_min_max(pos2(0.0, 0.0), pos2(160.0, 80.0))), size: (160, 80), fps: 10.0, t0: 0.0, t1: 0.4, codec: Codec::H264, quality: 8, mbps: None, gpu: false, bg: Some(Color32::BLACK), audio: vec![], ss: 1, out: out.clone() };
+        let p = start(job);
+        while p.result.lock().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(matches!(&*p.result.lock().unwrap(), Some(Ok(_))), "{:?}", p.result.lock().unwrap());
+        let img = crate::video::frame_at(&out, 0.2, (160, 80)).unwrap();
+        for (i, c) in cols.iter().enumerate() {
+            let (x, y) = ((i % 4) as u32 * 40 + 20, (i / 4) as u32 * 40 + 20);
+            let px = img.get_pixel(x, y);
+            let d = (0..3).map(|k| (px[k] as i32 - [c.r(), c.g(), c.b()][k] as i32).abs()).max().unwrap();
+            assert!(d <= 6, "video layer: patch {i} {c:?} came back {px:?}");
+        }
     }
 }

@@ -1899,7 +1899,7 @@ mod tests {
         use std::sync::Arc;
         let t = truth();
         let mut doc = Document::default();
-        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(1600, 1000)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(1600, 1000)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None };
         let pid = doc.insert("p".into(), LayerKind::Image(ImageLayer::new(src, pos2(800.0, 500.0))), None);
         let mut sp = Space::new(1, "s".into(), t.frame);
         sp.eye = false;

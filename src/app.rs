@@ -1882,7 +1882,7 @@ impl App {
         let info = crate::video::probe(p)?;
         let size = info.preview_size(crate::video::PREVIEW_SIDE);
         let img = crate::video::frame_at(p, 0.0, size)?;
-        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]) };
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([info.width, info.height]), nv12: None };
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("영상").to_string();
         let id = self.add_image(src, name, at);
         if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
@@ -1902,7 +1902,7 @@ impl App {
         if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
             if let Some(v) = im.video.as_mut() {
                 v.time = t;
-                im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([v.info.width, v.info.height]) };
+                im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([v.info.width, v.info.height]), nv12: None };
             }
         }
     }
@@ -2099,7 +2099,7 @@ impl App {
             if let LayerKind::Image(im) = &mut l.kind {
                 if let Some(v) = &im.video {
                     if let Ok(img) = crate::video::frame_at(std::path::Path::new(&v.path), v.time, (v.info.width, v.info.height)) {
-                        im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None };
+                        im.src = ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None };
                     }
                 }
             }

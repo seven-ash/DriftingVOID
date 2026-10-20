@@ -22,6 +22,61 @@ use crate::scene::{Draw, Projected};
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// A picture queued on the GPU (`Gpu::submit`), collected by `Gpu::finish`.
+pub struct Pending {
+    buf: wgpu::Buffer,
+    kind: Kind,
+    w: u32,
+    h: u32,
+    index: wgpu::SubmissionIndex,
+    rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
+enum Kind {
+    Rgba { bpr: u32 },
+    Nv12 { bpr: u32, uv_off: u64 },
+}
+
+/// A finished picture: premultiplied RGBA, or NV12 bytes (luma, then
+/// interleaved chroma; BT.709 limited range) with its size.
+pub enum Frame {
+    Rgba(Pixmap),
+    Nv12(Vec<u8>, u32, u32),
+}
+
+/// NV12 (BT.709, limited range) of an opaque premultiplied picture, as the GPU's
+/// `fs_y` / `fs_uv` make it (for frames the CPU drew).
+pub fn nv12_of(pm: &Pixmap) -> Vec<u8> {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let d = pm.data();
+    let mut out = vec![0u8; w * h + w * (h / 2)];
+    let (ys, uvs) = out.split_at_mut(w * h);
+    let px = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        [d[i] as f32 / 255.0, d[i + 1] as f32 / 255.0, d[i + 2] as f32 / 255.0]
+    };
+    for (y, row) in ys.chunks_mut(w).enumerate() {
+        for (x, v) in row.iter_mut().enumerate() {
+            let c = px(x, y);
+            *v = (16.0 + 219.0 * (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2])).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    for (y, row) in uvs.chunks_mut(w).enumerate().take(h / 2) {
+        for x in 0..w / 2 {
+            let mut c = [0f32; 3];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let p = px(x * 2 + dx, y * 2 + dy);
+                for k in 0..3 {
+                    c[k] += p[k] * 0.25;
+                }
+            }
+            row[x * 2] = (128.0 + 224.0 * (-0.114572 * c[0] - 0.385428 * c[1] + 0.5 * c[2])).round().clamp(0.0, 255.0) as u8;
+            row[x * 2 + 1] = (128.0 + 224.0 * (0.5 * c[0] - 0.454153 * c[1] - 0.045847 * c[2])).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
 /// One picture to draw, prepared on the CPU side.
 enum Node {
     /// A picture at `off` (target pixels) put over the target.
@@ -47,7 +102,27 @@ enum Img {
     Job(usize),
 }
 
-type Raster = Box<dyn FnOnce() -> Option<(Vec<u8>, u32, u32)> + Send>;
+type Raster = Box<dyn FnOnce() -> Option<(Px, u32, u32)> + Send>;
+
+/// Pixels to upload: made for this picture, or an opaque video frame as it came
+/// from the decoder (no copy).
+enum Px {
+    Own(Vec<u8>),
+    Shared(Arc<image::RgbaImage>),
+    /// A decoded video frame, turned into RGBA on the GPU.
+    Nv12(Arc<crate::doc::Nv12>),
+}
+
+impl std::ops::Deref for Px {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Px::Own(v) => v,
+            Px::Shared(i) => i.as_raw(),
+            Px::Nv12(f) => &f.data,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
@@ -68,9 +143,14 @@ pub struct Gpu {
     down: wgpu::RenderPipeline,
     tri: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    y_plane: wgpu::RenderPipeline,
+    uv_plane: wgpu::RenderPipeline,
+    from_nv12: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
     pub max_side: u32,
     pub adapter: String,
+    /// PCI vendor id (0x10de: NVIDIA).
+    pub vendor: u32,
     /// Flattened 3D layers, kept across a job's frames.
     flat: Arc<FlatCache>,
     /// Rasterized 2D layers and mask keep images, by content and placement.
@@ -85,15 +165,16 @@ pub struct Gpu {
 static GPU: Mutex<Option<Option<Gpu>>> = Mutex::new(None);
 
 thread_local! {
-    /// DV_TIMING: milliseconds spent preparing (scene, flattening), rasterizing
-    /// and on the GPU (draw and read back), summed over a job's frames.
+    /// DV_TIMING: milliseconds spent preparing (scene, flattening), rasterizing,
+    /// encoding the GPU work, and waiting for it and reading back, summed over a
+    /// job's frames.
     static TIMING: std::cell::Cell<bool> = std::cell::Cell::new(std::env::var_os("DV_TIMING").is_some());
-    static STATS: std::cell::Cell<[f64; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+    static STATS: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
 }
 
 /// The summed stage times (ms) since the last call, and resets them.
-pub fn take_stats() -> [f64; 3] {
-    STATS.with(|c| c.replace([0.0; 3]))
+pub fn take_stats() -> [f64; 4] {
+    STATS.with(|c| c.replace([0.0; 4]))
 }
 
 /// Runs `f` with the shared GPU device (made on first use). None: no usable GPU,
@@ -198,7 +279,7 @@ impl Gpu {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
         };
-        let pipe = |entry: &str, blend: Option<wgpu::BlendState>| {
+        let pipe_fmt = |entry: &str, blend: Option<wgpu::BlendState>, format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pl),
@@ -207,7 +288,7 @@ impl Gpu {
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: FMT, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
@@ -216,6 +297,10 @@ impl Gpu {
                 cache: None,
             })
         };
+        let pipe = |entry: &str, blend: Option<wgpu::BlendState>| pipe_fmt(entry, blend, FMT);
+        let y_plane = pipe_fmt("fs_y", None, wgpu::TextureFormat::R8Unorm);
+        let uv_plane = pipe_fmt("fs_uv", None, wgpu::TextureFormat::Rg8Unorm);
+        let from_nv12 = pipe("fs_from_nv12", None);
         let over = pipe("fs_over", Some(over_blend));
         let warp = pipe("fs_warp", Some(over_blend));
         let blend = pipe("fs_blend", None);
@@ -268,9 +353,13 @@ impl Gpu {
             down,
             tri,
             image,
+            y_plane,
+            uv_plane,
+            from_nv12,
             dummy,
             max_side: limits.max_texture_dimension_2d,
             adapter: info.name,
+            vendor: info.vendor,
             flat: Arc::default(),
             rasters: HashMap::new(),
             flats: HashMap::new(),
@@ -311,6 +400,35 @@ impl Gpu {
         Arc::new(t)
     }
 
+    /// An NV12 frame uploaded as one R8 texture (luma rows, then chroma rows)
+    /// and turned into a premultiplied RGBA texture on the GPU.
+    fn upload_nv12(&self, data: &[u8], w: u32, h: u32) -> Arc<wgpu::Texture> {
+        let rows = h + h / 2;
+        let src = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w, height: rows, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &src, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(rows) },
+            wgpu::Extent3d { width: w, height: rows, depth_or_array_layers: 1 },
+        );
+        let out = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let mut u = Uniform::new([0.0, 0.0, w as f32, h as f32], w, h);
+        u.p1 = [h as f32, 0.0, 0.0, 0.0];
+        self.pass(&mut enc, &self.from_nv12, &out, &u, &src, &self.dummy);
+        self.queue.submit([enc.finish()]);
+        Arc::new(out)
+    }
+
     fn pooled(&mut self, w: u32, h: u32, slot: usize) -> wgpu::Texture {
         self.pool
             .entry((w, h, slot))
@@ -334,6 +452,18 @@ impl Gpu {
     /// `k`×. Err when it doesn't fit the GPU (the caller uses the CPU).
     #[allow(clippy::too_many_arguments)]
     pub fn render_ss(&mut self, doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8) -> Result<Pixmap, String> {
+        let p = self.submit(doc, center, size, rot, scale, bg, k, false)?;
+        match self.finish(p)? {
+            Frame::Rgba(pm) => Ok(pm),
+            Frame::Nv12(..) => Err("NV12".into()),
+        }
+    }
+
+    /// Prepares and queues one picture on the GPU without waiting for it; `nv12`
+    /// reads it back as NV12 (video) instead of RGBA. `finish` collects it, so
+    /// the next frame can be prepared while the GPU draws this one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit(&mut self, doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale: f32, bg: Option<Color32>, k: u8, nv12: bool) -> Result<Pending, String> {
         let mut k = k.clamp(1, 4) as u32;
         let rotated = rot.abs() >= 1e-6;
         // the picture drawn (the box round a turned frame) at s = scale·k
@@ -387,7 +517,7 @@ impl Gpu {
         let n = jobs.len();
         let (rasters, keys): (Vec<Raster>, Vec<Option<Key>>) = jobs.into_iter().unzip();
         let queue: Mutex<Vec<(usize, Raster)>> = Mutex::new(rasters.into_iter().enumerate().rev().collect());
-        let done: Mutex<Vec<Option<(Vec<u8>, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
+        let done: Mutex<Vec<Option<(Px, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
         std::thread::scope(|sc| {
             for _ in 0..threads.min(n) {
                 sc.spawn(|| {
@@ -403,6 +533,7 @@ impl Gpu {
         let mut ready: Vec<Arc<wgpu::Texture>> = Vec::with_capacity(n);
         for (r, key) in done.into_inner().unwrap().into_iter().zip(keys) {
             let t = match r {
+                Some((Px::Nv12(f), w, h)) => self.upload_nv12(&f.data, w, h),
                 Some((data, w, h)) => self.upload(&data, w, h),
                 None => Arc::new(self.texture(1, 1, wgpu::TextureUsages::TEXTURE_BINDING)),
             };
@@ -439,30 +570,52 @@ impl Gpu {
         } else {
             u.rot = [1.0, 0.0, 0.0, 0.0];
         }
+        let nv12 = nv12 && fw % 2 == 0 && fh % 2 == 0;
+        let out = if nv12 { self.texture(fw, fh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING) } else { out };
         self.pass(&mut enc, &self.down, &out, &u, &target, &self.dummy);
-        let bpr = (fw * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bpr as u64 * fh as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(fh) } },
-            wgpu::Extent3d { width: fw, height: fh, depth_or_array_layers: 1 },
-        );
-        self.queue.submit([enc.finish()]);
-        let slice = buf.slice(..);
+        let copy = |enc: &mut wgpu::CommandEncoder, t: &wgpu::Texture, buf: &wgpu::Buffer, offset: u64, bpr: u32, w: u32, h: u32| {
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: buf, layout: wgpu::TexelCopyBufferLayout { offset, bytes_per_row: Some(bpr), rows_per_image: Some(h) } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        };
+        let read = |size: u64| self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let (buf, kind) = if nv12 {
+            // luma plane, then the interleaved chroma plane (rows padded to 256)
+            let bpr = fw.div_ceil(256) * 256;
+            let (cw, ch) = (fw / 2, fh / 2);
+            let plane = |w: u32, h: u32, f: wgpu::TextureFormat| {
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: f,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            };
+            let (yt, uvt) = (plane(fw, fh, wgpu::TextureFormat::R8Unorm), plane(cw, ch, wgpu::TextureFormat::Rg8Unorm));
+            self.pass(&mut enc, &self.y_plane, &yt, &Uniform::new([0.0, 0.0, fw as f32, fh as f32], fw, fh), &out, &self.dummy);
+            self.pass(&mut enc, &self.uv_plane, &uvt, &Uniform::new([0.0, 0.0, cw as f32, ch as f32], cw, ch), &out, &self.dummy);
+            let uv_off = bpr as u64 * fh as u64;
+            let buf = read(uv_off + bpr as u64 * ch as u64);
+            copy(&mut enc, &yt, &buf, 0, bpr, fw, fh);
+            copy(&mut enc, &uvt, &buf, uv_off, bpr, cw, ch);
+            (buf, Kind::Nv12 { bpr, uv_off })
+        } else {
+            let bpr = (fw * 4).div_ceil(256) * 256;
+            let buf = read(bpr as u64 * fh as u64);
+            copy(&mut enc, &out, &buf, 0, bpr, fw, fh);
+            (buf, Kind::Rgba { bpr })
+        };
+        let index = self.queue.submit([enc.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
+        buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-        let mut data = Vec::with_capacity((fw * fh * 4) as usize);
-        {
-            let m = slice.get_mapped_range().map_err(|e| e.to_string())?;
-            for row in m.chunks(bpr as usize).take(fh as usize) {
-                data.extend_from_slice(&row[..(fw * 4) as usize]);
-            }
-        }
-        buf.unmap();
         if TIMING.with(|c| c.get()) {
             let t3 = std::time::Instant::now();
             let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
@@ -474,7 +627,46 @@ impl Gpu {
                 c.set(v);
             });
         }
-        Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(fw, fh).ok_or("크기 오류")?).ok_or_else(|| "이미지 버퍼를 만들 수 없음".into())
+        Ok(Pending { buf, kind, w: fw, h: fh, index, rx })
+    }
+
+    /// Waits for a queued picture and reads it back.
+    pub fn finish(&self, p: Pending) -> Result<Frame, String> {
+        let t = std::time::Instant::now();
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: Some(p.index), timeout: None });
+        p.rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        let (w, h) = (p.w, p.h);
+        let frame = {
+            let m = p.buf.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+            match p.kind {
+                Kind::Rgba { bpr } => {
+                    let mut data = Vec::with_capacity((w * h * 4) as usize);
+                    for row in m.chunks(bpr as usize).take(h as usize) {
+                        data.extend_from_slice(&row[..(w * 4) as usize]);
+                    }
+                    Frame::Rgba(Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h).ok_or("크기 오류")?).ok_or("이미지 버퍼를 만들 수 없음")?)
+                }
+                Kind::Nv12 { bpr, uv_off } => {
+                    let mut data = Vec::with_capacity((w * h * 3 / 2) as usize);
+                    for row in m[..uv_off as usize].chunks(bpr as usize).take(h as usize) {
+                        data.extend_from_slice(&row[..w as usize]);
+                    }
+                    for row in m[uv_off as usize..].chunks(bpr as usize).take((h / 2) as usize) {
+                        data.extend_from_slice(&row[..w as usize]);
+                    }
+                    Frame::Nv12(data, w, h)
+                }
+            }
+        };
+        p.buf.unmap();
+        if TIMING.with(|c| c.get()) {
+            STATS.with(|c| {
+                let mut v = c.get();
+                v[3] += t.elapsed().as_secs_f64() * 1000.0;
+                c.set(v);
+            });
+        }
+        Ok(frame)
     }
 
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
@@ -530,7 +722,7 @@ impl Gpu {
             let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(s, s).post_translate(-rect[0] as f32, -rect[1] as f32);
             let world = Rect::from_min_max(full.min + vec2(rect[0] as f32, rect[1] as f32) / s, full.min + vec2(rect[2] as f32, rect[3] as f32) / s);
             crate::export::draw_layer(&mut pm, &layer, base, world.expand(2.0 / s), s);
-            Some((pm.take(), w, h))
+            Some((Px::Own(pm.take()), w, h))
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
@@ -543,7 +735,8 @@ impl Gpu {
         let target = im.scale * v.s;
         // source pixels -> canvas: as export::draw_image (logical size k, and a
         // smaller copy when shown under half size)
-        let (iw, ih) = (im.src.rgba.width() as f32, im.src.rgba.height() as f32);
+        let (iw, ih) = im.src.px_size();
+        let (iw, ih) = (iw as f32, ih as f32);
         let k = iw / im.src.size().x.max(1.0);
         let ts = target / k;
         let crop_px = [
@@ -606,7 +799,13 @@ impl Gpu {
                     if whole {
                         // the usual video frame: no crop, no adjustment, no smaller
                         // copy; premultiplied in parallel strips (opaque pixels as is)
+                        if let Some(f) = &one.src.nv12 {
+                            return Some((Px::Nv12(f.clone()), f.w, f.h));
+                        }
                         let (w, h) = one.src.rgba.dimensions();
+                        if one.src.rgba.as_raw().chunks_exact(4).all(|p| p[3] == 255) {
+                            return Some((Px::Shared(one.src.rgba.clone()), w, h));
+                        }
                         let mut data = one.src.rgba.as_raw().clone();
                         let strip = (data.len() / 4 / 8).max(1) * 4;
                         std::thread::scope(|sc| {
@@ -623,11 +822,11 @@ impl Gpu {
                                 });
                             }
                         });
-                        return Some((data, w, h));
+                        return Some((Px::Own(data), w, h));
                     }
                     let (pm, _) = crate::export::image_pixmap(&one, ts * k)?;
                     let (w, h) = (pm.width(), pm.height());
-                    Some((pm.take(), w, h))
+                    Some((Px::Own(pm.take()), w, h))
                 });
                 jobs.push((job, Some(key)));
                 Img::Job(jobs.len() - 1)
@@ -667,7 +866,7 @@ impl Gpu {
                     data[i..i + 4].copy_from_slice(&[a, a, a, 255]);
                 }
             }
-            Some((data, w, h))
+            Some((Px::Own(data), w, h))
         });
         jobs.push((job, Some(key)));
         Img::Job(jobs.len() - 1)

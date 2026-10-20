@@ -30,13 +30,66 @@ pub struct ImageSource {
     /// Real pixel size when `rgba` is a smaller preview (video frames); geometry and
     /// crop are in these units.
     pub logical: Option<[u32; 2]>,
+    /// A video frame as the export's decoder delivered it (NV12); `rgba` is then
+    /// empty and the GPU converts it (the CPU path converts with `rgba_px`).
+    pub nv12: Option<Arc<Nv12>>,
+}
+
+/// A decoded video frame: NV12 (luma, then interleaved chroma at half size),
+/// BT.709 limited range (the decoder converts any source to that).
+pub struct Nv12 {
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
+}
+
+impl Nv12 {
+    pub fn to_rgba(&self) -> image::RgbaImage {
+        let (w, h) = (self.w as usize, self.h as usize);
+        let (ys, uvs) = self.data.split_at(w * h);
+        let mut out = vec![255u8; w * h * 4];
+        for (y, row) in out.chunks_mut(w * 4).enumerate() {
+            for x in 0..w {
+                let yy = (ys[y * w + x] as f32 - 16.0) / 219.0;
+                let i = (y / 2) * w + (x / 2) * 2;
+                let cb = (uvs[i] as f32 - 128.0) / 224.0;
+                let cr = (uvs[i + 1] as f32 - 128.0) / 224.0;
+                let r = yy + 1.5748 * cr;
+                let g = yy - 0.187324 * cb - 0.468124 * cr;
+                let b = yy + 1.8556 * cb;
+                for (k, v) in [r, g, b].into_iter().enumerate() {
+                    row[x * 4 + k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        image::RgbaImage::from_raw(self.w, self.h, out).unwrap()
+    }
 }
 
 impl ImageSource {
     pub fn size(&self) -> Vec2 {
         match self.logical {
             Some([w, h]) => vec2(w as f32, h as f32),
-            None => vec2(self.rgba.width() as f32, self.rgba.height() as f32),
+            None => {
+                let (w, h) = self.px_size();
+                vec2(w as f32, h as f32)
+            }
+        }
+    }
+
+    /// The pixels' own size (of `rgba`, or of the NV12 frame).
+    pub fn px_size(&self) -> (u32, u32) {
+        match &self.nv12 {
+            Some(n) => (n.w, n.h),
+            None => self.rgba.dimensions(),
+        }
+    }
+
+    /// The pixels as RGBA (an NV12 frame converted).
+    pub fn rgba_px(&self) -> Arc<image::RgbaImage> {
+        match &self.nv12 {
+            Some(n) => Arc::new(n.to_rgba()),
+            None => self.rgba.clone(),
         }
     }
 }

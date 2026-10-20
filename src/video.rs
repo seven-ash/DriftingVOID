@@ -148,16 +148,33 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo, String> {
 }
 
 fn decode_args(path: &Path, t: f64, size: (u32, u32)) -> Vec<std::ffi::OsString> {
+    decode_args_fmt(path, t, size, false, "auto")
+}
+
+/// `nv12`: NV12 frames in BT.709 limited range, whatever the source's colours
+/// (the export's video frames; the GPU turns them into RGB).
+fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &str) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = Vec::new();
-    for s in ["-v", "error", "-nostdin", "-hwaccel", "auto", "-ss"] {
+    // DV_DECODE_HW=0: software decoding; =name: that hwaccel
+    let hw = std::env::var("DV_DECODE_HW").unwrap_or_else(|_| hwaccel.into());
+    for s in ["-v", "error", "-nostdin"] {
         a.push(s.into());
     }
+    if hw != "0" {
+        a.push("-hwaccel".into());
+        a.push(hw.into());
+    }
+    a.push("-ss".into());
     a.push(format!("{:.4}", t.max(0.0)).into());
     a.push("-i".into());
     a.push(path.into());
     a.push("-vf".into());
-    a.push(format!("scale={}:{}:flags=bicubic", size.0, size.1).into());
-    for s in ["-an", "-sn", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"] {
+    if nv12 {
+        a.push(format!("scale={}:{}:flags=bicubic:out_color_matrix=bt709:out_range=tv", size.0, size.1).into());
+    } else {
+        a.push(format!("scale={}:{}:flags=bicubic", size.0, size.1).into());
+    }
+    for s in ["-an", "-sn", "-f", "rawvideo", "-pix_fmt", if nv12 { "nv12" } else { "rgba" }, "pipe:1"] {
         a.push(s.into());
     }
     a
@@ -189,8 +206,8 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
 
 /// Streaming playback decoder: frames from `t0` on, at `size`, through a small
 /// bounded channel. Dropping it stops ffmpeg.
-pub struct Player {
-    pub rx: Receiver<(f64, image::RgbaImage)>,
+pub struct Player<T = image::RgbaImage> {
+    pub rx: Receiver<(f64, T)>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
     /// The stream ended (end of file or an error).
@@ -199,8 +216,22 @@ pub struct Player {
 
 impl Player {
     pub fn start(path: &Path, t0: f64, fps: f64, size: (u32, u32)) -> Result<Self, String> {
+        Player::spawn(decode_args(path, t0, size), (size.0 * size.1 * 4) as usize, t0, fps, move |buf| image::RgbaImage::from_raw(size.0, size.1, buf))
+    }
+}
+
+impl Player<Vec<u8>> {
+    /// As `start`, with NV12 frames (BT.709 limited range; even sizes only),
+    /// decoded with `hwaccel` (ffmpeg's name: "cuda" on NVIDIA, else "auto").
+    pub fn start_nv12(path: &Path, t0: f64, fps: f64, size: (u32, u32), hwaccel: &str) -> Result<Self, String> {
+        Player::spawn(decode_args_fmt(path, t0, size, true, hwaccel), (size.0 * size.1 * 3 / 2) as usize, t0, fps, Some)
+    }
+}
+
+impl<T: Send + 'static> Player<T> {
+    fn spawn(args: Vec<std::ffi::OsString>, n: usize, t0: f64, fps: f64, wrap: impl Fn(Vec<u8>) -> Option<T> + Send + 'static) -> Result<Self, String> {
         let tl = tools().ok_or(MISSING)?;
-        let mut child = no_window(Command::new(&tl.ffmpeg).args(decode_args(path, t0, size)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()))
+        let mut child = no_window(Command::new(&tl.ffmpeg).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()))
             .spawn()
             .map_err(|e| e.to_string())?;
         let mut out = child.stdout.take().ok_or("ffmpeg 출력 없음")?;
@@ -210,7 +241,6 @@ impl Player {
         let ended = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(Some(child)));
         let (st, en) = (stop.clone(), ended.clone());
-        let n = (size.0 * size.1 * 4) as usize;
         let dt = 1.0 / fps.max(1.0);
         std::thread::spawn(move || {
             let mut i = 0u64;
@@ -222,7 +252,7 @@ impl Player {
                 if out.read_exact(&mut buf).is_err() {
                     break;
                 }
-                let Some(img) = image::RgbaImage::from_raw(size.0, size.1, buf) else { break };
+                let Some(img) = wrap(buf) else { break };
                 if tx.send((t0 + i as f64 * dt, img)).is_err() {
                     break;
                 }
@@ -234,7 +264,7 @@ impl Player {
     }
 }
 
-impl Drop for Player {
+impl<T> Drop for Player<T> {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut c) = self.child.lock() {

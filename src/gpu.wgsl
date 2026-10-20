@@ -261,3 +261,39 @@ fn fs_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
     return c * (cov * u.tsize.z);
 }
+
+// Video output as NV12 (BT.709, limited range), from the finished picture in
+// tex0 (premultiplied, opaque for these codecs): fs_y writes the luma plane,
+// fs_uv the half-size interleaved chroma plane (2x2 average).
+fn luma(c: vec3f) -> f32 {
+    return (16.0 + 219.0 * dot(c, vec3f(0.2126, 0.7152, 0.0722))) / 255.0;
+}
+
+@fragment
+fn fs_y(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let c = textureLoad(tex0, vec2i(floor(pos.xy)), 0);
+    return vec4f(luma(c.rgb), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_uv(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let p = vec2i(floor(pos.xy)) * 2;
+    let c = (textureLoad(tex0, p, 0) + textureLoad(tex0, p + vec2i(1, 0), 0) + textureLoad(tex0, p + vec2i(0, 1), 0) + textureLoad(tex0, p + vec2i(1, 1), 0)).rgb * 0.25;
+    let cb = (128.0 + 224.0 * dot(c, vec3f(-0.114572, -0.385428, 0.5))) / 255.0;
+    let cr = (128.0 + 224.0 * dot(c, vec3f(0.5, -0.454153, -0.045847))) / 255.0;
+    return vec4f(cb, cr, 0.0, 1.0);
+}
+
+// A decoded NV12 frame (tex0: R8, luma rows then chroma rows from p1.x) to
+// opaque RGB, BT.709 limited range, as doc::Nv12::to_rgba.
+@fragment
+fn fs_from_nv12(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let p = vec2i(floor(pos.xy));
+    let h = i32(u.p1.x);
+    let yy = (textureLoad(tex0, p, 0).r * 255.0 - 16.0) / 219.0;
+    let c = vec2i((p.x / 2) * 2, h + p.y / 2);
+    let cb = (textureLoad(tex0, c, 0).r * 255.0 - 128.0) / 224.0;
+    let cr = (textureLoad(tex0, c + vec2i(1, 0), 0).r * 255.0 - 128.0) / 224.0;
+    let rgb = vec3f(yy + 1.5748 * cr, yy - 0.187324 * cb - 0.468124 * cr, yy + 1.8556 * cb);
+    return vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)), 1.0);
+}
