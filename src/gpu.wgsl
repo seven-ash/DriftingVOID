@@ -190,26 +190,6 @@ fn fs_down(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return vec4f(to_srgb(lin.r) * a, to_srgb(lin.g) * a, to_srgb(lin.b) * a, a);
 }
 
-// Extrusion sides: coloured triangles (target pixels of their own box, drawn
-// multisampled), as export::fill_sides draws its quads.
-struct TriOut {
-    @builtin(position) pos: vec4f,
-    @location(0) col: vec4f,
-}
-
-@vertex
-fn vs_tri(@location(0) p: vec2f, @location(1) c: vec4f) -> TriOut {
-    var o: TriOut;
-    o.pos = vec4f(p.x / u.tsize.x * 2.0 - 1.0, 1.0 - p.y / u.tsize.y * 2.0, 0.0, 1.0);
-    o.col = c;
-    return o;
-}
-
-@fragment
-fn fs_tri(i: TriOut) -> @location(0) vec4f {
-    return i.col;
-}
-
 fn mitchell(x: f32) -> f32 {
     // B = C = 1/3, as tiny-skia's bicubic filter
     let a = abs(x);

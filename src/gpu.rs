@@ -90,9 +90,10 @@ enum Node {
     Blend { img: Img, off: [i32; 2], mode: Blend, opacity: f32 },
     /// Drawn alone into a target of its own, then blended down once.
     Group { inner: Vec<Node>, rect: [i32; 4], mode: Blend, opacity: f32 },
-    /// Extrusion side triangles (x, y, premultiplied rgba; pixels of `rect`'s
-    /// box), drawn multisampled then put over the target; `scissor` in box pixels.
-    Sides { verts: Vec<[f32; 6]>, rect: [i32; 4], scissor: [u32; 4] },
+    /// Extrusion sides built on the GPU from the outline's edges (`sides.wgsl`,
+    /// one instance per edge) into `rect`'s box, multisampled with a depth
+    /// buffer, then put over the target; `scissor` in box pixels.
+    Sides { edges: Arc<wgpu::Buffer>, count: u32, u: SideUniform, rect: [i32; 4], scissor: [u32; 4] },
     /// Drawn alone, then multiplied by a mask's keep values.
     Masked { inner: Vec<Node>, keep: Img, off: [i32; 2], rect: [i32; 4], outside: f32 },
     /// Drawn alone, then cut by a mask sampled from its tile atlas: `a` maps a
@@ -126,7 +127,8 @@ pub struct Gpu {
     blend: wgpu::RenderPipeline,
     mask: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
-    tri: wgpu::RenderPipeline,
+    sides_layout: wgpu::BindGroupLayout,
+    sides_pipe: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
     y_plane: wgpu::RenderPipeline,
     uv_plane: wgpu::RenderPipeline,
@@ -150,11 +152,13 @@ pub struct Gpu {
     sources: HashMap<u64, (Arc<wgpu::Texture>, u64)>,
     /// Textures of flattened 3D layers (the entry is kept so its address stays unique).
     flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Arc<Vec<crate::extrude::Edge>>>)>, Arc<wgpu::Texture>, u64)>,
-    /// Extrusion sides in canvas units, by outline, placement, camera and light:
-    /// panning only moves them, and a still layer doesn't recompute them.
-    sides: HashMap<u64, (Arc<Vec<crate::extrude::Side>>, u64)>,
+    /// Outlines of 3D layers uploaded as edge instances (`sides.wgsl`), by the
+    /// outline (kept so its address stays unique).
+    edge_bufs: HashMap<usize, (Arc<Vec<crate::extrude::Edge>>, Arc<wgpu::Buffer>, u64)>,
     /// Full-size targets: (w, h, slot).
     pool: HashMap<(u32, u32, usize), wgpu::Texture>,
+    /// Sides targets by size (multisampled colour, depth, resolved colour).
+    ms_pool: HashMap<(u32, u32), (wgpu::Texture, wgpu::Texture, wgpu::Texture, u64)>,
     /// Brush layers on the canvas: their tiles in one texture each, updated tile
     /// by tile as they change (painting re-uploads only the touched tiles).
     atlases: HashMap<LayerId, Atlas>,
@@ -348,27 +352,44 @@ impl Gpu {
         let image = pipe("fs_image", Some(over_blend));
         let prep = pipe("fs_prep", None);
         let mip = pipe("fs_mip", None);
-        let tri = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let sides_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sides"), source: wgpu::ShaderSource::Wgsl(include_str!("sides.wgsl").into()) });
+        let sides_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let sides_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&sides_layout)], immediate_size: 0 });
+        let sides_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sides"),
-            layout: Some(&pl),
+            layout: Some(&sides_pl),
             vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_tri"),
+                module: &sides_module,
+                entry_point: Some("vs_side"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+                    array_stride: EDGE_BYTES,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x2, 5 => Unorm8x4, 6 => Unorm8x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_tri"),
+                module: &sides_module,
+                entry_point: Some("fs_side"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: FMT, blend: Some(over_blend), write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: FMT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
             multisample: wgpu::MultisampleState { count: 4, ..Default::default() },
             multiview_mask: None,
             cache: None,
@@ -392,7 +413,8 @@ impl Gpu {
             blend,
             mask,
             down,
-            tri,
+            sides_layout,
+            sides_pipe,
             image,
             y_plane,
             uv_plane,
@@ -410,8 +432,9 @@ impl Gpu {
             sources: HashMap::new(),
             flats: HashMap::new(),
             pool: HashMap::new(),
+            ms_pool: HashMap::new(),
             atlases: HashMap::new(),
-            sides: HashMap::new(),
+            edge_bufs: HashMap::new(),
             frame: 0,
             aside: false,
         }
@@ -420,12 +443,13 @@ impl Gpu {
     /// Drops everything kept between frames (after a job).
     pub fn clear(&mut self) {
         self.atlases.clear();
-        self.sides.clear();
+        self.edge_bufs.clear();
         self.flat = Arc::default();
         self.rasters.clear();
         self.sources.clear();
         self.flats.clear();
         self.pool.clear();
+        self.ms_pool.clear();
     }
 
     fn texture(&self, w: u32, h: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
@@ -567,7 +591,8 @@ impl Gpu {
             self.rasters.retain(|_, v| v.1 + 1 >= g);
             self.sources.retain(|_, v| v.1 + 1 >= g);
             self.flats.retain(|_, v| v.2 + 1 >= g);
-            self.sides.retain(|_, v| v.1 + 1 >= g);
+            self.edge_bufs.retain(|_, v| v.2 + 1 >= g);
+            self.ms_pool.retain(|_, v| v.3 + 1 >= g);
             self.flat.sweep();
         }
 
@@ -695,7 +720,8 @@ impl Gpu {
         self.sources.retain(|_, v| v.1 + 2 >= g);
         self.flats.retain(|_, v| v.2 + 1800 >= g);
         self.atlases.retain(|_, a| a.used + 600 >= g);
-        self.sides.retain(|_, v| v.1 + 1800 >= g);
+        self.edge_bufs.retain(|_, v| v.2 + 1800 >= g);
+        self.ms_pool.retain(|_, v| v.3 + 30 >= g);
         self.flat.sweep();
         let t0 = std::time::Instant::now();
         let scene = crate::scene::build(doc);
@@ -1243,75 +1269,96 @@ impl Gpu {
         }
         let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
         if let Some(edges) = &fl.3 {
-            // sides in canvas units, kept while outline, placement, camera and
-            // light stay the same; then moved into target pixels
-            let key = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                (Arc::as_ptr(edges) as usize).hash(&mut h);
-                serde_json::to_string(&pl).unwrap_or_default().hash(&mut h);
-                serde_json::to_string(&light).unwrap_or_default().hash(&mut h);
-                format!("{cam:?}").hash(&mut h);
-                h.finish()
-            };
-            let frame = self.frame;
-            let canvas_sides = match self.sides.get_mut(&key) {
-                Some(e) => {
-                    e.1 = frame;
-                    e.0.clone()
-                }
-                None => {
-                    let to_c = |w: crate::persp::V3| cam.project(w);
-                    let made = Arc::new(crate::extrude::sides(edges, &pl, &to_c, &to_eye, &|w| cam.to_cam(w)[2], light.as_ref(), crate::canvas::SIDE_SHADE));
-                    self.sides.insert(key, (made.clone(), frame));
-                    made
-                }
-            };
-            let sides: Vec<crate::extrude::Side> = canvas_sides
-                .iter()
-                .map(|sd| crate::extrude::Side { q: sd.q.map(|p| egui::pos2((p.x - full.min.x) * v.s, (p.y - full.min.y) * v.s)), ..*sd })
-                .collect();
-            let pts: Vec<Pos2> = sides.iter().flat_map(|sd| sd.q).collect();
-            if !pts.is_empty() {
-                let bb = Rect::from_points(&pts).expand(2.0);
-                let r = [(bb.min.x.floor() as i32).max(0), (bb.min.y.floor() as i32).max(0), (bb.max.x.ceil() as i32).min(v.tw as i32), (bb.max.y.ceil() as i32).min(v.th as i32)];
-                let boxr = Rect::from_min_max(egui::pos2(r[0] as f32, r[1] as f32), egui::pos2(r[2] as f32, r[3] as f32));
-                let sc = clip.map_or(boxr, |c| c.intersect(boxr));
-                if r[2] > r[0] && r[3] > r[1] && sc.is_positive() {
-                    let (ox, oy) = (r[0] as f32, r[1] as f32);
-                    let (bw, bh) = ((r[2] - r[0]) as u32, (r[3] - r[1]) as u32);
-                    let sx0 = ((sc.min.x.floor() - ox).max(0.0) as u32).min(bw - 1);
-                    let sy0 = ((sc.min.y.floor() - oy).max(0.0) as u32).min(bh - 1);
-                    let sx1 = ((sc.max.x.ceil() - ox).max(0.0) as u32).min(bw);
-                    let sy1 = ((sc.max.y.ceil() - oy).max(0.0) as u32).min(bh);
-                    let scissor = [sx0, sy0, sx1.saturating_sub(sx0).max(1), sy1.saturating_sub(sy0).max(1)];
-                    let alpha = (layer.opacity.clamp(0.0, 1.0) * 255.0).round() / 255.0;
-                    let col = |c: [f32; 3]| {
-                        let c8 = c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) / 255.0);
-                        [c8[0] * alpha, c8[1] * alpha, c8[2] * alpha, alpha]
-                    };
-                    let mut verts = Vec::with_capacity(sides.len() * 6);
-                    for sd in &sides {
-                        // as fill_sides: each quad stretched a little along its edge
-                        let [a, b, c, d] = sd.q.map(|p| egui::pos2(p.x - ox, p.y - oy));
-                        let grow = |p: Pos2, q: Pos2| {
-                            let w = q - p;
-                            let l = w.length();
-                            if l > 1e-3 { p - w / l * 0.35 } else { p }
-                        };
-                        let (a, d) = (grow(a, b), grow(d, c));
-                        let (b, c) = (grow(b, a), grow(c, d));
-                        let (ca, cb) = (col(sd.ca), col(sd.cb));
-                        let vx = |p: Pos2, c: [f32; 4]| [p.x, p.y, c[0], c[1], c[2], c[3]];
-                        verts.extend([vx(a, ca), vx(b, cb), vx(c, cb), vx(a, ca), vx(c, cb), vx(d, ca)]);
-                    }
-                    out.push(Node::Sides { verts, rect: r, scissor });
-                }
+            if let Some(n) = self.sides(edges, &layer, &pl, &cam, light.as_ref(), &out_m, rect, clip, v) {
+                out.push(n);
             }
         }
         let (off, n) = crate::extrude::visible_cap(&pl, &to_eye);
         let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(&cam, off)) };
         out.extend(warp(&hc, light.map_or(1.0, |l| l.shade(n))));
+    }
+
+    /// A thick layer's sides: its outline (uploaded once) and this frame's
+    /// placement, camera and light as a uniform; the box is where the content
+    /// rectangle's front and back corners land (the whole target when one is
+    /// behind the camera).
+    #[allow(clippy::too_many_arguments)]
+    fn sides(&mut self, edges: &Arc<Vec<crate::extrude::Edge>>, layer: &Layer, pl: &crate::persp::Placement, cam: &crate::persp::Camera, light: Option<&crate::persp::Light>, out_m: &crate::persp::M3, rect: Rect, clip: Option<Rect>, v: &View) -> Option<Node> {
+        use crate::persp::{mul_mm, mul_mv, sub};
+        if edges.is_empty() {
+            return None;
+        }
+        let ptr = Arc::as_ptr(edges) as usize;
+        let frame = self.frame;
+        let buf = match self.edge_bufs.get_mut(&ptr) {
+            Some(e) => {
+                e.2 = frame;
+                e.1.clone()
+            }
+            None => {
+                let mut bytes = Vec::with_capacity(edges.len() * EDGE_BYTES as usize);
+                for e in edges.iter() {
+                    for x in [e.a.x, e.a.y, e.b.x, e.b.y, e.n[0], e.n[1], e.na[0], e.na[1], e.nb[0], e.nb[1]] {
+                        bytes.extend_from_slice(&x.to_le_bytes());
+                    }
+                    bytes.extend_from_slice(&[e.ca[0], e.ca[1], e.ca[2], 255, e.cb[0], e.cb[1], e.cb[2], 255]);
+                }
+                let b = Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: &bytes, usage: wgpu::BufferUsages::VERTEX }));
+                self.edge_bufs.insert(ptr, (edges.clone(), b.clone(), frame));
+                b
+            }
+        };
+        // (x, y, off, 1) -> homogeneous target pixel: out · K · R · [m | n | t − C − m·anchor]
+        let (m, t) = pl.world_affine();
+        let n = pl.normal();
+        let k = [[cam.f, 0.0, cam.c[0]], [0.0, cam.f, cam.c[1]], [0.0, 0.0, 1.0]];
+        let a = mul_mm(&mul_mm(out_m, &k), &cam.r);
+        let (ax, ay) = (pl.anchor.x as f64, pl.anchor.y as f64);
+        let c0 = sub(t, cam.center);
+        let c0 = sub(c0, mul_mv(&m, [ax, ay, 0.0]));
+        let cols = [mul_mv(&a, [m[0][0], m[1][0], m[2][0]]), mul_mv(&a, [m[0][1], m[1][1], m[2][1]]), mul_mv(&a, n), mul_mv(&a, c0)];
+        let row = |i: usize| [cols[0][i] as f32, cols[1][i] as f32, cols[2][i] as f32, cols[3][i] as f32];
+        let p = [row(0), row(1), row(2)];
+        let at = |x: f32, y: f32, off: f32| {
+            let q = [x, y, off, 1.0];
+            let h = p.map(|r| r[0] * q[0] + r[1] * q[1] + r[2] * q[2] + r[3] * q[3]);
+            (egui::pos2(h[0] / h[2], h[1] / h[2]), h[2])
+        };
+        let th = pl.thick as f32;
+        let corners: Vec<(Pos2, f32)> = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].iter().flat_map(|c| [at(c.x, c.y, 0.0), at(c.x, c.y, th)]).collect();
+        let near = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+        let full = Rect::from_min_max(Pos2::ZERO, egui::pos2(v.tw as f32, v.th as f32));
+        let bb = if near > 1e-6 { Rect::from_points(&corners.iter().map(|c| c.0).collect::<Vec<_>>()).expand(2.0).intersect(full) } else { full };
+        let r = [(bb.min.x.floor() as i32).max(0), (bb.min.y.floor() as i32).max(0), (bb.max.x.ceil() as i32).min(v.tw as i32), (bb.max.y.ceil() as i32).min(v.th as i32)];
+        let boxr = Rect::from_min_max(egui::pos2(r[0] as f32, r[1] as f32), egui::pos2(r[2] as f32, r[3] as f32));
+        let sc = clip.map_or(boxr, |c| c.intersect(boxr));
+        if r[2] <= r[0] || r[3] <= r[1] || !sc.is_positive() {
+            return None;
+        }
+        let (ox, oy) = (r[0] as f32, r[1] as f32);
+        let (bw, bh) = ((r[2] - r[0]) as u32, (r[3] - r[1]) as u32);
+        let sx0 = ((sc.min.x.floor() - ox).max(0.0) as u32).min(bw - 1);
+        let sy0 = ((sc.min.y.floor() - oy).max(0.0) as u32).min(bh - 1);
+        let sx1 = ((sc.max.x.ceil() - ox).max(0.0) as u32).min(bw);
+        let sy1 = ((sc.max.y.ceil() - oy).max(0.0) as u32).min(bh);
+        let scissor = [sx0, sy0, sx1.saturating_sub(sx0).max(1), sy1.saturating_sub(sy0).max(1)];
+        let row3 = |i: usize, w: f64| [m[i][0] as f32, m[i][1] as f32, m[i][2] as f32, w as f32];
+        let dir = light.map_or([0.0; 3], |l| l.dir());
+        let u = SideUniform {
+            p0: p[0],
+            p1: p[1],
+            p2: p[2],
+            m0: row3(0, t[0]),
+            m1: row3(1, t[1]),
+            m2: row3(2, t[2]),
+            eye: [cam.center[0] as f32, cam.center[1] as f32, cam.center[2] as f32, th],
+            nrm: [n[0] as f32, n[1] as f32, n[2] as f32, pl.smooth as u8 as f32],
+            light: [dir[0] as f32, dir[1] as f32, dir[2] as f32, light.map_or(0.0, |l| l.ambient)],
+            box_: [ox, oy, bw as f32, bh as f32],
+            k: [(layer.opacity.clamp(0.0, 1.0) * 255.0).round() / 255.0, crate::canvas::SIDE_SHADE, light.is_some() as u8 as f32, if near > 1e-6 { near * 0.5 } else { 1e-4 }],
+            anchor: [pl.anchor.x, pl.anchor.y, 0.0, 0.0],
+        };
+        Some(Node::Sides { edges: buf, count: edges.len() as u32, u, rect: r, scissor })
     }
 
     fn clear_to(&self, enc: &mut wgpu::CommandEncoder, t: &wgpu::Texture, c: wgpu::Color) {
@@ -1415,35 +1462,43 @@ impl Gpu {
                 u.bg = bgp.unwrap_or_default();
                 self.pass(enc, &self.blend, target, &u, &g, &back);
             }
-            Node::Sides { verts, rect, scissor } => {
+            Node::Sides { edges, count, u: su, rect, scissor } => {
                 let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
-                let ms = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: None,
-                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                    mip_level_count: 1,
-                    sample_count: 4,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: FMT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
+                // targets kept by size rounded up (a turning layer's box changes
+                // every frame); the box is drawn in their top left
+                let (pw, ph) = (w.div_ceil(128) * 128, h.div_ceil(128) * 128);
+                let frame = self.frame;
+                let (ms, depth, res, used) = self.ms_pool.entry((pw, ph)).or_insert_with(|| {
+                    let ms_tex = |format: wgpu::TextureFormat| {
+                        self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: None,
+                            size: wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 4,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            view_formats: &[],
+                        })
+                    };
+                    let res = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: None,
+                        size: wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: FMT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    (ms_tex(FMT), ms_tex(wgpu::TextureFormat::Depth32Float), res, frame)
                 });
-                let res = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-                let flat: Vec<f32> = verts.iter().flatten().copied().collect();
-                let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: f32_bytes(&flat), usage: wgpu::BufferUsages::VERTEX });
-                let u = Uniform::new([0.0, 0.0, w as f32, h as f32], w, h);
-                let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
-                let dv = self.dummy.create_view(&Default::default());
-                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &self.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dv) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dv) },
-                    ],
-                });
+                *used = frame;
+                let (ms, depth, res) = (ms.clone(), depth.clone(), res.clone());
+                let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: su.bytes(), usage: wgpu::BufferUsages::UNIFORM });
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.sides_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() }] });
                 {
-                    let (msv, rv) = (ms.create_view(&Default::default()), res.create_view(&Default::default()));
+                    let (msv, rv, dv) = (ms.create_view(&Default::default()), res.create_view(&Default::default()), depth.create_view(&Default::default()));
                     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: None,
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1452,18 +1507,28 @@ impl Gpu {
                             resolve_target: Some(&rv),
                             ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
                         })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &dv,
+                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                            stencil_ops: None,
+                        }),
                         ..Default::default()
                     });
-                    rp.set_pipeline(&self.tri);
+                    rp.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+                    rp.set_pipeline(&self.sides_pipe);
                     rp.set_bind_group(0, &bg, &[]);
-                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_vertex_buffer(0, edges.slice(..));
                     rp.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
-                    rp.draw(0..verts.len() as u32, 0..1);
+                    rp.draw(0..6, 0..*count);
                 }
                 let r = [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32];
                 let mut u = Uniform::new(r, tw, th);
                 u.p0 = [rect[0] as f32, rect[1] as f32, 0.0, 0.0];
                 self.pass(enc, &self.over, target, &u, &res, &self.dummy);
+                // a big one isn't kept
+                if pw * ph > 2048 * 2048 {
+                    self.ms_pool.remove(&(pw, ph));
+                }
             }
             Node::MaskedGpu { inner, atlas, a, rect, invert, strength } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);
@@ -1597,9 +1662,33 @@ impl View {
     }
 }
 
-fn f32_bytes(v: &[f32]) -> &[u8] {
-    // plain f32s
-    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+/// Bytes per outline edge instance (`sides.wgsl` `In`): five f32 pairs, two
+/// RGBA8 colours.
+const EDGE_BYTES: u64 = 48;
+
+/// `sides.wgsl`'s uniform.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SideUniform {
+    p0: [f32; 4],
+    p1: [f32; 4],
+    p2: [f32; 4],
+    m0: [f32; 4],
+    m1: [f32; 4],
+    m2: [f32; 4],
+    eye: [f32; 4],
+    nrm: [f32; 4],
+    light: [f32; 4],
+    box_: [f32; 4],
+    k: [f32; 4],
+    anchor: [f32; 4],
+}
+
+impl SideUniform {
+    fn bytes(&self) -> &[u8] {
+        // plain f32 arrays, no padding
+        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, std::mem::size_of::<Self>()) }
+    }
 }
 
 fn clamp_rect(r: [f32; 4], tw: u32, th: u32) -> [f32; 4] {
