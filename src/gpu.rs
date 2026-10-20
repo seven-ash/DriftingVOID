@@ -81,8 +81,9 @@ pub fn nv12_of(pm: &Pixmap) -> Vec<u8> {
 enum Node {
     /// A picture at `off` (target pixels) put over the target.
     Over { img: Img, off: [i32; 2], opacity: f32 },
-    /// A photo or video frame through `inv` (target pixel -> source pixel).
-    Image { img: Img, inv: [[f32; 3]; 2], rect: [i32; 4], opacity: f32, nearest: bool, px_per_src: f32 },
+    /// A photo or video frame through `inv` (target pixel -> source pixel),
+    /// sampled between the mip levels about `level`.
+    Image { img: Img, inv: [[f32; 3]; 2], rect: [i32; 4], opacity: f32, nearest: bool, px_per_src: f32, level: f32 },
     /// A flattened layer through `hi` (inverse homography, target -> canvas).
     Warp { img: Img, hi: [[f32; 3]; 3], src: [f32; 3], rect: [i32; 4], opacity: f32, shade: f32 },
     /// Text with a blend mode.
@@ -106,27 +107,7 @@ enum Img {
     Job(usize),
 }
 
-type Raster = Box<dyn FnOnce() -> Option<(Px, u32, u32)> + Send>;
-
-/// Pixels to upload: made for this picture, or an opaque video frame as it came
-/// from the decoder (no copy).
-enum Px {
-    Own(Vec<u8>),
-    Shared(Arc<image::RgbaImage>),
-    /// A decoded video frame, turned into RGBA on the GPU.
-    Nv12(Arc<crate::doc::Nv12>),
-}
-
-impl std::ops::Deref for Px {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            Px::Own(v) => v,
-            Px::Shared(i) => i.as_raw(),
-            Px::Nv12(f) => &f.data,
-        }
-    }
-}
+type Raster = Box<dyn FnOnce() -> Option<(Vec<u8>, u32, u32)> + Send>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
@@ -152,6 +133,8 @@ pub struct Gpu {
     from_nv12: wgpu::RenderPipeline,
     ground: wgpu::RenderPipeline,
     mask_atlas: wgpu::RenderPipeline,
+    prep: wgpu::RenderPipeline,
+    mip: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
     pub max_side: u32,
     pub adapter: String,
@@ -159,8 +142,12 @@ pub struct Gpu {
     pub vendor: u32,
     /// Flattened 3D layers, kept across a job's frames.
     flat: Arc<FlatCache>,
-    /// Rasterized 2D layers and mask keep images, by content and placement.
+    /// Rasterized 2D layers and mask keep images, by content and placement;
+    /// photos and video frames (cropped, adjusted, with mipmaps) by content.
     rasters: HashMap<Key, (Arc<wgpu::Texture>, u64)>,
+    /// Photos and video frames as they came (straight alpha), by source id,
+    /// while their prepared copy is made again (an adjustment being dragged).
+    sources: HashMap<u64, (Arc<wgpu::Texture>, u64)>,
     /// Textures of flattened 3D layers (the entry is kept so its address stays unique).
     flats: HashMap<usize, (Arc<(Pixmap, Rect, f32, Option<Arc<Vec<crate::extrude::Edge>>>)>, Arc<wgpu::Texture>, u64)>,
     /// Extrusion sides in canvas units, by outline, placement, camera and light:
@@ -357,6 +344,8 @@ impl Gpu {
         let mask = pipe("fs_mask", Some(over_blend));
         let down = pipe("fs_down", None);
         let image = pipe("fs_image", Some(over_blend));
+        let prep = pipe("fs_prep", None);
+        let mip = pipe("fs_mip", None);
         let tri = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sides"),
             layout: Some(&pl),
@@ -408,12 +397,15 @@ impl Gpu {
             from_nv12,
             ground,
             mask_atlas,
+            prep,
+            mip,
             dummy,
             max_side,
             adapter,
             vendor,
             flat: Arc::default(),
             rasters: HashMap::new(),
+            sources: HashMap::new(),
             flats: HashMap::new(),
             pool: HashMap::new(),
             atlases: HashMap::new(),
@@ -428,6 +420,7 @@ impl Gpu {
         self.sides.clear();
         self.flat = Arc::default();
         self.rasters.clear();
+        self.sources.clear();
         self.flats.clear();
         self.pool.clear();
     }
@@ -552,6 +545,7 @@ impl Gpu {
         self.frame += 1;
         let g = self.frame;
         self.rasters.retain(|_, v| v.1 + 1 >= g);
+        self.sources.retain(|_, v| v.1 + 1 >= g);
         self.flats.retain(|_, v| v.2 + 1 >= g);
         self.sides.retain(|_, v| v.1 + 1 >= g);
         self.flat.sweep();
@@ -677,6 +671,7 @@ impl Gpu {
         // are dear to make again when a layer comes back into view)
         self.flat.set_keep(1800);
         self.rasters.retain(|_, v| v.1 + 30 >= g);
+        self.sources.retain(|_, v| v.1 + 2 >= g);
         self.flats.retain(|_, v| v.2 + 1800 >= g);
         self.atlases.retain(|_, a| a.used + 600 >= g);
         self.sides.retain(|_, v| v.1 + 1800 >= g);
@@ -732,7 +727,7 @@ impl Gpu {
         let n = jobs.len();
         let (rasters, keys): (Vec<Raster>, Vec<Option<Key>>) = jobs.into_iter().unzip();
         let queue: Mutex<Vec<(usize, Raster)>> = Mutex::new(rasters.into_iter().enumerate().rev().collect());
-        let done: Mutex<Vec<Option<(Px, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
+        let done: Mutex<Vec<Option<(Vec<u8>, u32, u32)>>> = Mutex::new((0..n).map(|_| None).collect());
         std::thread::scope(|sc| {
             for _ in 0..threads.min(n) {
                 sc.spawn(|| {
@@ -748,7 +743,6 @@ impl Gpu {
         let mut ready: Vec<Arc<wgpu::Texture>> = Vec::with_capacity(n);
         for (r, key) in done.into_inner().unwrap().into_iter().zip(keys) {
             let t = match r {
-                Some((Px::Nv12(f), w, h)) => self.upload_nv12(&f.data, w, h),
                 Some((data, w, h)) => self.upload(&data, w, h),
                 None => Arc::new(self.texture(1, 1, wgpu::TextureUsages::TEXTURE_BINDING)),
             };
@@ -880,43 +874,31 @@ impl Gpu {
             let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(s, s).post_translate(-rect[0] as f32, -rect[1] as f32);
             let world = Rect::from_min_max(full.min + vec2(rect[0] as f32, rect[1] as f32) / s, full.min + vec2(rect[2] as f32, rect[3] as f32) / s);
             crate::export::draw_layer(&mut pm, &layer, base, world.expand(2.0 / s), s);
-            Some((Px::Own(pm.take()), w, h))
+            Some((pm.take(), w, h))
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
     }
 
-    /// A photo or video frame: its pixels (cropped, adjusted, premultiplied, as
-    /// `export::image_pixmap`) uploaded once and sampled on the GPU.
+    /// A photo or video frame: uploaded once as it came, then cropped, adjusted,
+    /// premultiplied and given mipmaps on the GPU (`prepared`), and sampled from
+    /// the level that suits its size on screen, so zooming makes nothing again.
+    /// Only a source too big for one texture goes through the CPU
+    /// (`export::image_pixmap`).
     fn image(&mut self, layer: Layer, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         let crate::doc::LayerKind::Image(im) = &layer.kind else { return };
         let target = im.scale * v.s;
-        // source pixels -> canvas: as export::draw_image (logical size k, and a
-        // smaller copy when shown under half size)
+        // source pixels -> canvas: as export::draw_image (logical size k)
         let (iw, ih) = im.src.px_size();
         let (iw, ih) = (iw as f32, ih as f32);
         let k = iw / im.src.size().x.max(1.0);
-        let mut ts = target / k;
-        if v.origin.is_some() && ts < 0.5 {
-            // the canvas: the smaller copy in halvings only (zooming out does
-            // not re-make a 4K photo's copy every step)
-            let f = 2f32.powf((ts * 1.5).log2().ceil());
-            ts = if f >= 1.0 { 0.5 } else { f / 1.5 };
-        }
         let crop_px = [
             ((im.crop.min.x * k).round()).clamp(0.0, iw - 1.0),
             ((im.crop.min.y * k).round()).clamp(0.0, ih - 1.0),
         ];
         let cw0 = ((im.crop.max.x * k).round()).clamp(crop_px[0] + 1.0, iw) - crop_px[0];
         let ch0 = ((im.crop.max.y * k).round()).clamp(crop_px[1] + 1.0, ih) - crop_px[1];
-        let (mut sw, mut sh, mut factor) = if ts < 0.5 {
-            let nw = ((cw0 * ts * 1.5).round()).max(1.0);
-            let nh = ((ch0 * ts * 1.5).round()).max(1.0);
-            (nw, nh, (1.0 / k) * (cw0 / nw))
-        } else {
-            (cw0, ch0, 1.0 / k)
-        };
-        // the source as it is, whatever size it is copied at
+        // the source as it is shown, whatever size it is drawn at
         let src_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -926,14 +908,26 @@ impl Gpu {
             }
             h.finish()
         };
-        if v.zooming && !self.rasters.contains_key(&Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [0; 4] }) {
-            // zooming: a copy already made (the largest) until the zoom rests
-            let have = self.rasters.keys().filter(|q| q.id == layer.id && q.content == src_key && q.view == [0; 4]).max_by_key(|q| q.rect[0]).copied();
-            if let Some(q) = have {
-                (sw, sh) = (q.rect[0] as f32, q.rect[1] as f32);
-                factor = (1.0 / k) * (cw0 / sw);
+        let on_gpu = cw0 as u32 <= self.max_side && ch0 as u32 <= self.max_side;
+        let (sw, sh, factor, ts) = if on_gpu {
+            (cw0, ch0, 1.0 / k, 1.0)
+        } else {
+            // a smaller copy when shown under half size (on the canvas in
+            // halvings only, so zooming out doesn't re-make it every step)
+            let mut ts = target / k;
+            if v.origin.is_some() && ts < 0.5 {
+                let f = 2f32.powf((ts * 1.5).log2().ceil());
+                ts = if f >= 1.0 { 0.5 } else { f / 1.5 };
             }
-        }
+            let ts = ts.max(1e-4);
+            if ts < 0.5 {
+                let nw = ((cw0 * ts * 1.5).round()).max(1.0);
+                let nh = ((ch0 * ts * 1.5).round()).max(1.0);
+                (nw, nh, (1.0 / k) * (cw0 / nw), ts)
+            } else {
+                (cw0, ch0, 1.0 / k, ts)
+            }
+        };
         // source pixel -> target pixel
         let (sn, cs) = im.rotation.sin_cos();
         let (cw, ch) = (sw * factor, sh * factor);
@@ -958,6 +952,29 @@ impl Gpu {
         }
         let nearest = (im.scale * v.s / v.k - 1.0).abs() < 1e-4 && im.rotation == 0.0;
         let px_per_src = (m.sx * m.sy - m.kx * m.ky).abs().sqrt();
+        let inv = [[inv.sx, inv.kx, inv.tx], [inv.ky, inv.sy, inv.ty]];
+        if on_gpu {
+            let key = Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [1; 4] };
+            let tex = match self.rasters.get_mut(&key) {
+                Some(e) => {
+                    e.1 = self.frame;
+                    e.0.clone()
+                }
+                None => {
+                    let t = self.prepared(im, [crop_px[0] as u32, crop_px[1] as u32], sw as u32, sh as u32);
+                    self.rasters.insert(key, (t.clone(), self.frame));
+                    t
+                }
+            };
+            // shown under half size: between the levels about 1.5 texels per
+            // target pixel (as the CPU's smaller copy at 1.5)
+            let level = match nearest || px_per_src >= 0.5 {
+                true => 0.0,
+                false => (1.0 / (1.5 * px_per_src)).log2().clamp(0.0, (tex.mip_level_count() - 1) as f32),
+            };
+            out.push(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src, level });
+            return;
+        }
         let key = Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [0; 4] };
         let img = match self.rasters.get_mut(&key) {
             Some(e) => {
@@ -967,46 +984,71 @@ impl Gpu {
             None => {
                 let mut one = im.clone();
                 one.center = Pos2::ZERO;
-                let whole = crop_px == [0.0, 0.0] && cw0 == iw && ch0 == ih && ts >= 0.5 && im.adjust.is_identity();
                 let job: Raster = Box::new(move || {
-                    if whole {
-                        // the usual video frame: no crop, no adjustment, no smaller
-                        // copy; premultiplied in parallel strips (opaque pixels as is)
-                        if let Some(f) = &one.src.nv12 {
-                            return Some((Px::Nv12(f.clone()), f.w, f.h));
-                        }
-                        let (w, h) = one.src.rgba.dimensions();
-                        if one.src.rgba.as_raw().chunks_exact(4).all(|p| p[3] == 255) {
-                            return Some((Px::Shared(one.src.rgba.clone()), w, h));
-                        }
-                        let mut data = one.src.rgba.as_raw().clone();
-                        let strip = (data.len() / 4 / 8).max(1) * 4;
-                        std::thread::scope(|sc| {
-                            for part in data.chunks_mut(strip) {
-                                sc.spawn(move || {
-                                    for px in part.chunks_exact_mut(4) {
-                                        let a = px[3] as u32;
-                                        if a < 255 {
-                                            for c in &mut px[..3] {
-                                                *c = ((*c as u32 * a + 127) / 255) as u8;
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                        return Some((Px::Own(data), w, h));
-                    }
                     let (pm, _) = crate::export::image_pixmap(&one, ts * k)?;
                     let (w, h) = (pm.width(), pm.height());
-                    Some((Px::Own(pm.take()), w, h))
+                    Some((pm.take(), w, h))
                 });
                 jobs.push((job, Some(key)));
                 Img::Job(jobs.len() - 1)
             }
         };
-        let inv = [[inv.sx, inv.kx, inv.tx], [inv.ky, inv.sy, inv.ty]];
-        out.push(Node::Image { img, inv, rect, opacity: layer.opacity, nearest, px_per_src });
+        out.push(Node::Image { img, inv, rect, opacity: layer.opacity, nearest, px_per_src, level: 0.0 });
+    }
+
+    /// A photo or video frame as it came (straight alpha; a decoded video frame
+    /// turned into RGB on the GPU), kept by source id.
+    fn source(&mut self, src: &crate::doc::ImageSource) -> Arc<wgpu::Texture> {
+        if let Some(e) = self.sources.get_mut(&src.id) {
+            e.1 = self.frame;
+            return e.0.clone();
+        }
+        let t = match &src.nv12 {
+            Some(f) => self.upload_nv12(&f.data, f.w, f.h),
+            None => {
+                let (w, h) = src.rgba.dimensions();
+                self.upload(src.rgba.as_raw(), w, h)
+            }
+        };
+        self.sources.insert(src.id, (t.clone(), self.frame));
+        t
+    }
+
+    /// A photo's `w`×`h` pixels from `crop`, adjusted and premultiplied
+    /// (`fs_prep`), with every mip level below it (`fs_mip`).
+    fn prepared(&mut self, im: &crate::doc::ImageLayer, crop: [u32; 2], w: u32, h: u32) -> Arc<wgpu::Texture> {
+        let raw = self.source(&im.src);
+        let levels = 32 - w.max(h).max(1).leading_zeros();
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let level = |l: u32| tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: l, mip_level_count: Some(1), ..Default::default() });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let a = &im.adjust;
+        let mut u = Uniform::new([0.0, 0.0, w as f32, h as f32], w, h);
+        u.p0 = [crop[0] as f32, crop[1] as f32, 0.0, 0.0];
+        let tone = a.brightness != 0.0 || a.contrast != 0.0 || a.saturation != 0.0;
+        u.p1 = [a.brightness, a.contrast, a.saturation, tone as u8 as f32];
+        if let Some([r, g, b]) = a.chroma {
+            u.h0 = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+            u.h1 = [a.key_tol, a.key_soft, 0.0, 0.0];
+        }
+        let dv = self.dummy.create_view(&Default::default());
+        self.pass_views(&mut enc, &self.prep, &level(0), &u, &raw.create_view(&Default::default()), &dv);
+        for l in 1..levels {
+            let (lw, lh) = ((w >> l).max(1), (h >> l).max(1));
+            let u = Uniform::new([0.0, 0.0, lw as f32, lh as f32], lw, lh);
+            self.pass_views(&mut enc, &self.mip, &level(l), &u, &level(l - 1), &dv);
+        }
+        self.queue.submit([enc.finish()]);
+        Arc::new(tex)
     }
 
     /// A brush layer from its tile atlas (canvas): sampled as a photo is, nearest
@@ -1023,7 +1065,7 @@ impl Gpu {
             return None;
         }
         let nearest = (s - 1.0).abs() < 1e-4;
-        Some(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src: s })
+        Some(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src: s, level: 0.0 })
     }
 
     /// A brush (or mask) layer's tiles in one texture, updated tile by tile:
@@ -1112,7 +1154,7 @@ impl Gpu {
                     data[i..i + 4].copy_from_slice(&[a, a, a, 255]);
                 }
             }
-            Some((Px::Own(data), w, h))
+            Some((data, w, h))
         });
         jobs.push((job, Some(key)));
         Img::Job(jobs.len() - 1)
@@ -1262,21 +1304,25 @@ impl Gpu {
 
     /// One rectangle drawn with `pipe` onto `target`.
     fn pass(&self, enc: &mut wgpu::CommandEncoder, pipe: &wgpu::RenderPipeline, target: &wgpu::Texture, u: &Uniform, t0: &wgpu::Texture, t1: &wgpu::Texture) {
-        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
         let (v0, v1) = (t0.create_view(&Default::default()), t1.create_view(&Default::default()));
+        self.pass_views(enc, pipe, &target.create_view(&Default::default()), u, &v0, &v1);
+    }
+
+    /// As `pass`, on texture views (single mip levels).
+    fn pass_views(&self, enc: &mut wgpu::CommandEncoder, pipe: &wgpu::RenderPipeline, view: &wgpu::TextureView, u: &Uniform, v0: &wgpu::TextureView, v1: &wgpu::TextureView) {
+        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&v0) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v1) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(v0) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(v1) },
             ],
         });
-        let view = target.create_view(&Default::default());
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             ..Default::default()
         });
         rp.set_pipeline(pipe);
@@ -1303,13 +1349,13 @@ impl Gpu {
                 u.p0 = [off[0] as f32, off[1] as f32, 0.0, 0.0];
                 self.pass(enc, &self.over, target, &u, &t, &self.dummy);
             }
-            Node::Image { img, inv, rect, opacity, nearest, px_per_src } => {
+            Node::Image { img, inv, rect, opacity, nearest, px_per_src, level } => {
                 let t = Self::img(img, ready);
                 let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
                 u.tsize[2] = *opacity;
                 u.h0 = [inv[0][0], inv[0][1], inv[0][2], 0.0];
                 u.h1 = [inv[1][0], inv[1][1], inv[1][2], 0.0];
-                u.p1 = [*px_per_src, *nearest as u8 as f32, 0.0, 0.0];
+                u.p1 = [*px_per_src, *nearest as u8 as f32, *level, 0.0];
                 self.pass(enc, &self.image, target, &u, &t, &self.dummy);
             }
             Node::Warp { img, hi, src, rect, opacity, shade } => {

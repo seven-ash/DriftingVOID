@@ -182,7 +182,9 @@ fn diff(a: &Pixmap, b: &Pixmap) -> (f64, f64, u32) {
 /// The GPU export against the CPU reference on the golden scenes (skipped
 /// without a GPU). Tolerances: under 0.5 % of pixels off by more than 8 levels,
 /// mean difference under 0.5 level (resampling and edge coverage differ a
-/// little; anything structural fails).
+/// little; anything structural fails). A photo shown small is resampled
+/// differently (the CPU makes a smaller copy, the GPU blends mip levels): the
+/// checkerboard's edges differ a little more there, under 4 % and 1.5 levels.
 #[test]
 fn gpu_parity() {
     let cases: Vec<(&str, Document, egui::Pos2, egui::Vec2, f32, f32, Option<Color32>, u8)> = {
@@ -191,7 +193,20 @@ fn gpu_parity() {
         let room = room_doc(false, 0.0);
         let rr = room.content_bounds().unwrap();
         let room_t = room_doc(true, 1.0);
+        // the photo shown small (mip levels), and adjusted, keyed, cropped and turned
+        let mut adj = room_doc(false, 0.0);
+        for l in &mut adj.layers {
+            if let LayerKind::Image(im) = &mut l.kind {
+                im.adjust = crate::doc::Adjust { brightness: 0.15, contrast: 0.3, saturation: -0.4, chroma: Some([170, 100, 75]), ..Default::default() };
+                im.crop = Rect::from_min_max(im.crop.min + vec2(37.0, 21.0), im.crop.max - vec2(50.0, 13.0));
+                im.rotation = 0.2;
+            }
+        }
         vec![
+            ("room_small", room.clone(), rr.center(), rr.size(), 0.0, 0.2, None, 1),
+            ("room_tiny_ss2", room.clone(), rr.center(), rr.size(), 0.0, 0.07, None, 2),
+            ("room_adj", adj.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
+            ("room_adj_small", adj, rr.center(), rr.size(), 0.0, 0.3, None, 1),
             ("flat", flat.clone(), fr.center(), fr.size(), 0.0, 1.0, Some(Color32::WHITE), 1),
             ("flat_ss2", flat.clone(), fr.center(), fr.size(), 0.0, 1.0, Some(Color32::WHITE), 2),
             ("flat_rot", flat, fr.center(), vec2(300.0, 200.0), 0.35, 1.5, None, 1),
@@ -210,9 +225,11 @@ fn gpu_parity() {
         };
         let gpu = gpu.unwrap();
         crate::export::to_rgba(&gpu).save(dir.join(format!("{name}.gpu.got.png"))).unwrap();
+        crate::export::to_rgba(&cpu).save(dir.join(format!("{name}.cpu.got.png"))).unwrap();
         let (big, mean, worst) = diff(&cpu, &gpu);
         eprintln!("{name}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
-        if big > 0.005 || mean > 0.5 {
+        let (big_max, mean_max) = if name.contains("small") || name.contains("tiny") { (0.04, 1.5) } else { (0.005, 0.5) };
+        if big > big_max || mean > mean_max {
             fails.push(name);
         }
     }

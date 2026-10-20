@@ -224,14 +224,29 @@ fn mitchell(x: f32) -> f32 {
     return 0.0;
 }
 
-fn clamped(p: vec2i) -> vec4f {
-    let d = vec2i(textureDimensions(tex0));
-    return textureLoad(tex0, clamp(p, vec2i(0), d - 1), 0);
+fn clamped(p: vec2i, l: i32) -> vec4f {
+    let d = vec2i(textureDimensions(tex0, l));
+    return textureLoad(tex0, clamp(p, vec2i(0), d - 1), l);
+}
+
+fn bicubic(sp: vec2f, d: vec2f, l: i32) -> vec4f {
+    let s = sp * vec2f(textureDimensions(tex0, l)) / d - 0.5;
+    let i = vec2i(floor(s));
+    let f = s - floor(s);
+    var c = vec4f(0.0);
+    for (var y = -1; y <= 2; y++) {
+        let wy = mitchell(f32(y) - f.y);
+        for (var x = -1; x <= 2; x++) {
+            c += clamped(i + vec2i(x, y), l) * (mitchell(f32(x) - f.x) * wy);
+        }
+    }
+    return c;
 }
 
 // A photo or video frame: target pixel -> source pixel by an affine (h0, h1),
-// sampled nearest (p1.y = 1, pixel for pixel) or bicubic, edges padded; the
-// rectangle's edge is anti-aliased over p1.x target pixels per source pixel.
+// sampled nearest (p1.y = 1, pixel for pixel) or bicubic between the mip
+// levels about p1.z (fractional), edges padded; the rectangle's edge is
+// anti-aliased over p1.x target pixels per source pixel.
 @fragment
 fn fs_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let q = vec3f(pos.xy, 1.0);
@@ -244,17 +259,13 @@ fn fs_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
     var c: vec4f;
     if u.p1.y > 0.5 {
-        c = clamped(vec2i(floor(sp)));
+        c = clamped(vec2i(floor(sp)), 0);
     } else {
-        let s = sp - 0.5;
-        let i = vec2i(floor(s));
-        let f = s - floor(s);
-        c = vec4f(0.0);
-        for (var y = -1; y <= 2; y++) {
-            let wy = mitchell(f32(y) - f.y);
-            for (var x = -1; x <= 2; x++) {
-                c += clamped(i + vec2i(x, y)) * (mitchell(f32(x) - f.x) * wy);
-            }
+        let l = i32(floor(u.p1.z));
+        let t = u.p1.z - floor(u.p1.z);
+        c = bicubic(sp, d, l);
+        if t > 0.0 {
+            c = mix(c, bicubic(sp, d, l + 1), t);
         }
         let a = clamp(c.a, 0.0, 1.0);
         c = vec4f(clamp(c.rgb, vec3f(0.0), vec3f(a)), a);
@@ -338,4 +349,66 @@ fn fs_mask_atlas(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         hide = 1.0 - a;
     }
     return s * (1.0 - hide * u.p1.y);
+}
+
+fn cbcr(c: vec3f) -> vec2f {
+    return vec2f(dot(c, vec3f(-0.168736, -0.331264, 0.5)), dot(c, vec3f(0.5, -0.418688, -0.081312)));
+}
+
+// A photo or video frame made ready to sample, as export::image_pixmap: the
+// crop (tex0 from p0.xy), the chroma key (h0: key colour, on when h0.w; h1:
+// tolerance, soft edge), brightness, contrast, saturation (p1, on when p1.w),
+// premultiplied. tex0 is straight alpha; values are rounded to 8 bits between
+// steps as the CPU's bytes are.
+@fragment
+fn fs_prep(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    var c = textureLoad(tex0, vec2i(floor(pos.xy)) + vec2i(u.p0.xy), 0);
+    if u.h0.w > 0.5 && c.a > 0.0 {
+        let kc = cbcr(u.h0.rgb);
+        let kl = max(length(kc), 1e-4);
+        let lo = u.h1.x;
+        let hi = u.h1.x + max(u.h1.y, 1e-4);
+        let pc = cbcr(c.rgb);
+        let d = distance(pc, kc);
+        if d < hi {
+            let x = clamp((d - lo) / (hi - lo), 0.0, 1.0);
+            let a = x * x * (3.0 - 2.0 * x);
+            c.a = round(c.a * 255.0 * a) / 255.0;
+            // spill: the part of the chroma that points at the key goes
+            let along = dot(pc, kc) / kl;
+            if along > 0.0 {
+                let n = pc - kc * (along * (1.0 - a) / kl);
+                let y = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+                let rgb = vec3f(y + 1.402 * n.y, y - 0.344136 * n.x - 0.714136 * n.y, y + 1.772 * n.x);
+                c = vec4f(round(clamp(rgb, vec3f(0.0), vec3f(1.0)) * 255.0) / 255.0, c.a);
+            }
+        }
+    }
+    if u.p1.w > 0.5 {
+        let v = (c.rgb - 0.5) * (1.0 + u.p1.y) + 0.5 + u.p1.x * 0.5;
+        let l = dot(v, vec3f(0.2126, 0.7152, 0.0722));
+        c = vec4f(floor(clamp(l + (v - l) * (1.0 + u.p1.z), vec3f(0.0), vec3f(1.0)) * 255.0 + 0.5) / 255.0, c.a);
+    }
+    return vec4f(c.rgb * c.a, c.a);
+}
+
+fn bilin(p: vec2f) -> vec4f {
+    let s = p - 0.5;
+    let i = vec2i(floor(s));
+    let t = s - floor(s);
+    let a = clamped(i, 0);
+    let b = clamped(i + vec2i(1, 0), 0);
+    let c = clamped(i + vec2i(0, 1), 0);
+    let e = clamped(i + vec2i(1, 1), 0);
+    return mix(mix(a, b, t.x), mix(c, e, t.x), t.y);
+}
+
+// One mip level from the one above (tex0, a single level): the 2x2 box (four
+// bilinear taps, so odd sizes stay in place), premultiplied.
+@fragment
+fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let r = vec2f(textureDimensions(tex0)) / u.tsize.xy;
+    let c = pos.xy * r;
+    let o = r * 0.25;
+    return (bilin(c + vec2f(-o.x, -o.y)) + bilin(c + vec2f(o.x, -o.y)) + bilin(c + vec2f(-o.x, o.y)) + bilin(c + o)) * 0.25;
 }
