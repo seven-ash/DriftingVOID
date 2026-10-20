@@ -877,7 +877,8 @@ pub struct App {
     /// The next drag in the space tool draws the reference length.
     space_ref_draw: bool,
     /// The next click on the floor stands this layer there.
-    space_place: Option<LayerId>,
+    /// The next click on the floor places this layer there: standing, or lying (true).
+    space_place: Option<(LayerId, bool)>,
     /// The next drag on the floor draws a wall's base line.
     wall_base_new: bool,
     /// The next drag in the space tool draws the tape measure.
@@ -1261,15 +1262,16 @@ impl App {
                             }
                         }
                     }
-                    // DV_STAND="x,y" (photo pixels): the first text stands on the floor there
-                    if let Ok(v) = std::env::var("DV_STAND") {
+                    // DV_STAND / DV_LIE="x,y" (photo pixels): the first text stands / lies on the floor there
+                    for (var, lie) in [("DV_STAND", false), ("DV_LIE", true)] {
+                        let Ok(v) = std::env::var(var) else { continue };
                         let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                         if n.len() == 2 {
                             if let Some(im) = app.doc.layers.iter().find_map(|l| match &l.kind {
                                 LayerKind::Image(im) => Some(im.clone()),
                                 _ => None,
                             }) {
-                                app.stand_on_floor(t1, id, im.src_to_world(pos2(n[0], n[1])));
+                                app.stand_on_floor(t1, id, im.src_to_world(pos2(n[0], n[1])), lie);
                             }
                         }
                     }
@@ -4057,7 +4059,7 @@ impl App {
 
     /// Stands a layer upright on the floor where canvas point `w` shows, facing the
     /// camera, its bottom middle on the floor (AR-style placing).
-    fn stand_on_floor(&mut self, id: LayerId, sid: u64, w: Pos2) {
+    fn stand_on_floor(&mut self, id: LayerId, sid: u64, w: Pos2, lie: bool) {
         if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
             return;
         }
@@ -4072,7 +4074,8 @@ impl App {
         };
         let Some(i) = self.doc.index_of(id) else { return };
         let Some(b) = self.doc.layers[i].bounds() else { return };
-        let mut pl = crate::persp::Placement::standing(sid, &cam, at, b.center_bottom());
+        // standing: its bottom middle on the floor; lying: its centre there
+        let mut pl = if lie { crate::persp::Placement::lying(sid, &cam, at, b.center()) } else { crate::persp::Placement::standing(sid, &cam, at, b.center_bottom()) };
         if let Some(old) = &self.doc.layers[i].place {
             pl.thick = old.thick;
             pl.segs = old.segs;
@@ -4084,7 +4087,7 @@ impl App {
             let to = if top > i { top } else { top + 1 };
             self.doc.layers.insert(to.min(self.doc.layers.len()), l);
         }
-        self.status = "바닥에 세움".into();
+        self.status = if lie { "바닥에 눕힘" } else { "바닥에 세움" }.into();
         self.mark();
     }
 
@@ -5500,9 +5503,9 @@ impl App {
                 return;
             }
         }
-        if let Some(lid) = self.space_place.take() {
+        if let Some((lid, lie)) = self.space_place.take() {
             if let Some(i) = self.space_idx() {
-                self.stand_on_floor(lid, self.doc.spaces[i].id, w);
+                self.stand_on_floor(lid, self.doc.spaces[i].id, w, lie);
                 return;
             }
         }
@@ -5737,12 +5740,32 @@ impl App {
                 let cam = orig.place.as_ref().and_then(|pl| self.doc.spaces.iter().find(|s| s.id == pl.space)).and_then(|s| crate::persp::solve(s).ok());
                 match (orig.place.as_ref(), cam) {
                     (Some(o), Some(cam)) => {
-                        // slide along the layer's own plane under the pointer
-                        if let (Some(a), Some(b)) = (o.ray_hit(&cam, *start), o.ray_hit(&cam, *start + d)) {
-                            let mut pl = o.clone();
+                        // Floor snapping (Alt: free). A layer that touches the floor
+                        // when the drag starts slides along the floor; any other
+                        // slides along its own plane under the pointer and lands on
+                        // the floor once its lowest point comes within 10 px of it.
+                        let bx = orig.bounds().unwrap_or(Rect::ZERO);
+                        let fz = cam.floor_z;
+                        let tol = (cam.origin_depth() * 1e-3).max(0.05);
+                        let on_floor = !mods.alt && (o.lowest(bx)[2] - fz).abs() < tol;
+                        let mut pl = o.clone();
+                        if on_floor {
+                            if let (Some(a), Some(b)) = (cam.hit_floor(*start), cam.hit_floor(*start + d)) {
+                                pl.shift_world(crate::persp::sub(b, a));
+                            }
+                        } else if let (Some(a), Some(b)) = (o.ray_hit(&cam, *start), o.ray_hit(&cam, *start + d)) {
                             pl.shift_world(crate::persp::sub(b, a));
-                            l.place = Some(pl);
+                            if !mods.alt {
+                                let low = pl.lowest(bx);
+                                let on = [low[0], low[1], fz];
+                                if let (Some(p), Some(q)) = (cam.project(low), cam.project(on)) {
+                                    if p.distance(q) * self.zoom < 10.0 {
+                                        pl.shift_world([0.0, 0.0, fz - low[2]]);
+                                    }
+                                }
+                            }
                         }
+                        l.place = Some(pl);
                     }
                     _ => l.translate(d),
                 }
@@ -9160,7 +9183,7 @@ impl App {
             self.set_space_axis(ax);
         }
         let mut floor_req: Option<f64> = None;
-        let mut place_toggle: Option<LayerId> = None;
+        let mut place_toggle: Option<(LayerId, bool)> = None;
         let (mut tape_toggle, mut tape_clear) = (false, false);
         let (mut ref_toggle, mut ref_clear) = (false, false);
         let mut ref_metres: Option<f64> = None;
@@ -9240,10 +9263,15 @@ impl App {
                 });
                 let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked && !matches!(l.kind, LayerKind::Audio(_))).map(|l| l.id);
                 if let Some(lid) = placeable {
-                    let armed = self.space_place == Some(lid);
-                    if ui.selectable_label(armed, "바닥에 세우기").on_hover_text("선택한 레이어 · 사진 속 바닥 클릭").clicked() {
-                        place_toggle = Some(lid);
-                    }
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (lie, label) in [(false, "바닥에 세우기"), (true, "바닥에 눕히기")] {
+                            let armed = self.space_place == Some((lid, lie));
+                            if ui.selectable_label(armed, label).on_hover_text("선택한 레이어 · 사진 속 바닥 클릭").clicked() {
+                                place_toggle = Some((lid, lie));
+                            }
+                        }
+                    });
                 }
             }
             Err(e) => {
@@ -9363,12 +9391,12 @@ impl App {
                 self.status = "기준면 위 점에서 끌어 재기".into();
             }
         }
-        if let Some(lid) = place_toggle {
-            self.space_place = if self.space_place == Some(lid) { None } else { Some(lid) };
+        if let Some(pick) = place_toggle {
+            self.space_place = if self.space_place == Some(pick) { None } else { Some(pick) };
             if self.space_place.is_some() {
                 self.space_ref_draw = false;
                 self.space_mask_draw = false;
-                self.status = "바닥을 클릭해 세우기".into();
+                self.status = if pick.1 { "바닥을 클릭해 눕히기" } else { "바닥을 클릭해 세우기" }.into();
             }
         }
         if let (Some(m), Some(r)) = (ref_metres, s.ref_line.as_mut()) {

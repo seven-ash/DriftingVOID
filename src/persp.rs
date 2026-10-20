@@ -1157,6 +1157,10 @@ pub struct Placement {
     /// Where the plane origin sits on the wall (wall units).
     #[serde(default)]
     pub wall_uv: [f64; 2],
+    /// Rests on its underside: the plane sits `thick` above where it is placed
+    /// (against its normal), so a thickness grows up from the floor (lying layers).
+    #[serde(default)]
+    pub rest: bool,
     /// Outline detail of the extrusion: the outline is traced at this many times
     /// the texture's resolution (1–4).
     #[serde(default = "one_seg")]
@@ -1190,6 +1194,7 @@ impl Placement {
             thick: 0.0,
             wall: None,
             wall_uv: [0.0; 2],
+            rest: false,
             segs: 1,
             smooth: false,
         }
@@ -1230,9 +1235,28 @@ impl Placement {
             thick: 0.0,
             wall: None,
             wall_uv: [0.0; 2],
+            rest: false,
             segs: 1,
             smooth: false,
         }
+    }
+
+    /// Lying flat on the floor at `at` (a floor point), its centre `anchor` there,
+    /// read from the camera: content x runs to the right on screen and content y
+    /// towards the camera (down the picture). Its normal points down, so its front
+    /// faces up; it rests on its underside (`rest`), so a thickness lifts the plane
+    /// and the layer stays on the floor. One content pixel is as big as an image
+    /// pixel at that distance.
+    pub fn lying(space: u64, cam: &Camera, at: V3, anchor: Pos2) -> Self {
+        let mut st = Self::standing(space, cam, at, anchor);
+        // standing: (right, down, away); lying: (right, towards the camera, down)
+        let u = [st.base_r[0][0], st.base_r[1][0], st.base_r[2][0]];
+        let away = [st.base_r[0][2], st.base_r[1][2], st.base_r[2][2]];
+        let v = scale(away, -1.0);
+        let w = cross(u, v);
+        st.base_r = [[u[0], v[0], w[0]], [u[1], v[1], w[1]], [u[2], v[2], w[2]]];
+        st.rest = true;
+        st
     }
 
     /// On a wall: the plane through the wall point under `anchor`, lying flat on the
@@ -1254,6 +1278,7 @@ impl Placement {
             thick: 0.0,
             wall: Some(wall.id),
             wall_uv: [dot(d, u), dot(d, v)],
+            rest: false,
             segs: 1,
             smooth: false,
         })
@@ -1268,7 +1293,13 @@ impl Placement {
             [lin[1][0] * k, lin[1][1] * k, lin[1][2] * k],
             [lin[2][0] * k, lin[2][1] * k, lin[2][2] * k],
         ];
-        (lin, add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k)))
+        let mut t = add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k));
+        if self.rest && self.thick > 0.0 {
+            // resting on its underside: the plane rises by the thickness
+            let n = normalize(cross([lin[0][0], lin[1][0], lin[2][0]], [lin[0][1], lin[1][1], lin[2][1]]));
+            t = sub(t, scale(n, self.thick));
+        }
+        (lin, t)
     }
 
     /// Unit normal of the plane in world space.
@@ -1315,6 +1346,22 @@ impl Placement {
     }
 
     /// Moves the plane by a world-space offset (expressed back in `pos`).
+    /// The lowest world point of content box `b`, both caps included.
+    pub fn lowest(&self, b: Rect) -> V3 {
+        let (m, t) = self.world_affine();
+        let n = scale(self.normal(), self.thick);
+        let mut low = [0.0, 0.0, f64::MAX];
+        for p in [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()] {
+            let w = add(t, mul_mv(&m, [(p.x - self.anchor.x) as f64, (p.y - self.anchor.y) as f64, 0.0]));
+            for q in [w, add(w, n)] {
+                if q[2] < low[2] {
+                    low = q;
+                }
+            }
+        }
+        low
+    }
+
     pub fn shift_world(&mut self, d: V3) {
         // base_r may be sheared (walls follow their quad), so invert it properly
         let inv = invert(&self.base_r).unwrap_or_else(|| transpose(&self.base_r));
@@ -1630,6 +1677,46 @@ mod tests {
         assert!((m - 2.5).abs() < 1e-3, "{m}");
         sp.ref_line = None;
         assert!(sp.tape_metres(&t).is_none());
+    }
+
+    #[test]
+    fn lying_layers_face_up_and_rest_on_the_floor() {
+        let t = truth();
+        let at = [120.0, 300.0, 0.0];
+        let anchor = pos2(50.0, 20.0);
+        let mut pl = Placement::lying(1, &t, at, anchor);
+        assert!(pl.rest && pl.normal()[2] < -0.99, "{:?}", pl.normal());
+        let world = |pl: &Placement, p: Pos2| {
+            let (m, o) = pl.world_affine();
+            add(o, mul_mv(&m, [(p.x - anchor.x) as f64, (p.y - anchor.y) as f64, 0.0]))
+        };
+        assert!(norm(sub(world(&pl, anchor), at)) < 1e-9);
+        // flat on the floor: every content point at the floor's height
+        assert!(world(&pl, pos2(0.0, 0.0))[2].abs() < 1e-9 && world(&pl, pos2(100.0, 40.0))[2].abs() < 1e-9);
+        // content right shows right, content down shows lower in the picture
+        let (pa, pr, pd) = (t.project(at).unwrap(), t.project(world(&pl, pos2(90.0, 20.0))).unwrap(), t.project(world(&pl, pos2(50.0, 60.0))).unwrap());
+        assert!(pr.x > pa.x && pd.y > pa.y);
+        // a thickness lifts the plane; its underside stays on the floor
+        pl.thick = 30.0;
+        let top = world(&pl, anchor);
+        let under = add(top, scale(pl.normal(), pl.thick));
+        assert!((top[2] - 30.0).abs() < 1e-6, "{top:?}");
+        assert!(under[2].abs() < 1e-6, "{under:?}");
+        // standing layers keep their plane
+        let mut st = Placement::standing(1, &t, at, anchor);
+        st.thick = 30.0;
+        assert!(norm(sub(st.world_affine().1, at)) < 1e-9);
+    }
+
+    #[test]
+    fn lowest_point_of_a_standing_layer_is_on_the_floor() {
+        let t = truth();
+        let at = [120.0, 300.0, 0.0];
+        let b = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 80.0));
+        let mut pl = Placement::standing(1, &t, at, pos2(50.0, 80.0));
+        assert!(pl.lowest(b)[2].abs() < 1e-9);
+        pl.shift_world([0.0, 0.0, 25.0]);
+        assert!((pl.lowest(b)[2] - 25.0).abs() < 1e-9);
     }
 
     #[test]
