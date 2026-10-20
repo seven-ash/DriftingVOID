@@ -1602,10 +1602,7 @@ impl App {
                             r.tiles.clear();
                         }
                         let t0 = std::time::Instant::now();
-                        // DV_GRABCUT="x,y,w,h" (world): that box
-                        let n: Vec<f32> = std::env::var("DV_GRABCUT").unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                        let bx = if n.len() == 4 { Rect::from_min_size(pos2(n[0], n[1]), vec2(n[2], n[3])) } else { Rect::from_center_size(pos2(c[0] - 640.0, c[1]), vec2(500.0, 500.0)) };
-                        app.grabcut_fill(mid, bx, true);
+                        app.grabcut_fill(mid, Rect::from_center_size(pos2(c[0] - 640.0, c[1]), vec2(500.0, 500.0)), true);
                         eprintln!("grabcut: {} in {:?}", app.status, t0.elapsed());
                     }
                 }
@@ -2878,31 +2875,7 @@ impl App {
                 }
             }
         }
-        // a box drawn across an edge (both sides run on past it; Ash, 10-21):
-        // the larger side of the box is hidden; else what stands apart inside
-        // the box (plain GrabCut would only find the edge's mixed pixels)
-        let cells: Vec<usize> = (0..gw * gh).filter(|&i| labels[i] != BG).collect();
-        let split = match (cells.first(), cells.last()) {
-            (Some(&a), Some(&b)) => {
-                let (x0, y0, x1, y1) = (a % gw, a / gw, b % gw, b / gw);
-                let rw = x1 + 1 - x0;
-                let at = |k: usize| (y0 + k / rw) * gw + x0 + k % rw;
-                let n = rw * (y1 + 1 - y0);
-                let sub: Vec<[f64; 3]> = (0..n).map(|k| img[at(k)]).collect();
-                let hint: Vec<bool> = (0..n).map(|k| labels[at(k)] == FG).collect();
-                crate::segment::split_box(&sub, rw, y1 + 1 - y0, &hint).map(|m| m.into_iter().enumerate().filter(|e| e.1).map(|(k, _)| at(k)).collect::<Vec<_>>())
-            }
-            _ => None,
-        };
-        match split {
-            Some(hide) => {
-                labels.fill(BG);
-                for i in hide {
-                    labels[i] = FG;
-                }
-            }
-            None => crate::segment::grabcut(&img, gw, gh, &mut labels, 4),
-        }
+        crate::segment::grabcut(&img, gw, gh, &mut labels, 4);
         let mut gi = vec![0f32; pw * ph];
         let mut gp = vec![0f32; pw * ph];
         for y in 0..ph {
