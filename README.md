@@ -14,8 +14,13 @@ cargo build --release
 The executable is `target/release/DriftingVOID.exe`. Opening a `.void` file passes
 it as the first argument.
 
-Requires a Rust toolchain with MSVC on Windows. Rendering uses OpenGL (egui/glow,
-4x MSAA). The frosted glass falls back to flat cards if shaders fail to compile.
+Requires a Rust toolchain with MSVC on Windows. Rendering uses wgpu (DX12 or
+Vulkan): one GPU renderer draws the canvas, the glass cards, playback and every
+export. `DV_GL=1` still starts the older OpenGL (glow) build for comparison.
+Video needs ffmpeg/ffprobe (`%APPDATA%\DriftingVOID\ffmpeg`, next to the exe,
+or on PATH).
+
+Where development stands and what is open: `docs/STATE.md`.
 
 ## Using it
 
@@ -109,10 +114,17 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/doc.rs` | Document model (layers, images, text, shapes) |
 | `src/raster.rs` | Tiled raster layers and the brush engine |
 | `src/vector.rs` | Pressure vector strokes |
-| `src/canvas.rs` | GPU display and texture caches |
-| `src/export.rs` | Full-resolution CPU compositor (export, clipboard, eyedropper) |
+| `src/scene.rs` | Frame description shared by both renderers |
+| `src/gpu.rs`, `src/gpu.wgsl` | The GPU renderer (canvas, exports, playback cache, loupe) |
+| `src/gpu_paths.rs`, `src/paths.wgsl` | Text and shapes filled on the GPU from their outlines |
+| `src/sides.wgsl` | Thick layers' sides on the GPU |
+| `src/glass_gpu.rs`, `src/glass.wgsl` | Glass cards under wgpu |
+| `src/playcache.rs`, `src/vcache.rs` | Playback cache (rendered frames) and video frame cache |
+| `src/canvas.rs` | Glow canvas (until glow is removed) and shared layer helpers |
+| `src/export.rs` | CPU reference renderer (tests, fallback past the GPU texture limit) |
+| `src/segment.rs` | GrabCut and intelligent scissors |
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
-| `src/glass.rs` | Frosted glass paint callback (blur, refraction, dispersion) and the scene/overlay render layers |
+| `src/glass.rs` | Glass settings and the glow glass callbacks |
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
 | `src/anim.rs` | Timeline, keyframes, easing, canvas cameras |
@@ -125,6 +137,10 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/okhsv.rs` | OKHSV colour conversions |
 | `src/penhook.rs` | Pen button/eraser flags via a window subclass |
 | `src/io.rs` | Image import and `.void` save/load |
+| `docs/STATE.md` | Where development stands, what is open (resume here) |
+| `docs/DECISIONS.md` | Ash's decisions: intended behaviour |
+| `docs/DEV_NOTES.md` | Build, test, release, GUI checks, debug flags, code map |
+| `docs/RENDER.md`, `docs/updates/` | Render pipeline design and its working record |
 | `docs/ROADMAP.md` | Planned work and known issues |
 | `docs/CHANGELOG.md` | What shipped, per version |
 | `docs/VIDEO.md` | Video, audio, timeline, cameras: design and phases |
