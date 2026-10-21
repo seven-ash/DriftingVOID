@@ -3326,7 +3326,11 @@ impl App {
         // cached frames (playback cache): a line along the ruler's foot
         let cfps = self.pcache.fps().max(1.0);
         for (a, b) in self.pcache.ranges() {
-            let (x0, x1) = (x_of(a as f64 / cfps), x_of((b + 1) as f64 / cfps));
+            // frames past a shortened end are kept (for when it grows back)
+            if a as f64 / cfps >= dur {
+                continue;
+            }
+            let (x0, x1) = (x_of(a as f64 / cfps), x_of(((b + 1) as f64 / cfps).min(dur)));
             p.rect_filled(Rect::from_min_max(pos2(x0, rect.top() + ruler_h - 2.0), pos2(x1.max(x0 + 1.0), rect.top() + ruler_h)), 0.0, ACCENT.gamma_multiply(0.8));
         }
         let mut t = 0.0;
@@ -9409,7 +9413,9 @@ impl App {
             self.pcache.sync(self.doc_rev, &self.doc, target);
         }
         let playing = self.tl_play.is_some() && self.tl_arm.is_none();
-        let idle = !playing && !editing && self.doc.timeline.on && self.now - self.last_input > 1.5;
+        // around the playhead after 1.5 s without input, or at once while a
+        // camera or export frame has stayed set up for 2 s (it won't move)
+        let idle = !playing && !editing && self.doc.timeline.on && (self.now - self.last_input > 1.5 || self.pcache.region_settled(2.0));
         if self.doc.timeline.on {
             self.pcache.pump(&ctx, playing, idle, self.doc.timeline.time);
         }
@@ -9486,7 +9492,17 @@ impl App {
                         if self.now - st.0 >= 2.0 {
                             let g = crate::gpu::take_stats();
                             let n = st.1.max(1) as f64;
-                            eprintln!("GPU canvas: {} frames in {:.1} s, {:.2} ms each, worst {:.1} (CPU side): prepare {:.2}, rasterize {:.2}, encode {:.2}", st.1, self.now - st.0, st.2 / n, st.3, g[0] / n, g[1] / n, g[2] / n);
+                            eprintln!(
+                                "GPU canvas: {} frames in {:.1} s, {:.2} ms each, worst {:.1} (CPU side): prepare {:.2}, rasterize {:.2}, encode {:.2}; cached {}",
+                                st.1,
+                                self.now - st.0,
+                                st.2 / n,
+                                st.3,
+                                g[0] / n,
+                                g[1] / n,
+                                g[2] / n,
+                                self.pcache.ranges().iter().map(|(a, b)| b - a + 1).sum::<u64>()
+                            );
                             *st = (self.now, 0, 0.0, 0.0);
                         }
                     }

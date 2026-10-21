@@ -89,6 +89,9 @@ pub struct PlayCache {
     pub off: bool,
     /// Frames the worker has made (`DV_TIMING`).
     pub made: u64,
+    /// When what is filmed last changed (target, frame size, spaces,
+    /// cameras, export frame).
+    since: std::time::Instant,
 }
 
 impl PlayCache {
@@ -112,6 +115,7 @@ impl PlayCache {
             shown: None,
             off: std::env::var_os("DV_NO_CACHE").is_some(),
             made: 0,
+            since: std::time::Instant::now(),
         }
     }
 
@@ -133,6 +137,7 @@ impl PlayCache {
         if self.target != Some(target) || self.fps != tl.fps {
             self.target = Some(target);
             self.fps = tl.fps;
+            self.since = std::time::Instant::now();
             self.clear();
             // the size comes with the document pass below
             self.doc_rev = None;
@@ -146,12 +151,14 @@ impl PlayCache {
         let size = frame_size(committed, target);
         if size != self.size {
             self.size = size;
+            self.since = std::time::Instant::now();
             self.clear();
         }
         let (revs, global) = fingerprints(committed);
         if global != self.global {
             self.global = global;
             self.revs = revs;
+            self.since = std::time::Instant::now();
             self.clear();
             return;
         }
@@ -316,6 +323,13 @@ impl PlayCache {
             }
         }
         out
+    }
+
+    /// A camera or the export frame has been filmed unchanged for `secs`: it
+    /// is set up, so frames may be made while the user works elsewhere (Ash,
+    /// 10-21). The canvas view never counts (every pan or zoom loses it).
+    pub fn region_settled(&self, secs: f64) -> bool {
+        matches!(self.target, Some(Target::Camera(_) | Target::Frame(_))) && self.since.elapsed().as_secs_f64() >= secs
     }
 
     pub fn fps(&self) -> f64 {
@@ -544,6 +558,14 @@ mod tests {
         assert_eq!(c.size(), (1080, 1920));
         filled(&mut c, 5);
         c.sync(5, &doc, Target::Frame(fr));
+        assert_eq!(c.frames.len(), 5);
+        // the timeline made shorter or longer: what is cached stays (frames
+        // past a shorter end too, for when it grows back)
+        doc.timeline.duration = 0.3;
+        c.sync(7, &doc, Target::Frame(fr));
+        assert_eq!(c.frames.len(), 5);
+        doc.timeline.duration = 20.0;
+        c.sync(8, &doc, Target::Frame(fr));
         assert_eq!(c.frames.len(), 5);
         let big = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(7680.0, 4320.0));
         c.sync(6, &doc, Target::Frame(big));
