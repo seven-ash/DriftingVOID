@@ -392,7 +392,9 @@ fn budget() -> (usize, bool) {
         let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
         m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
         if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 {
-            return ((m.ullTotalPhys as f64 * 0.75) as usize, m.ullAvailPhys < (1u64 << 30));
+            // decoded video frames (`vcache`) share the 75 %
+            let cap = (m.ullTotalPhys as f64 * 0.75) as usize;
+            return (cap.saturating_sub(crate::vcache::bytes()), m.ullAvailPhys < (1u64 << 30));
         }
     }
     (4 << 30, false)

@@ -1,0 +1,219 @@
+//! Decoded video frames kept per clip (Ash, 10-21): a background decoder fills
+//! the part of each video the timeline shows, at preview size (long side 1920),
+//! as NV12, whatever is being filmed. Scrubbing and starting playback then take
+//! frames from memory instead of a fresh ffmpeg seek each (0.4–0.6 s for an FHD
+//! clip). Up to 30 % of physical memory; the playback cache's share shrinks by
+//! what this holds.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::doc::Nv12;
+
+/// What one video layer needs: its file, frame rate, preview size and the
+/// frames (first, last) its clip shows.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Want {
+    pub path: String,
+    pub fps: f64,
+    pub size: (u32, u32),
+    pub range: (u64, u64),
+}
+
+#[derive(Default)]
+struct Clip {
+    fps: f64,
+    size: (u32, u32),
+    frames: BTreeMap<u64, Arc<Nv12>>,
+}
+
+#[derive(Default)]
+struct State {
+    clips: HashMap<String, Clip>,
+    wants: Vec<Want>,
+    /// Bumped when the wants change (the decoder starts over).
+    epoch: u64,
+    bytes: usize,
+    started: bool,
+    /// Per clip, the frame where decoding gave nothing (past the file's end
+    /// or a broken stream): not tried again from there.
+    dead: HashMap<String, u64>,
+}
+
+fn state() -> &'static Mutex<State> {
+    static S: OnceLock<Mutex<State>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+fn cap() -> usize {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 {
+            // and never while the system has less than 1.5 GB free
+            if m.ullAvailPhys < (3u64 << 29) {
+                return 0;
+            }
+            return (m.ullTotalPhys as f64 * 0.3) as usize;
+        }
+    }
+    1 << 30
+}
+
+/// The clips to keep and fill (called every frame; cheap when unchanged).
+/// Clips no longer wanted are dropped; a clip wanted at another size or rate
+/// starts over.
+pub fn want(list: Vec<Want>) {
+    if std::env::var_os("DV_NO_VCACHE").is_some() {
+        return;
+    }
+    let mut s = state().lock().unwrap();
+    if s.wants == list {
+        return;
+    }
+    s.clips.retain(|p, c| list.iter().any(|w| &w.path == p && w.size == c.size && w.fps == c.fps));
+    s.bytes = s.clips.values().flat_map(|c| c.frames.values()).map(|f| f.data.len()).sum();
+    s.wants = list;
+    s.epoch += 1;
+    if !s.started {
+        s.started = true;
+        std::thread::spawn(filler);
+    }
+}
+
+/// The frame at video time `t` of `path`, when it is held.
+pub fn get(path: &str, t: f64) -> Option<Arc<Nv12>> {
+    let s = state().lock().unwrap();
+    let c = s.clips.get(path)?;
+    c.frames.get(&((t * c.fps).round().max(0.0) as u64)).cloned()
+}
+
+/// Whether frames `t0`..`t0 + secs` of `path` are all held.
+pub fn holds(path: &str, t0: f64, secs: f64) -> bool {
+    let s = state().lock().unwrap();
+    let Some(c) = s.clips.get(path) else { return false };
+    let a = (t0 * c.fps).round().max(0.0) as u64;
+    let b = ((t0 + secs) * c.fps).round() as u64;
+    (a..=b).all(|i| c.frames.contains_key(&i))
+}
+
+/// Memory held, bytes.
+pub fn bytes() -> usize {
+    state().lock().map_or(0, |s| s.bytes)
+}
+
+/// Frames held (for `DV_TIMING`).
+pub fn held() -> usize {
+    state().lock().map_or(0, |s| s.clips.values().map(|c| c.frames.len()).sum())
+}
+
+/// Scrubs served from memory and by a seek (for `DV_TIMING`).
+pub static SCRUBS: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// The decoder: the first frame some clip wants and lacks, decoded on from
+/// there in one ffmpeg stream until the clip's range ends, a frame already held
+/// comes up, the wants change or memory runs out.
+fn filler() {
+    let hwaccel = if crate::gpu::with_gpu(|g| g.vendor) == Some(0x10de) { "cuda" } else { "auto" };
+    loop {
+        let next = {
+            let mut s = state().lock().unwrap();
+            let epoch = s.epoch;
+            let room = s.bytes < cap();
+            let mut pick = None;
+            if room {
+                for w in s.wants.clone() {
+                    if s.dead.get(&w.path).is_some_and(|&d| d <= w.range.0) {
+                        continue;
+                    }
+                    let end = s.dead.get(&w.path).map_or(w.range.1, |d| w.range.1.min(d.saturating_sub(1)));
+                    let c = s.clips.entry(w.path.clone()).or_insert_with(|| Clip { fps: w.fps, size: w.size, frames: BTreeMap::new() });
+                    if let Some(i) = (w.range.0..=end).find(|i| !c.frames.contains_key(i)) {
+                        pick = Some((w, i, epoch));
+                        break;
+                    }
+                }
+            }
+            pick
+        };
+        let Some((w, first, epoch)) = next else {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        };
+        let Ok(player) = crate::video::Player::start_nv12(std::path::Path::new(&w.path), first as f64 / w.fps, w.fps, w.size, hwaccel) else {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            continue;
+        };
+        let mut idx = first;
+        let mut got = 0;
+        while let Ok((_, data)) = player.rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            let mut s = state().lock().unwrap();
+            if s.epoch != epoch || s.bytes >= cap() {
+                break;
+            }
+            let n = data.len();
+            let c = s.clips.entry(w.path.clone()).or_default();
+            if c.frames.contains_key(&idx) {
+                break;
+            }
+            c.frames.insert(idx, Arc::new(Nv12 { w: w.size.0, h: w.size.1, data }));
+            s.bytes += n;
+            got += 1;
+            idx += 1;
+            if idx > w.range.1 {
+                break;
+            }
+        }
+        if got == 0 {
+            let mut s = state().lock().unwrap();
+            if s.epoch == epoch {
+                let d = s.dead.entry(w.path.clone()).or_insert(u64::MAX);
+                *d = (*d).min(first);
+            }
+        }
+    }
+}
+
+/// NV12 to RGBA on every core (a cached frame shown on the canvas).
+pub fn to_rgba(f: &Nv12) -> image::RgbaImage {
+    let (w, h) = (f.w as usize, f.h as usize);
+    let (ys, uvs) = f.data.split_at(w * h);
+    let mut out = vec![255u8; w * h * 4];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let rows = h.div_ceil(threads).max(2) / 2 * 2;
+    std::thread::scope(|sc| {
+        for (k, part) in out.chunks_mut(rows * w * 4).enumerate() {
+            sc.spawn(move || {
+                for (r, row) in part.chunks_mut(w * 4).enumerate() {
+                    let y = k * rows + r;
+                    for x in 0..w {
+                        let yy = (ys[y * w + x] as f32 - 16.0) / 219.0;
+                        let i = (y / 2) * w + (x / 2) * 2;
+                        let cb = (uvs[i] as f32 - 128.0) / 224.0;
+                        let cr = (uvs[i + 1] as f32 - 128.0) / 224.0;
+                        let rgb = [yy + 1.5748 * cr, yy - 0.187324 * cb - 0.468124 * cr, yy + 1.8556 * cb];
+                        for (c, v) in rgb.into_iter().enumerate() {
+                            row[x * 4 + c] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    image::RgbaImage::from_raw(f.w, f.h, out).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgba_matches_the_reference() {
+        let (w, h) = (6u32, 4u32);
+        let data: Vec<u8> = (0..(w * h + w * h / 2)).map(|i| (i * 37 % 251) as u8).collect();
+        let f = Nv12 { w, h, data };
+        assert_eq!(to_rgba(&f), f.to_rgba());
+    }
+}

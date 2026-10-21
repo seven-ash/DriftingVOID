@@ -237,13 +237,16 @@ impl Grs2d {
 
 /// A video layer that is playing: its decoder and the clock it follows.
 struct Playback {
-    player: crate::video::Player,
+    /// The decoder; None while the frames come from the video cache (`vcache`).
+    player: Option<crate::video::Player>,
     /// Video time and wall time when it started, and the speed.
     t0: f64,
     wall0: f64,
     speed: f64,
     /// A decoded frame that is not due yet.
     pending: Option<(f64, image::RgbaImage)>,
+    /// From the cache: the frame shown last.
+    shown: Option<u64>,
 }
 
 /// A row of the timeline: a layer or a canvas camera.
@@ -2089,6 +2092,17 @@ impl App {
                 vv.time = t;
             }
         }
+        // held in the video cache: at once, no seek
+        let hit = crate::vcache::get(&v.path, t);
+        crate::vcache::SCRUBS[hit.is_none() as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(f) = hit {
+            let g = self.scrub_gen.get(&id).copied().unwrap_or(0) + 1;
+            self.scrub_gen.insert(id, g);
+            self.scrub_shown.insert(id, g);
+            self.scrub_want.remove(&id);
+            self.set_video_frame(id, t, crate::vcache::to_rgba(&f));
+            return;
+        }
         self.scrub_want.insert(id, t);
         self.dispatch_scrubs();
     }
@@ -2132,10 +2146,16 @@ impl App {
                 }
             }
         }
+        // the next second held in the video cache: played from memory (no
+        // decoder start, no pre-roll wait)
+        if crate::vcache::holds(&v.path, t, 1.0) {
+            self.playing.insert(id, Playback { player: None, t0: t, wall0: self.now, speed: v.speed, pending: None, shown: None });
+            return;
+        }
         let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
         match crate::video::Player::start(std::path::Path::new(&v.path), t, v.info.fps, size) {
             Ok(player) => {
-                self.playing.insert(id, Playback { player, t0: t, wall0: self.now, speed: v.speed, pending: None });
+                self.playing.insert(id, Playback { player: Some(player), t0: t, wall0: self.now, speed: v.speed, pending: None, shown: None });
             }
             Err(e) => self.status = format!("재생 실패: {e}"),
         }
@@ -2174,7 +2194,34 @@ impl App {
         }
     }
 
+    /// The video cache's list: every video layer, the frames its clip shows
+    /// (the whole video with the timeline off).
+    fn video_cache_wants(&self) -> Vec<crate::vcache::Want> {
+        let mut out: Vec<crate::vcache::Want> = Vec::new();
+        for l in &self.doc.layers {
+            let LayerKind::Image(im) = &l.kind else { continue };
+            let Some(v) = &im.video else { continue };
+            let fps = v.info.fps.max(1.0);
+            let last = ((v.info.duration - v.info.frame_len()).max(0.0) * fps).floor() as u64;
+            let mut range = (0, last);
+            if self.doc.timeline.on {
+                if let Some((span, media)) = self.video_clip(l.id) {
+                    let speed = v.speed.max(1e-3);
+                    let a = ((span[0] - media[0]) * speed).clamp(0.0, v.info.duration);
+                    let b = ((span[1] - media[0]) * speed).clamp(0.0, v.info.duration);
+                    range = (((a * fps).floor() as u64).min(last), ((b * fps).ceil() as u64).min(last));
+                }
+            }
+            let w = crate::vcache::Want { path: v.path.clone(), fps: v.info.fps, size: v.info.preview_size(crate::video::PREVIEW_SIDE), range };
+            if !out.iter().any(|o| o.path == w.path) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
     fn tick_videos(&mut self, ctx: &egui::Context) {
+        crate::vcache::want(self.video_cache_wants());
         while let Ok((id, g, t, img)) = self.scrub_rx.try_recv() {
             self.scrub_busy = self.scrub_busy.saturating_sub(1);
             // any answer newer than what is shown goes up at once (dragging shows
@@ -2206,11 +2253,55 @@ impl App {
             let now = self.now;
             let pb = self.playing.get_mut(&id).unwrap();
             let clock = pb.t0 + (now - pb.wall0) * pb.speed;
+            if pb.player.is_none() {
+                // from the video cache; where it runs out, a decoder takes over
+                let fps = v.info.fps.max(1.0);
+                let idx = (clock.min(v.info.duration - v.info.frame_len()).max(0.0) * fps).floor() as u64;
+                let end = clock >= v.info.duration - v.info.frame_len() * 0.5;
+                if !end && pb.shown != Some(idx) {
+                    match crate::vcache::get(&v.path, idx as f64 / fps) {
+                        Some(f) => {
+                            pb.shown = Some(idx);
+                            if let Some(st) = self.play_stats.as_mut() {
+                                st.1 += 1;
+                            }
+                            self.set_video_frame(id, idx as f64 / fps, crate::vcache::to_rgba(&f));
+                        }
+                        None => {
+                            let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
+                            if let Ok(player) = crate::video::Player::start(std::path::Path::new(&v.path), clock, v.info.fps, size) {
+                                let pb = self.playing.get_mut(&id).unwrap();
+                                pb.player = Some(player);
+                                pb.t0 = clock;
+                                pb.wall0 = now;
+                            }
+                        }
+                    }
+                }
+                if end {
+                    self.playing.remove(&id);
+                    if self.tl_play.is_none() && self.playing.is_empty() {
+                        if let Some(o) = &self.audio_out {
+                            o.stop();
+                        }
+                    }
+                    if v.looping {
+                        if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                            if let Some(vv) = im.video.as_mut() {
+                                vv.time = 0.0;
+                            }
+                        }
+                        self.video_play(id, true);
+                    }
+                }
+                continue;
+            }
+            let player = pb.player.as_ref().unwrap();
             let mut show = None;
             let mut drained = false;
             loop {
                 if pb.pending.is_none() {
-                    match pb.player.rx.try_recv() {
+                    match player.rx.try_recv() {
                         Ok(f) => pb.pending = Some(f),
                         Err(_) => {
                             drained = true;
@@ -2229,7 +2320,7 @@ impl App {
                     break;
                 }
             }
-            let done = drained && pb.player.ended.load(std::sync::atomic::Ordering::Relaxed);
+            let done = drained && player.ended.load(std::sync::atomic::Ordering::Relaxed);
             if let Some((t, img)) = show {
                 if let Some(st) = self.play_stats.as_mut() {
                     st.1 += 1;
@@ -2368,7 +2459,7 @@ impl App {
             match self.warm.remove(&id) {
                 Some((wt, player)) if (wt - vt).abs() <= fl * 0.5 => {
                     let speed = self.video_of(id).map_or(1.0, |v| v.speed);
-                    self.playing.insert(id, Playback { player, t0: wt, wall0: self.now, speed, pending: None });
+                    self.playing.insert(id, Playback { player: Some(player), t0: wt, wall0: self.now, speed, pending: None, shown: None });
                 }
                 _ => self.video_play(id, true),
             }
@@ -2417,10 +2508,12 @@ impl App {
             // every playing video needs a frame in hand (at most 2 s of waiting)
             let mut ready = true;
             for pb in self.playing.values_mut() {
+                // from the video cache: ready at once
+                let Some(player) = &pb.player else { continue };
                 if pb.pending.is_none() {
-                    pb.pending = pb.player.rx.try_recv().ok();
+                    pb.pending = player.rx.try_recv().ok();
                 }
-                ready &= pb.pending.is_some() || pb.player.ended.load(std::sync::atomic::Ordering::Relaxed);
+                ready &= pb.pending.is_some() || player.ended.load(std::sync::atomic::Ordering::Relaxed);
             }
             if !ready && self.now - armed < 2.0 {
                 self.tl_play = Some((t0, self.now));
@@ -9364,6 +9457,16 @@ impl App {
 
         // DV_ZOOM_SWEEP / DV_PAN_SWEEP: the view zooms in and out, or pans, by
         // itself every frame (measuring the canvas without input)
+        // DV_SCRUB_SWEEP: after 4 s the playhead jumps about every frame (as a
+        // fast scrub), to measure the video cache
+        if std::env::var_os("DV_SCRUB_SWEEP").is_some() {
+            ctx.request_repaint();
+            if self.now > 4.0 && self.tl_play.is_none() {
+                let k = (self.now * 60.0) as u64;
+                let t = ((k * 7919) % 1000) as f64 / 1000.0 * self.doc.timeline.duration;
+                self.set_time(t);
+            }
+        }
         if std::env::var_os("DV_ZOOM_SWEEP").is_some() || std::env::var_os("DV_PAN_SWEEP").is_some() {
             ctx.request_repaint();
         }
@@ -9502,6 +9605,14 @@ impl App {
                                 g[1] / n,
                                 g[2] / n,
                                 self.pcache.ranges().iter().map(|(a, b)| b - a + 1).sum::<u64>()
+                            );
+                            let sc = &crate::vcache::SCRUBS;
+                            eprintln!(
+                                "video cache: {} frames, {} MB; scrubs from memory {}, by seek {}",
+                                crate::vcache::held(),
+                                crate::vcache::bytes() >> 20,
+                                sc[0].load(std::sync::atomic::Ordering::Relaxed),
+                                sc[1].load(std::sync::atomic::Ordering::Relaxed)
                             );
                             *st = (self.now, 0, 0.0, 0.0);
                         }
