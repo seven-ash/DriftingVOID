@@ -2222,6 +2222,10 @@ impl App {
 
     fn tick_videos(&mut self, ctx: &egui::Context) {
         crate::vcache::want(self.video_cache_wants());
+        if crate::vcache::busy() && self.doc.timeline.on {
+            // the clip bars show the cache filling
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         while let Ok((id, g, t, img)) = self.scrub_rx.try_recv() {
             self.scrub_busy = self.scrub_busy.saturating_sub(1);
             // any answer newer than what is shown goes up at once (dragging shows
@@ -3500,7 +3504,23 @@ impl App {
                 p.rect_filled(bar, 3.0, VIDEO_COLOR.gamma_multiply(0.12));
                 let live = Rect::from_min_max(pos2(x_of(m0.max(s0)), bar.top()), pos2(x_of(m1.min(e0)), bar.bottom()));
                 if live.width() > 0.0 {
-                    p.rect_filled(live, 3.0, VIDEO_COLOR.gamma_multiply(0.3));
+                    // a graph of the video frame cache: dark where frames are
+                    // still to be decoded, the clip's colour where they are held
+                    p.rect_filled(live, 3.0, VIDEO_COLOR.gamma_multiply(0.09));
+                    if let TlRow::Layer(id) = row {
+                        if let Some(v) = self.video_of(*id) {
+                            let (held, fps) = crate::vcache::ranges(&v.path);
+                            let speed = v.speed.max(1e-3);
+                            let pc = p.with_clip_rect(live.intersect(rect));
+                            for (a, b) in held {
+                                let (ta, tb) = (m0 + a as f64 / fps / speed, m0 + (b + 1) as f64 / fps / speed);
+                                let seg = Rect::from_min_max(pos2(x_of(ta).max(live.left()), live.top()), pos2(x_of(tb).min(live.right()), live.bottom()));
+                                if seg.width() > 0.0 {
+                                    pc.rect_filled(seg, 3.0, VIDEO_COLOR.gamma_multiply(0.3));
+                                }
+                            }
+                        }
+                    }
                 }
                 for (a, b) in [(s0, m0.min(e0)), (m1.max(s0), e0)] {
                     if b <= a {

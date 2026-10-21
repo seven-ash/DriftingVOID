@@ -99,6 +99,27 @@ pub fn holds(path: &str, t0: f64, secs: f64) -> bool {
     (a..=b).all(|i| c.frames.contains_key(&i))
 }
 
+/// Held frames of `path` as ranges (first, last frame), with the clip's rate.
+pub fn ranges(path: &str) -> (Vec<(u64, u64)>, f64) {
+    let s = state().lock().unwrap();
+    let Some(c) = s.clips.get(path) else { return (Vec::new(), 1.0) };
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for &i in c.frames.keys() {
+        match out.last_mut() {
+            Some(r) if r.1 + 1 == i => r.1 = i,
+            _ => out.push((i, i)),
+        }
+    }
+    (out, c.fps.max(1.0))
+}
+
+/// The decoder is filling (the timeline's clip bars change).
+pub fn busy() -> bool {
+    BUSY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Memory held, bytes.
 pub fn bytes() -> usize {
     state().lock().map_or(0, |s| s.bytes)
@@ -138,6 +159,7 @@ fn filler() {
             }
             pick
         };
+        BUSY.store(next.is_some(), std::sync::atomic::Ordering::Relaxed);
         let Some((w, first, epoch)) = next else {
             std::thread::sleep(std::time::Duration::from_millis(200));
             continue;
