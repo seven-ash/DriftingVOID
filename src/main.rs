@@ -79,8 +79,25 @@ fn main() -> eframe::Result {
                     required_limits: eframe::wgpu::Limits { max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d, ..eframe::wgpu::Limits::default() },
                     ..Default::default()
                 }),
+                instance_descriptor: {
+                    let mut d = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle().instance_descriptor;
+                    d.backends = gpu::backends();
+                    d
+                },
                 ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
             }),
+            // DV_NO_VSYNC: frames as fast as they come; DV_LATENCY=n: frames
+            // queued ahead (frame-rate checks)
+            surface: eframe::egui_wgpu::SurfaceConfig {
+                present_mode: match std::env::var("DV_PRESENT").as_deref() {
+                    Ok("mailbox") => eframe::wgpu::PresentMode::Mailbox,
+                    Ok("immediate") => eframe::wgpu::PresentMode::Immediate,
+                    Ok("fifo") => eframe::wgpu::PresentMode::Fifo,
+                    _ if std::env::var_os("DV_NO_VSYNC").is_some() => eframe::wgpu::PresentMode::AutoNoVsync,
+                    _ => eframe::wgpu::PresentMode::AutoVsync,
+                },
+                desired_maximum_frame_latency: Some(std::env::var("DV_LATENCY").ok().and_then(|v| v.parse().ok()).unwrap_or(1)),
+            },
             ..Default::default()
         },
         ..Default::default()

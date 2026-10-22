@@ -232,9 +232,19 @@ fn crop_of(im: &crate::doc::ImageLayer) -> Crop {
     Crop { k, px, w, h, key }
 }
 
+/// The graphics APIs to use: DX12 on Windows (Vulkan's vsync there presents
+/// every other refresh in a window: 82.5 fps on a 165 Hz screen, measured
+/// 10-22), the platform's own elsewhere; `WGPU_BACKEND` overrides.
+pub fn backends() -> wgpu::Backends {
+    wgpu::Backends::from_env().unwrap_or(if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::PRIMARY })
+}
+
 /// Called once at start when eframe runs on wgpu.
 pub fn install(rs: &eframe::egui_wgpu::RenderState) {
     let info = rs.adapter.get_info();
+    if std::env::var_os("DV_TIMING").is_some() {
+        eprintln!("window GPU: {} ({:?})", info.name, info.backend);
+    }
     let max_side = rs.device.limits().max_texture_dimension_2d;
     if let Ok(mut s) = SHARED.lock() {
         *s = Some(Shared { device: rs.device.clone(), queue: rs.queue.clone(), max_side, adapter: info.name, vendor: info.vendor });
@@ -322,7 +332,9 @@ impl Gpu {
         if let Some(s) = SHARED.lock().ok().and_then(|s| s.clone()) {
             return Ok(Gpu::build(s.device, s.queue, s.max_side, s.adapter, s.vendor));
         }
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = backends();
+        let instance = wgpu::Instance::new(desc);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
