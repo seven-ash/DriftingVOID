@@ -1044,15 +1044,16 @@ fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<
 }
 
 /// Seconds without a pen sample before a stroke counts as resting and the
-/// brush catches up with the pen.
-const STROKE_REST: f64 = 0.035;
+/// brush catches up with the pen (a hesitation at a zigzag's corner stays a
+/// curve; a real pause brings the brush to the pen).
+const STROKE_REST: f64 = 0.1;
 
 /// Screen points between the points of a drawn curve (`vector::Curve`).
 const CURVE_STEP: f32 = 1.5;
 
-/// Screen points of smoothing distance at 손떨림 보정 1 (the default 0.4:
-/// 40 px, σ 13; Krita's default distance is 50).
-const SMOOTH_PX: f32 = 100.0;
+/// Screen points of smoothing length at 손떨림 보정 1 (the default 0.4: the
+/// brush trails the pen by about 24 px).
+const SMOOTH_PX: f32 = 60.0;
 
 const SLOT_CANVAS: u8 = 0;
 const SLOT_3D: u8 = 1;
@@ -6651,7 +6652,7 @@ impl App {
         }
     }
 
-    /// The smoothing distance for a new stroke, in canvas units.
+    /// The smoothing length for a new stroke, in canvas units.
     fn smooth_distance(&self) -> f32 {
         self.s.smoothing.clamp(0.0, 0.95) * SMOOTH_PX / self.zoom
     }

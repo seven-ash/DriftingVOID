@@ -184,187 +184,146 @@ fn capsule(p0: Pos2, r0: f32, p1: Pos2, r1: f32, seg_scale: f32) -> Vec<Pos2> {
     pts
 }
 
-/// The pointer's path, smoothed and joined by curves as Krita's freehand
-/// helper does (`kis_tool_freehand_helper.cpp`, Ash 10-22):
+/// The brush's path from the pen's samples, as Photoshop's smoothing behaves
+/// (Ash, 10-22):
 ///
-/// 1. Weighted smoothing: each sample becomes the Gaussian-weighted mean of
-///    the (already smoothed) samples before it, weighted by arc length back
-///    along the stroke (σ = a third of the smoothing distance), pressure
-///    too. Jitter is averaged away before anything is curved.
-/// 2. Each piece between two smoothed points is a cubic Bézier whose
-///    tangents are the central differences of its neighbours; the control
-///    points stay within the chord (where the tangent rays meet, or half the
-///    chord), and the slower end is pulled less (Krita's velocity
-///    similarity). So a curve never overshoots or bends against itself.
+/// 1. The pen's path: a quadratic B-spline through the samples (each piece
+///    runs from one midpoint between samples to the next, bent by the sample
+///    between). It stays within its samples' hull: no overshoot, no bend
+///    against itself.
+/// 2. The brush follows a point running along that path with exponential
+///    smoothing over the distance travelled (`length`: 1/e of the way per
+///    that much path). It only ever moves part of the way towards where it is
+///    pulled, so it never overshoots: a zigzag comes out as a wave, a jitter
+///    as a calm line, and it trails the pen by about `length`.
+/// 3. When the pen rests (`catch_up`), the path is completed up to the pen
+///    and the brush closes on it over time; when the pen moves on, the path
+///    carries on from there, so the brush never turns back.
 ///
-/// A piece is made once the sample after it has arrived, so the stroke
-/// trails the pen by one sample; `finish` draws the last piece.
+/// Points come out about `step` apart. `finish` ends the stroke where the
+/// brush has got to (after the path's last stretch to the pen).
 pub struct Curve {
-    /// Raw samples and the arc length from each to the next one.
-    raw: Vec<([f32; 3], f32)>,
-    sigma: f32,
-    /// The last three smoothed points (older, previous, current).
-    q: Vec<[f32; 3]>,
-    /// Tangent at the oldest of `q` (None until the first piece).
-    t_older: Option<Vec2>,
-    last_raw: [f32; 3],
+    /// Smoothing length (0: the brush is on the path).
+    length: f32,
+    /// The brush (x, y, pressure) and the last point given out.
+    brush: [f32; 3],
+    out_last: [f32; 3],
+    /// The path's pending piece: from `start`, bent by `ctrl` (the latest
+    /// sample), not drawn until the next sample sets where it ends.
+    start: [f32; 3],
+    ctrl: [f32; 3],
+    /// Where the path has been fed up to.
+    fed: [f32; 3],
 }
 
 impl Curve {
     /// Starting at `p` (x, y, pressure), already drawn by the caller;
-    /// `distance`: the smoothing distance (0: none), in the points' units.
-    pub fn new(p: [f32; 3], distance: f32) -> Self {
-        Self { raw: vec![(p, 0.0)], sigma: distance / 3.0, q: vec![p], t_older: None, last_raw: p }
+    /// `length`: the smoothing length (0: none), in the points' units.
+    pub fn new(p: [f32; 3], length: f32) -> Self {
+        Self { length: length.max(0.0), brush: p, out_last: p, start: p, ctrl: p, fed: p }
     }
 
-    fn smoothed(&self) -> [f32; 3] {
-        let n = self.raw.len();
-        if self.sigma <= 1e-3 || n < 3 {
-            return self.raw[n - 1].0;
-        }
-        let (mut acc, mut sum, mut d) = ([0.0f32; 3], 0.0f32, 0.0f32);
-        for i in (0..n).rev() {
-            let w = (-(d * d) / (2.0 * self.sigma * self.sigma)).exp();
-            if w < 0.01 {
-                break;
-            }
-            for k in 0..3 {
-                acc[k] += self.raw[i].0[k] * w;
-            }
-            sum += w;
-            if i > 0 {
-                d += self.raw[i - 1].1;
-            }
-        }
-        acc.map(|v| v / sum)
-    }
-
-    /// A new sample: the points of the curve up to the smoothed point before
-    /// it, about `step` apart.
+    /// A new sample: the points the brush has drawn on the way.
     pub fn push(&mut self, p: [f32; 3], step: f32) -> Vec<[f32; 3]> {
-        let l = self.last_raw;
-        let dist = vec2(p[0] - l[0], p[1] - l[1]).length();
-        if dist < 1e-4 {
+        let c = self.ctrl;
+        if (p[0] - c[0]).abs() < 1e-4 && (p[1] - c[1]).abs() < 1e-4 {
             return Vec::new();
         }
-        self.last_raw = p;
-        if let Some(last) = self.raw.last_mut() {
-            last.1 = dist;
-        }
-        self.raw.push((p, 0.0));
-        let s = self.smoothed();
-        // as Krita: the smoothed point stands in for the sample in the history,
-        // so later means build on it (stronger, steadier smoothing)
-        if let Some(last) = self.raw.last_mut() {
-            last.0 = s;
-        }
-        self.advance(s, step)
+        let end = mid(c, p);
+        let mut out = Vec::new();
+        self.feed_quad(self.start, c, end, step, &mut out);
+        self.start = end;
+        self.ctrl = p;
+        out
     }
 
-    /// Moves the curve on to `s`, drawing the piece before it.
-    fn advance(&mut self, s: [f32; 3], step: f32) -> Vec<[f32; 3]> {
-        let prev = *self.q.last().unwrap();
-        if vec2(s[0] - prev[0], s[1] - prev[1]).length() < 1e-4 {
-            return Vec::new();
-        }
-        self.q.push(s);
-        if self.q.len() > 3 {
-            self.q.remove(0);
-        }
-        if self.q.len() < 3 {
-            return Vec::new();
-        }
-        let xy = |p: [f32; 3]| vec2(p[0], p[1]);
-        let (a, b, c) = (self.q[0], self.q[1], self.q[2]);
-        let t_a = self.t_older.unwrap_or(xy(b) - xy(a));
-        let t_b = (xy(c) - xy(a)) * 0.5;
-        self.t_older = Some(t_b);
-        bezier_piece(a, b, t_a, t_b, step)
-    }
-
-    /// The pen rests (no sample this frame): the smoothed point moves `frac`
-    /// of the way on to it, as Photoshop's stroke catch-up does, so the brush
-    /// keeps following and settles under the pen instead of waiting at its
-    /// smoothing distance. False once it is there.
+    /// The pen rests (no sample for a moment): the path is completed up to
+    /// the pen, and the brush moves `frac` of the way on to it (time-based
+    /// catch-up). False once it is there.
     pub fn catch_up(&mut self, frac: f32, step: f32) -> (Vec<[f32; 3]>, bool) {
-        let s = self.raw.last().map_or(self.last_raw, |r| r.0);
-        let p = self.last_raw;
-        let gap = vec2(p[0] - s[0], p[1] - s[1]).length();
+        let mut out = Vec::new();
+        self.complete(step, &mut out);
+        let p = self.ctrl;
+        let gap = dist(self.brush, p);
         if gap < step * 0.3 {
-            return (Vec::new(), false);
+            // there: settled on the pen
+            self.brush = p;
+            if dist(self.out_last, p) > 1e-3 {
+                self.out_last = p;
+                out.push(p);
+            }
+            return (out, false);
         }
         let f = frac.clamp(0.0, 1.0);
-        let n = [s[0] + (p[0] - s[0]) * f, s[1] + (p[1] - s[1]) * f, s[2] + (p[2] - s[2]) * f];
-        if let Some(last) = self.raw.last_mut() {
-            last.1 = gap * f;
+        let b = self.brush;
+        let n = ((gap * f / (step * 0.5).max(1e-3)).ceil() as usize).clamp(1, 256);
+        for i in 1..=n {
+            let k = f * i as f32 / n as f32;
+            self.brush = lerp3(b, p, k);
+            self.emit(step, &mut out);
         }
-        self.raw.push((n, 0.0));
-        (self.advance(n, step), true)
+        (out, true)
     }
 
-    /// The rest: the last piece, to where the brush is. A stroke ends where
-    /// the brush was when the pen left, not where the pen was (Ash, 10-22:
-    /// joining the two made the end jump when the smoothing left the brush
-    /// behind).
+    /// The end: the path's last stretch to the pen, followed as usual; the
+    /// stroke ends where the brush then is.
     pub fn finish(&mut self, step: f32) -> Vec<[f32; 3]> {
         let mut out = Vec::new();
-        let xy = |p: [f32; 3]| vec2(p[0], p[1]);
-        let n = self.q.len();
-        if n >= 2 {
-            let (a, b) = (self.q[n - 2], self.q[n - 1]);
-            let t_a = self.t_older.filter(|_| n == 3).unwrap_or(xy(b) - xy(a));
-            out.extend(bezier_piece(a, b, t_a, xy(b) - xy(a), step));
+        self.complete(step, &mut out);
+        if dist(self.out_last, self.brush) > 1e-3 {
+            self.out_last = self.brush;
+            out.push(self.brush);
         }
-        self.q.truncate(1);
         out
+    }
+
+    /// The pending piece fed straight on to the latest sample, and the next
+    /// piece starting there (so the path never goes back to a midpoint the
+    /// brush has passed).
+    fn complete(&mut self, step: f32, out: &mut Vec<[f32; 3]>) {
+        if dist(self.start, self.ctrl) > 1e-4 {
+            let (a, c) = (self.start, self.ctrl);
+            self.feed_quad(a, mid(a, c), c, step, out);
+        }
+        self.start = self.ctrl;
+    }
+
+    /// Feeds the quadratic piece a–b–c to the brush in small steps.
+    fn feed_quad(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], step: f32, out: &mut Vec<[f32; 3]>) {
+        // (twice the control polygon over half a step: the parameter's speed
+        // varies along a quadratic, up to double at one end)
+        let len = dist(a, b) + dist(b, c);
+        let n = ((2.0 * len / (step * 0.5).max(1e-3)).ceil() as usize).clamp(1, 8192);
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            let q = [0, 1, 2].map(|k| a[k] * u * u + b[k] * 2.0 * u * t + c[k] * t * t);
+            let ds = dist(self.fed, q);
+            self.fed = q;
+            let w = if self.length <= 1e-4 { 1.0 } else { 1.0 - (-ds / self.length).exp() };
+            self.brush = lerp3(self.brush, q, w);
+            self.emit(step, out);
+        }
+    }
+
+    fn emit(&mut self, step: f32, out: &mut Vec<[f32; 3]>) {
+        if dist(self.out_last, self.brush) >= step {
+            self.out_last = self.brush;
+            out.push(self.brush);
+        }
     }
 }
 
-/// Points from `a` (left out) to `b` (included) on a cubic Bézier leaving `a`
-/// along `ta` and reaching `b` along `tb` (velocities). As Krita: the control
-/// points head for where the tangent rays meet when that lies between the
-/// ends, else half the chord along each tangent; the faster end's control is
-/// pulled 0.8 of the way, the slower one less by their speed ratio (at least
-/// half of it).
-fn bezier_piece(a: [f32; 3], b: [f32; 3], ta: Vec2, tb: Vec2, step: f32) -> Vec<[f32; 3]> {
-    let (pa, pb) = (vec2(a[0], a[1]), vec2(b[0], b[1]));
-    let chord = (pb - pa).length();
-    let n = ((chord * 1.25 / step.max(1e-3)).ceil() as usize).clamp(1, 512);
-    let (va, vb) = (ta.length(), tb.length());
-    let line = |i: usize| {
-        let f = i as f32 / n as f32;
-        let p = pa + (pb - pa) * f;
-        [p.x, p.y, a[2] + (b[2] - a[2]) * f]
-    };
-    if va < 1e-6 || vb < 1e-6 || chord < 1e-6 {
-        return (1..=n).map(line).collect();
-    }
-    let (da, db) = (ta / va, tb / vb);
-    // where the rays a + s·da and b − u·db meet (s, u ≥ 0, within the chord)
-    let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
-    let den = cross(da, -db);
-    let meet = (den.abs() > 1e-6)
-        .then(|| {
-            let d = pb - pa;
-            (cross(d, -db) / den, cross(da, d) / den)
-        })
-        .filter(|&(s, u)| s > 0.0 && u > 0.0 && s < chord && u < chord);
-    let (ca, cb) = match meet {
-        Some((s, u)) => (pa + da * s, pb - db * u),
-        None => (pa + da * chord * 0.5, pb - db * chord * 0.5),
-    };
-    let sim = (va / vb).min(vb / va).max(0.5);
-    let (ka, kb) = if va >= vb { (0.8, 0.8 * sim) } else { (0.8 * sim, 0.8) };
-    let c1 = pa + (ca - pa) * ka;
-    let c2 = pb + (cb - pb) * kb;
-    (1..=n)
-        .map(|i| {
-            let t = i as f32 / n as f32;
-            let u = 1.0 - t;
-            let p = if i == n { pb } else { pa * (u * u * u) + c1 * (3.0 * u * u * t) + c2 * (3.0 * u * t * t) + pb * (t * t * t) };
-            [p.x, p.y, a[2] + (b[2] - a[2]) * t]
-        })
-        .collect()
+fn mid(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    lerp3(a, b, 0.5)
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    vec2(a[0] - b[0], a[1] - b[1]).length()
 }
 
 /// Point radius for a given pressure.
@@ -392,16 +351,23 @@ mod tests {
         pts.extend(c.finish(1.5));
         let last = pts.last().unwrap();
         assert!((last[0] - 100.0).abs() < 1e-3 && last[1].abs() < 1e-2, "ends on the last sample");
-        // where both neighbouring samples are known (30°–330°), within a unit
-        // of the circle (joined straight: 3.4)
+        // where both neighbouring samples are known (30°–330°): the spline
+        // passes through the chords' midpoints (3.4 inside, as joined
+        // straight) and between them bends smoothly back towards the samples,
+        // with no corners
         let inner = |p: &&[f32; 3]| {
             let a = p[1].atan2(p[0]).rem_euclid(std::f32::consts::TAU).to_degrees();
             (31.0..329.0).contains(&a)
         };
         let worst = pts.iter().filter(inner).map(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 100.0).abs()).fold(0.0, f32::max);
-        assert!(worst < 1.0, "off the circle by {worst}");
+        assert!(worst < 3.5, "off the circle by {worst}");
+        let head: Vec<f32> = pts.windows(2).map(|w| (w[1][1] - w[0][1]).atan2(w[1][0] - w[0][0])).collect();
+        let wrap = |d: f32| (d + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let corner = head.windows(2).map(|h| wrap(h[1] - h[0]).abs().to_degrees()).fold(0.0f32, f32::max);
+        assert!(corner < 5.0, "a corner of {corner}° (joined straight: 30°)");
         // dense: no gap much wider than the step (the curve is a little longer than its chord)
-        assert!(pts.windows(2).all(|w| (vec2(w[1][0], w[1][1]) - vec2(w[0][0], w[0][1])).length() <= 2.5));
+        let gaps: Vec<(usize, f32)> = pts.windows(2).enumerate().map(|(i, w)| (i, (vec2(w[1][0], w[1][1]) - vec2(w[0][0], w[0][1])).length())).filter(|g| g.1 > 2.5).collect();
+        assert!(gaps.is_empty(), "gaps {gaps:?} of {}", pts.len());
         // pressure rises monotonically with the samples
         assert!(pts.windows(2).all(|w| w[1][2] >= w[0][2] - 1e-6));
         // and the curve always turns the same way (no bends against itself)
@@ -434,6 +400,91 @@ mod tests {
         assert!(gap < 1.0 && frames < 80, "{gap} short after {frames} frames");
         // straight on, never back
         assert!(pts.windows(2).all(|w| w[1][0] >= w[0][0] - 1e-3 && w[1][1].abs() < 1e-3));
+    }
+
+    /// A zigzag dragged in bits, the pen resting at each corner (Ash, 10-22:
+    /// burrs stuck out at the corners). The brush never turns back on itself,
+    /// and without the rests the zigzag comes out as a wave.
+    #[test]
+    fn a_zigzag_with_rests_has_no_burrs() {
+        for rest in [true, false] {
+            let mut c = Curve::new([0.0, 0.0, 0.5], 24.0);
+            let mut pts = vec![[0.0f32, 0.0, 0.5]];
+            let mut p = [0.0f32, 0.0];
+            for k in 0..8 {
+                // 60 px to the right-down, or down, in samples 12 px apart
+                let d = if k % 2 == 0 { [1.0, 0.3] } else { [0.3, 1.0] };
+                for _ in 0..5 {
+                    p = [p[0] + d[0] * 12.0, p[1] + d[1] * 12.0];
+                    pts.extend(c.push([p[0], p[1], 0.5], 1.5));
+                }
+                if rest {
+                    for _ in 0..40 {
+                        pts.extend(c.catch_up(0.15, 1.5).0);
+                    }
+                }
+            }
+            pts.extend(c.finish(1.5));
+            // no step turns back against the one before (a burr turns ~180°)
+            let worst = pts
+                .windows(3)
+                .map(|w| {
+                    let (u, v) = (vec2(w[1][0] - w[0][0], w[1][1] - w[0][1]), vec2(w[2][0] - w[1][0], w[2][1] - w[1][1]));
+                    (u.dot(v) / (u.length() * v.length()).max(1e-9)).clamp(-1.0, 1.0).acos().to_degrees()
+                })
+                .fold(0.0f32, f32::max);
+            assert!(worst < 70.0, "rest {rest}: a step turns {worst}°");
+            // both coordinates only ever grow (the zigzag goes right and down)
+            assert!(pts.windows(2).all(|w| w[1][0] >= w[0][0] - 1e-3 && w[1][1] >= w[0][1] - 1e-3), "rest {rest}: goes back");
+        }
+    }
+
+    /// DV_CURVE_PNG=path: the zigzag (with and without rests) and a jittery
+    /// spiral at three smoothings, drawn for a look.
+    #[test]
+    #[ignore]
+    fn draw_curves() {
+        let Some(path) = std::env::var_os("DV_CURVE_PNG") else { return };
+        let mut pm = tiny_skia::Pixmap::new(900, 420).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(20, 20, 26, 255));
+        let mut seed = 5u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        for (col, length) in [0.0f32, 24.0, 54.0].into_iter().enumerate() {
+            let ox = 20.0 + col as f32 * 300.0;
+            for (row, rest) in [false, true].into_iter().enumerate() {
+                let start = [ox, 20.0 + row as f32 * 200.0, 0.5];
+                let mut c = Curve::new(start, length);
+                let mut pts = vec![start];
+                let mut p = [start[0], start[1]];
+                for k in 0..8 {
+                    let d = if k % 2 == 0 { [1.0, 0.25] } else { [0.25, 1.0] };
+                    for _ in 0..3 {
+                        p = [p[0] + d[0] * 9.0 + rnd() * 2.0, p[1] + d[1] * 9.0 + rnd() * 2.0];
+                        pts.extend(c.push([p[0], p[1], 0.5], 1.5));
+                    }
+                    if rest {
+                        for _ in 0..30 {
+                            pts.extend(c.catch_up(0.15, 1.5).0);
+                        }
+                    }
+                }
+                pts.extend(c.finish(1.5));
+                let mut pb = tiny_skia::PathBuilder::new();
+                pb.move_to(pts[0][0], pts[0][1]);
+                for q in &pts[1..] {
+                    pb.line_to(q[0], q[1]);
+                }
+                let mut paint = tiny_skia::Paint::default();
+                paint.set_color_rgba8(40, 90, 230, 255);
+                paint.anti_alias = true;
+                let st = tiny_skia::Stroke { width: 5.0, line_cap: tiny_skia::LineCap::Round, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+                pm.stroke_path(&pb.finish().unwrap(), &paint, &st, tiny_skia::Transform::identity(), None);
+            }
+        }
+        pm.save_png(std::path::Path::new(&path)).unwrap();
     }
 
     /// Quick handwriting as a tablet reports it: samples 6–14 apart (uneven),
@@ -483,7 +534,7 @@ mod tests {
         // over every 15 px (ten steps) the heading turns the arc's way
         let head: Vec<f32> = pts.windows(2).map(|w| (w[1][1] - w[0][1]).atan2(w[1][0] - w[0][0])).collect();
         let wrap = |d: f32| (d + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-        // (the last 45 px follow the pen's own samples to where it left)
+        // (and the end too)
         let body = &head[..head.len() - 30];
         let back = body.windows(11).filter(|h| wrap(h[10] - h[0]) < 0.0).count();
         let tail_worst = head[head.len() - 41..].windows(11).map(|h| wrap(h[10] - h[0]).to_degrees()).fold(f32::MAX, f32::min);
