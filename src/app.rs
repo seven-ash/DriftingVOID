@@ -9664,11 +9664,12 @@ impl App {
                             );
                             let sc = &crate::vcache::SCRUBS;
                             eprintln!(
-                                "video cache: {} frames, {} MB; scrubs from memory {}, by seek {}",
+                                "video cache: {} frames, {} MB; scrubs from memory {}, by seek {}; playback cache frames from it {}",
                                 crate::vcache::held(),
                                 crate::vcache::bytes() >> 20,
                                 sc[0].load(std::sync::atomic::Ordering::Relaxed),
-                                sc[1].load(std::sync::atomic::Ordering::Relaxed)
+                                sc[1].load(std::sync::atomic::Ordering::Relaxed),
+                                sc[2].load(std::sync::atomic::Ordering::Relaxed)
                             );
                             *st = (self.now, 0, 0.0, 0.0);
                         }

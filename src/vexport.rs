@@ -224,11 +224,27 @@ pub(crate) fn feeds_for(doc: &Document, gpu: bool) -> std::collections::HashMap<
 /// `doc` as it shows at `t`: keys applied, walls synced, video layers showing
 /// their frame at `t` (from `feeds`).
 pub(crate) fn pose_at(doc: &Document, t: f64, feeds: &mut std::collections::HashMap<LayerId, Feed>) -> Document {
+    let mut d = pose_keys(doc, t);
+    fill_videos(&mut d, t, feeds, None);
+    d
+}
+
+/// `doc` at `t` with keys applied and walls synced (videos still to fill).
+pub(crate) fn pose_keys(doc: &Document, t: f64) -> Document {
     let mut d = doc.clone();
     d.timeline.on = true;
     d.timeline.time = t;
     crate::anim::evaluate(&mut d);
     crate::persp::sync_walls(&mut d);
+    d
+}
+
+/// Video layers of a posed document showing their frame at `t` from `feeds`.
+/// `preview`: output pixels per canvas unit of a playback cache frame; a frame
+/// the video cache holds is taken instead when it has the pixels the layer
+/// shows at that scale, or is the video's own size (no second decoder for
+/// what is already in memory).
+pub(crate) fn fill_videos(d: &mut Document, t: f64, feeds: &mut std::collections::HashMap<LayerId, Feed>, preview: Option<f32>) {
     let alive: Vec<bool> = d.layers.iter().map(|l| d.alive(l)).collect();
     for (l, alive) in d.layers.iter_mut().zip(alive) {
         if !alive {
@@ -238,6 +254,14 @@ pub(crate) fn pose_at(doc: &Document, t: f64, feeds: &mut std::collections::Hash
         if let LayerKind::Image(im) = &mut l.kind {
             if let (Some(v), Some(feed)) = (im.video.as_ref(), feeds.get_mut(&l.id)) {
                 let vt = crate::anim::video_time(anim.as_ref(), v.speed, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
+                if let Some(k) = preview {
+                    let shown = v.info.width.max(v.info.height) as f32 * im.scale * k;
+                    if let Some(f) = crate::vcache::get(&v.path, vt).filter(|f| f.w >= v.info.width || f.w.max(f.h) as f32 >= shown * 0.98) {
+                        im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([v.info.width, v.info.height]), nv12: Some(f) };
+                        crate::vcache::SCRUBS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                }
                 match feed.frame(vt) {
                     Some(FeedFrame::Rgba(img)) => im.src = ImageSource { id: next_rev(), rgba: img, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None },
                     Some(FeedFrame::Nv12(f)) => im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: Some(f) },
@@ -246,7 +270,6 @@ pub(crate) fn pose_at(doc: &Document, t: f64, feeds: &mut std::collections::Hash
             }
         }
     }
-    d
 }
 
 impl Feed {

@@ -130,8 +130,9 @@ pub fn held() -> usize {
     state().lock().map_or(0, |s| s.clips.values().map(|c| c.frames.len()).sum())
 }
 
-/// Scrubs served from memory and by a seek (for `DV_TIMING`).
-pub static SCRUBS: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+/// Scrubs served from memory and by a seek, and playback cache frames that
+/// took their video frame from here (for `DV_TIMING`).
+pub static SCRUBS: [std::sync::atomic::AtomicU64; 3] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
 /// The decoder: the first frame some clip wants and lacks, decoded on from
 /// there in one ffmpeg stream until the clip's range ends, a frame already held
