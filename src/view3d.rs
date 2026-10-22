@@ -212,7 +212,46 @@ impl Proj {
     pub fn canvas_xf(&self) -> Option<Xf> {
         self.canvas.map(|(k, off)| Xf { min: Pos2::ZERO, pan: off, zoom: k })
     }
+
+    /// This view as a camera whose canvas is the screen (points), for the GPU
+    /// renderer. Orthographic views become a camera far behind with a long
+    /// lens (a thousand times the distance: under a pixel from true
+    /// orthographic on screen).
+    pub fn camera(&self, base: &Camera) -> Camera {
+        let mut c = base.clone();
+        c.r = self.r;
+        c.c = self.c;
+        c.frame = self.rect;
+        match self.ppu {
+            None => {
+                c.f = self.f;
+                c.center = self.eye;
+            }
+            Some(k) => {
+                // `near` is a thousandth of the view distance
+                let dist = self.near * 1e3;
+                let back = dist * 1e3;
+                let fwd = [self.r[2][0], self.r[2][1], self.r[2][2]];
+                c.center = sub(self.eye, scale(fwd, back));
+                c.f = k * (dist + back);
+            }
+        }
+        c
+    }
 }
+
+/// What the 3D view asks the GPU renderer for: the document through the
+/// canvas transform (camera view), or the space's layers through the view's
+/// own camera (free views; `moving` while orbiting or transforming, so 3D
+/// layers keep their pictures until it rests).
+pub enum Layers<'a> {
+    Canvas(&'a Xf),
+    Free { cam: &'a Camera, space: u64, moving: bool },
+}
+
+/// Draws the layers on the GPU into the painter's clip rectangle; false when
+/// there is no GPU renderer (egui meshes are drawn instead).
+pub type GpuLayers<'a> = &'a mut dyn FnMut(&Painter, Layers) -> bool;
 
 /// 1-2-5 step near `x`.
 fn nice(x: f64) -> f64 {
@@ -397,12 +436,14 @@ impl Compass {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>) {
+pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, proj: &Proj, cam: &Camera, cache: &mut TexCache, sel: Option<LayerId>, moving: bool, gpu: GpuLayers) {
     let rect = proj.rect;
     if let Some(xf) = proj.canvas_xf() {
         let fr = xf.rect_w2s(cam.frame);
         let clip = painter.with_clip_rect(fr.intersect(rect));
-        crate::canvas::draw_doc(&clip, ctx, doc, &xf, cache, None);
+        if !gpu(&clip, Layers::Canvas(&xf)) {
+            crate::canvas::draw_doc(&clip, ctx, doc, &xf, cache, None);
+        }
         painter.rect_stroke(fr, 0.0, Stroke::new(1.0, INK_3()), egui::StrokeKind::Outside);
         draw_selection(painter, doc, proj, sel);
         return;
@@ -436,15 +477,19 @@ pub fn draw(painter: &Painter, ctx: &Context, doc: &Document, view: &View3d, pro
         }
     }
 
-    // placed layers, far to near
-    let mut list: Vec<(&Layer, &Placement, f64)> = members(doc, view.space)
-        .filter(|(l, _)| l.visible && l.opacity > 0.0)
-        .map(|(l, p)| (l, p, proj.to_view(p.world_affine().1)[2]))
-        .collect();
-    list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let light = doc.spaces.iter().find(|s| s.id == view.space).and_then(|s| s.light);
-    for (l, pl, _) in list {
-        draw_plane(painter, ctx, l, pl, proj, cache, light.as_ref());
+    // placed layers: on the GPU (masks, groups, blends, depth-tested sides), or
+    // as egui meshes far to near
+    let vc = proj.camera(cam);
+    if !gpu(painter, Layers::Free { cam: &vc, space: view.space, moving }) {
+        let mut list: Vec<(&Layer, &Placement, f64)> = members(doc, view.space)
+            .filter(|(l, _)| l.visible && l.opacity > 0.0)
+            .map(|(l, p)| (l, p, proj.to_view(p.world_affine().1)[2]))
+            .collect();
+        list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let light = doc.spaces.iter().find(|s| s.id == view.space).and_then(|s| s.light);
+        for (l, pl, _) in list {
+            draw_plane(painter, ctx, l, pl, proj, cache, light.as_ref());
+        }
     }
     draw_selection(painter, doc, proj, sel);
     // origin

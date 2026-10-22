@@ -1130,6 +1130,33 @@ pub fn apply_h(h: &M3, p: Pos2) -> Option<Pos2> {
     (v[2] > 1e-12).then(|| pos2((v[0] / v[2]) as f32, (v[1] / v[2]) as f32))
 }
 
+/// A planar polygon through `h`. When part of it lies behind the camera (the
+/// 3D workspace's free views), it is cut where its depth falls under a
+/// thousandth of its farthest corner's; None when none of it is in front.
+pub fn project_poly(h: &M3, pts: &[Pos2]) -> Option<Vec<Pos2>> {
+    let w: Vec<f64> = pts.iter().map(|p| h[2][0] * p.x as f64 + h[2][1] * p.y as f64 + h[2][2]).collect();
+    if w.iter().all(|&x| x > 1e-12) {
+        return pts.iter().map(|p| apply_h(h, *p)).collect();
+    }
+    let far = w.iter().copied().fold(f64::MIN, f64::max);
+    if far <= 1e-12 {
+        return None;
+    }
+    let eps = far * 1e-3;
+    let mut out = Vec::new();
+    for i in 0..pts.len() {
+        let j = (i + 1) % pts.len();
+        if w[i] >= eps {
+            out.push(apply_h(h, pts[i])?);
+        }
+        if (w[i] >= eps) != (w[j] >= eps) {
+            let t = ((eps - w[i]) / (w[j] - w[i])) as f32;
+            out.push(apply_h(h, pts[i] + (pts[j] - pts[i]) * t)?);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// A layer placed in a space. Its 2D content is drawn on a plane; content point `p`
 /// sits at plane coordinates `p − anchor` (pixels, x right, y down).
 ///
@@ -1941,5 +1968,23 @@ mod tests {
             let want = map(before[i]);
             assert!(got.distance(want) < 0.5, "{got:?} vs {want:?}");
         }
+    }
+
+    #[test]
+    fn polygons_behind_the_camera_are_cut() {
+        // depth w = 1 + x: the left part of the square (x < -1) is behind
+        let h = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 1.0]];
+        let sq = [pos2(-3.0, -1.0), pos2(1.0, -1.0), pos2(1.0, 1.0), pos2(-3.0, 1.0)];
+        assert!(sq.iter().any(|p| apply_h(&h, *p).is_none()));
+        let q = project_poly(&h, &sq).unwrap();
+        assert_eq!(q.len(), 4);
+        // the cut edge lies where w is a thousandth of the far corners' (2)
+        assert!(q.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+        assert!(q.iter().any(|p| p.x < -400.0));
+        // all in front: the plain corners
+        let front = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0)];
+        assert_eq!(project_poly(&h, &front).unwrap(), front.iter().map(|p| apply_h(&h, *p).unwrap()).collect::<Vec<_>>());
+        // all behind: nothing
+        assert!(project_poly(&h, &[pos2(-2.0, 0.0), pos2(-3.0, 0.0), pos2(-3.0, 1.0)]).is_none());
     }
 }

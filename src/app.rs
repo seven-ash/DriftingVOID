@@ -1008,10 +1008,11 @@ fn canvas_dim_outside(painter: &egui::Painter, area: Rect, q: [Pos2; 4], col: Co
     painter.with_clip_rect(area).add(Shape::mesh(mesh));
 }
 
-/// The canvas renderer and its target texture (registered with egui).
+/// The canvas renderer and its target textures (registered with egui): the
+/// canvas, the 3D workspace and the hold-Tab peek card (`SLOT_*`).
 struct CanvasGpu {
     gpu: crate::gpu::Gpu,
-    tex: Option<(eframe::wgpu::Texture, egui::TextureId)>,
+    tex: HashMap<u8, (eframe::wgpu::Texture, egui::TextureId)>,
     rs: eframe::egui_wgpu::RenderState,
     /// The last zoom and when it changed.
     zoom: (f32, f64),
@@ -1039,11 +1040,48 @@ fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<
     (c.alpha() > 0).then(|| Color32::from_rgb(c.red(), c.green(), c.blue()))
 }
 
+const SLOT_CANVAS: u8 = 0;
+const SLOT_3D: u8 = 1;
+const SLOT_PEEK: u8 = 2;
+
+/// Layers drawn on the canvas's GPU renderer into the painter's clip
+/// rectangle, through the canvas transform or a 3D view's camera (over the
+/// ground when `ground`, else over what is already painted). False when there
+/// is no GPU renderer.
+fn gpu_layers(cg: &mut Option<CanvasGpu>, slot: u8, painter: &egui::Painter, doc: &Document, what: crate::view3d::Layers, ground: bool) -> bool {
+    use crate::view3d::Layers;
+    // DV_MESH_3D: the old egui meshes in the 3D workspace (comparisons)
+    if std::env::var_os("DV_MESH_3D").is_some() {
+        return false;
+    }
+    let Some(cg) = cg.as_mut() else { return false };
+    let rect = painter.clip_rect();
+    if !rect.is_positive() {
+        return true;
+    }
+    let ppp = painter.ctx().pixels_per_point();
+    let (w, h) = ((rect.width() * ppp).ceil() as u32 + 1, (rect.height() * ppp).ceil() as u32 + 1);
+    let (tex, id) = cg.target(slot, w, h);
+    let (frac, size) = match what {
+        Layers::Canvas(xf) => {
+            let gp = ground.then(|| theme::ground_params(w as f32, h as f32, ppp, xf.zoom));
+            (cg.gpu.render_canvas(doc, xf.s2w(rect.min), xf.zoom * ppp, &tex, gp.as_ref(), false, None), vec2(w as f32, h as f32) / ppp)
+        }
+        Layers::Free { cam, space, moving } => {
+            let vc = crate::scene::ViewCam { space, cam: cam.clone() };
+            (cg.gpu.render_canvas(doc, rect.min, ppp, &tex, None, moving, Some(&vc)), vec2(w as f32, h as f32) / ppp)
+        }
+    };
+    painter.image(id, Rect::from_min_size(rect.min - frac / ppp, size), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+    true
+}
+
 impl CanvasGpu {
-    /// The target texture at `w`×`h` pixels (made, or remade at a new size).
-    fn target(&mut self, w: u32, h: u32) -> (eframe::wgpu::Texture, egui::TextureId) {
+    /// The target texture of `slot` at `w`×`h` pixels (made, or remade at a
+    /// new size).
+    fn target(&mut self, slot: u8, w: u32, h: u32) -> (eframe::wgpu::Texture, egui::TextureId) {
         use eframe::wgpu;
-        if let Some((t, id)) = &self.tex {
+        if let Some((t, id)) = self.tex.get(&slot) {
             if t.width() == w && t.height() == h {
                 return (t.clone(), *id);
             }
@@ -1060,14 +1098,14 @@ impl CanvasGpu {
         });
         let view = t.create_view(&Default::default());
         let mut r = self.rs.renderer.write();
-        let id = match &self.tex {
+        let id = match self.tex.get(&slot) {
             Some((_, id)) => {
                 r.update_egui_texture_from_wgpu_texture(&self.rs.device, &view, wgpu::FilterMode::Nearest, *id);
                 *id
             }
             None => r.register_native_texture(&self.rs.device, &view, wgpu::FilterMode::Nearest),
         };
-        self.tex = Some((t.clone(), id));
+        self.tex.insert(slot, (t.clone(), id));
         (t, id)
     }
 }
@@ -1175,7 +1213,7 @@ impl App {
             cgpu: cc.wgpu_render_state.as_ref().and_then(|rs| {
                 crate::gpu::install(rs);
                 crate::glass_gpu::install(rs, 4);
-                crate::gpu::Gpu::on_window_device().map(|gpu| CanvasGpu { gpu, tex: None, rs: rs.clone(), zoom: (0.0, 0.0) })
+                crate::gpu::Gpu::on_window_device().map(|gpu| CanvasGpu { gpu, tex: HashMap::new(), rs: rs.clone(), zoom: (0.0, 0.0) })
             }),
             doc_rev: 0,
             last_input: 0.0,
@@ -5568,7 +5606,10 @@ impl App {
         self.handle_3d_input(ctx, rect, ui.layer_id(), &proj);
         let view = self.view3d.clone().unwrap();
         let proj = Proj::new(&view, cam, rect);
-        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel);
+        let moving = self.nav3d.is_some() || self.modal3d.is_some();
+        let (cg, doc) = (&mut self.cgpu, &self.doc);
+        let mut gpu = |p: &egui::Painter, what: crate::view3d::Layers| gpu_layers(cg, SLOT_3D, p, doc, what, false);
+        crate::view3d::draw(&painter, ctx, &self.doc, &view, &proj, cam, &mut self.tex, self.sel, moving, &mut gpu);
         // the light compass, turned with this view
         let light = self.doc.spaces.iter().find(|s| s.id == sid).and_then(|s| s.light);
         let compass = crate::view3d::Compass::new(rect);
@@ -5874,8 +5915,10 @@ impl App {
             // the 2D canvas as it is, scaled into the card
             let k = pr.width() / cr.width();
             let xf = Xf { min: pr.min, pan: self.pan * k, zoom: self.zoom * k };
-            theme::draw_ground(&clip, pr, &xf);
-            canvas::draw_doc(&clip, ctx, &self.doc, &xf, &mut self.tex, None);
+            if !gpu_layers(&mut self.cgpu, SLOT_PEEK, &clip, &self.doc, crate::view3d::Layers::Canvas(&xf), true) {
+                theme::draw_ground(&clip, pr, &xf);
+                canvas::draw_doc(&clip, ctx, &self.doc, &xf, &mut self.tex, None);
+            }
         } else if let Some((sid, cam)) = self.ws_space() {
             let view = match &self.view3d {
                 Some(v) if v.space == sid => v.clone(),
@@ -5883,7 +5926,9 @@ impl App {
             };
             theme::draw_void(&clip, pr);
             let proj = crate::view3d::Proj::new(&view, &cam, pr);
-            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel);
+            let (cg, doc) = (&mut self.cgpu, &self.doc);
+            let mut gpu = |p: &egui::Painter, what: crate::view3d::Layers| gpu_layers(cg, SLOT_PEEK, p, doc, what, false);
+            crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel, false, &mut gpu);
         }
         p.rect_stroke(pr, 12.0, Stroke::new(1.5, INK_3()), StrokeKind::Outside);
         p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), INK_2());
@@ -9557,7 +9602,7 @@ impl App {
                     // the document on the GPU renderer, over its ground
                     let t_gpu = std::time::Instant::now();
                     let (w, h) = ((rect.width() * ppp).ceil() as u32 + 1, (rect.height() * ppp).ceil() as u32 + 1);
-                    let (tex, id) = cg.target(w, h);
+                    let (tex, id) = cg.target(SLOT_CANVAS, w, h);
                     let ground = theme::ground_params(w as f32, h as f32, ppp, self.zoom);
                     // cropping: the whole photo faintly under the cropped one
                     let ghost = (self.tool == Tool::Crop).then(|| self.sel).flatten().and_then(|id| {
@@ -9585,7 +9630,7 @@ impl App {
                     if zooming {
                         ctx.request_repaint_after(std::time::Duration::from_millis(260));
                     }
-                    let frac = cg.gpu.render_canvas(ghost.as_ref().unwrap_or(&self.doc), xf.s2w(rect.min), self.zoom * ppp, &tex, &ground, zooming);
+                    let frac = cg.gpu.render_canvas(ghost.as_ref().unwrap_or(&self.doc), xf.s2w(rect.min), self.zoom * ppp, &tex, Some(&ground), zooming, None);
                     let at = Rect::from_min_size(rect.min - frac / ppp, vec2(w as f32, h as f32) / ppp);
                     painter.image(id, at, uv, Color32::WHITE);
                     // the glass cards blur this picture

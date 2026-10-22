@@ -2,7 +2,7 @@
 //! list of draw items in drawing order. Built once per picture and read by the
 //! renderers (the CPU export now; the GPU renderer next), so every decision
 //! about how a layer is drawn (projected, grouped, masked, blended) is made in
-//! one place. See docs/updates/wgpu-renderer.md (phase 1).
+//! one place. See docs/RENDER.md.
 
 use crate::doc::{Blend, Document, Layer, LayerKind};
 use crate::export::MaskMap;
@@ -47,20 +47,38 @@ pub struct Projected {
     pub light: Option<Light>,
 }
 
+/// A camera of the 3D workspace standing in for a space's own: only that
+/// space's layers are drawn, through it, unclipped (free views).
+pub struct ViewCam {
+    pub space: u64,
+    pub cam: Camera,
+}
+
 /// The document at its current time (`anim::evaluate` has posed it).
 pub fn build(doc: &Document) -> Scene {
-    let cams = crate::persp::cameras(&doc.spaces);
+    build_view(doc, None)
+}
+
+/// As `build`, or through a view camera.
+pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
+    let cams = match view {
+        Some(v) => std::iter::once((v.space, v.cam.clone())).collect(),
+        None => crate::persp::cameras(&doc.spaces),
+    };
     let mut items = Vec::new();
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
         if layer.mask_of.is_some() {
+            continue;
+        }
+        if view.is_some_and(|v| layer.place.as_ref().is_none_or(|pl| pl.space != v.space)) {
             continue;
         }
         let timed = crate::anim::layer_at_time(doc, layer).unwrap_or_else(|| layer.clone());
         let Some(bounds) = timed.shown_bounds(&cams) else { continue };
         let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
         let draw = match mask {
-            Some((mask, map)) => masked(classify(doc, &cams, timed), mask, map),
-            None => classify(doc, &cams, timed),
+            Some((mask, map)) => masked(classify(doc, &cams, timed, view.is_some()), mask, map),
+            None => classify(doc, &cams, timed, view.is_some()),
         };
         items.push(Item { bounds, draw });
     }
@@ -85,7 +103,7 @@ fn masked(d: Draw, mask: Layer, map: Option<MaskMap>) -> Draw {
     }
 }
 
-fn classify(doc: &Document, cams: &std::collections::HashMap<u64, Camera>, layer: Layer) -> Draw {
+fn classify(doc: &Document, cams: &std::collections::HashMap<u64, Camera>, layer: Layer, free: bool) -> Draw {
     if let Some((mode, opacity)) = crate::canvas::group_of(&layer) {
         let mut one = layer;
         one.opacity = 1.0;
@@ -94,11 +112,11 @@ fn classify(doc: &Document, cams: &std::collections::HashMap<u64, Camera>, layer
             LayerKind::Raster(r) => r.blend = Blend::Normal,
             _ => {}
         }
-        return Draw::Group { inner: Box::new(classify(doc, cams, one)), mode, opacity };
+        return Draw::Group { inner: Box::new(classify(doc, cams, one, free)), mode, opacity };
     }
     if let Some((pl, cam)) = layer.place.as_ref().and_then(|pl| cams.get(&pl.space).map(|c| (pl.clone(), c.clone()))) {
         let space = doc.spaces.iter().find(|s| s.id == pl.space);
-        let clip = space.map(|s| s.clip());
+        let clip = space.filter(|_| !free).map(|s| s.clip());
         let light = space.and_then(|s| s.light).filter(|_| pl.thick > 0.0);
         return Draw::Projected(Box::new(Projected { layer, pl, cam, clip, light }));
     }

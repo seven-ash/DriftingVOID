@@ -544,13 +544,12 @@ impl Layer {
                 let Some(cam) = cams.get(&pl.space) else { return Some(b) };
                 let c = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()];
                 let h = pl.homography(cam);
-                let pts: Option<Vec<Pos2>> = c.iter().map(|p| crate::persp::apply_h(&h, *p)).collect();
-                let mut pts = pts?;
+                let mut pts = crate::persp::project_poly(&h, &c)?;
                 // a thick layer reaches to its back face (masks and groups are
                 // put down over these bounds; the sides must not be cut)
                 if pl.thick > 0.0 {
                     let hb = pl.homography_at(cam, pl.thick);
-                    pts.extend(c.iter().filter_map(|p| crate::persp::apply_h(&hb, *p)));
+                    pts.extend(crate::persp::project_poly(&hb, &c).unwrap_or_default());
                 }
                 Some(Rect::from_points(&pts))
             }

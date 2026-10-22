@@ -756,11 +756,13 @@ impl Gpu {
     }
 
     /// The canvas: the document as framed by the window (`world_min` at the
-    /// target's top left, `s` pixels per canvas unit) drawn over the ground into
-    /// `out` (Rgba8Unorm, the window's pixels). Nothing is read back; egui shows
-    /// `out`. Returns the sub-pixel offset of the drawing (target pixels) to
-    /// place it at, since the drawing snaps to whole canvas pixels.
-    pub fn render_canvas(&mut self, doc: &Document, world_min: Pos2, s: f32, out: &wgpu::Texture, ground: &Ground, zooming: bool) -> egui::Vec2 {
+    /// target's top left, `s` pixels per canvas unit) drawn over the ground (or
+    /// over nothing) into `out` (Rgba8Unorm, the window's pixels). Nothing is
+    /// read back; egui shows `out`. Returns the sub-pixel offset of the drawing
+    /// (target pixels) to place it at, since the drawing snaps to whole canvas
+    /// pixels. `view`: a 3D workspace camera (its "canvas" is the screen).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_canvas(&mut self, doc: &Document, world_min: Pos2, s: f32, out: &wgpu::Texture, ground: Option<&Ground>, zooming: bool, view: Option<&crate::scene::ViewCam>) -> egui::Vec2 {
         let (tw, th) = (out.width(), out.height());
         let ox = (world_min.x * s).floor();
         let oy = (world_min.y * s).floor();
@@ -780,7 +782,7 @@ impl Gpu {
         self.ms_pool.retain(|_, v| v.3 + 30 >= g);
         self.flat.sweep();
         let t0 = std::time::Instant::now();
-        let scene = crate::scene::build(doc);
+        let scene = crate::scene::build_view(doc, view);
         let view = View { full, s, tw, th, k: 1.0, origin: Some([ox as i32, oy as i32]), zooming };
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
@@ -793,17 +795,22 @@ impl Gpu {
         let ready = self.run_jobs(jobs, 1.0);
         let t2 = std::time::Instant::now();
         let mut enc = self.device.create_command_encoder(&Default::default());
-        let mut u = Uniform::new([0.0, 0.0, tw as f32, th as f32], tw, th);
-        u.h0 = ground.void;
-        u.h1 = ground.warm;
-        u.h2 = ground.cool;
-        u.p0 = ground.warm_at;
-        u.p1 = ground.cool_at;
-        u.bg = ground.dot;
-        // dots: step in target pixels, grid offset, radius
-        let step = ground.step * s;
-        u.rot = [step, (ox).rem_euclid(step), (oy).rem_euclid(step), ground.dot_r];
-        self.pass(&mut enc, &self.ground, out, &u, &self.dummy, &self.dummy);
+        match ground {
+            Some(ground) => {
+                let mut u = Uniform::new([0.0, 0.0, tw as f32, th as f32], tw, th);
+                u.h0 = ground.void;
+                u.h1 = ground.warm;
+                u.h2 = ground.cool;
+                u.p0 = ground.warm_at;
+                u.p1 = ground.cool_at;
+                u.bg = ground.dot;
+                // dots: step in target pixels, grid offset, radius
+                let step = ground.step * s;
+                u.rot = [step, (ox).rem_euclid(step), (oy).rem_euclid(step), ground.dot_r];
+                self.pass(&mut enc, &self.ground, out, &u, &self.dummy, &self.dummy);
+            }
+            None => self.clear_to(&mut enc, out, wgpu::Color::TRANSPARENT),
+        }
         for nd in &nodes {
             self.run(&mut enc, nd, out, 0, &ready, &view, None);
         }
@@ -1382,7 +1389,7 @@ impl Gpu {
         };
         let warp = |h: &crate::persp::M3, shade: f32| -> Option<Node> {
             let hi = crate::persp::invert(h)?;
-            let q = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].iter().map(|p| crate::persp::apply_h(h, *p)).collect::<Option<Vec<_>>>()?;
+            let q = crate::persp::project_poly(h, &[rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()])?;
             let mut bb = Rect::from_points(&q);
             if let Some(c) = clip {
                 bb = bb.intersect(c);
