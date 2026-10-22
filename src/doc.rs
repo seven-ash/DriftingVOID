@@ -392,11 +392,6 @@ impl Blend {
         }
     }
 
-    /// Shader / compositor mode number.
-    pub fn code(self) -> i32 {
-        self as i32
-    }
-
     /// Separable blend on straight colour channels (0..1).
     pub fn mix(self, d: f32, s: f32) -> f32 {
         match self {

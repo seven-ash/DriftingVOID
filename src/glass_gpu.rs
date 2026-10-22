@@ -112,7 +112,7 @@ pub fn install(rs: &egui_wgpu::RenderState, msaa: u32) {
         srgb: rs.target_format.is_srgb(),
     };
     rs.renderer.write().callback_resources.insert(res);
-    crate::glass::set_wgpu(true);
+    crate::glass::set_ready(true);
 }
 
 fn texture(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {

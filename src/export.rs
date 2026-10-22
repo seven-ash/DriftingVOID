@@ -48,6 +48,7 @@ pub struct MaskMap {
 
 impl MaskMap {
     /// Mask-space point -> where it shows.
+    #[cfg(test)]
     pub fn fwd(&self, p: Pos2) -> Pos2 {
         self.c + (crate::doc::rot_about(p, self.last, self.th) - self.last) * self.s
     }

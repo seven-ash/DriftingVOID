@@ -920,8 +920,8 @@ pub struct App {
     /// Timeline playback (timeline time and wall time at the start), the selected key,
     /// a drag on the timeline, and the selected canvas camera.
     tl_play: Option<(f64, f64)>,
-    /// The canvas on the GPU renderer (eframe on wgpu), drawn into a texture egui
-    /// shows; None under glow (the canvas then paints egui meshes).
+    /// The canvas on the GPU renderer, drawn into a texture egui shows; None
+    /// until it starts (the canvas then paints egui meshes).
     cgpu: Option<CanvasGpu>,
     /// Frames of the canvas rendered ahead for playback (phase 4).
     pcache: crate::playcache::PlayCache,
@@ -1079,9 +1079,6 @@ fn is_paint_layer(k: &LayerKind) -> bool {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         crate::glass::load_settings();
-        if cc.gl.is_none() {
-            crate::glass::no_gl();
-        }
         cc.egui_ctx.set_fonts(theme::font_defs());
         theme::apply_visuals(&cc.egui_ctx);
         let scrub_ch = std::sync::mpsc::channel();
@@ -5585,9 +5582,6 @@ impl App {
         let ring = ring.or(dbg.as_deref().and_then(|v| v.parse().ok()));
         let hov = hov || dbg.is_some();
         compass.draw(&painter, &proj, light.as_ref(), hov || self.light_drag.is_some(), ring);
-        if crate::glass::available() {
-            painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
-        }
         match &self.modal3d {
             Some(m) => {
                 crate::view3d::hud(&painter, rect, &m.label());
@@ -5602,9 +5596,6 @@ impl App {
                 let mode = if view.camera { "카메라" } else if view.ortho { "직교" } else { "원근" };
                 crate::view3d::hud(&painter, rect, &format!("{name} · {mode} · 가운데 버튼: 회전 (Shift 이동, Ctrl 확대) · 휠: 확대 · G/R/S · Tab: 2D"));
             }
-        }
-        if crate::glass::available() {
-            painter.add(crate::glass::ui_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
         }
         if self.modal3d.is_some() || self.nav3d.is_some() {
             ctx.request_repaint();
@@ -9712,9 +9703,6 @@ impl App {
         }
 
         // ---- render layers: scene above, overlay layer below (cursor, selection, indicator)
-        if crate::glass::available() {
-            painter.add(crate::glass::scene_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
-        }
         self.draw_overlays(&painter, &xf);
         self.text_editor(&ctx, &xf);
         self.draw_loupe(&ctx, &painter, rect);
@@ -9793,9 +9781,6 @@ impl App {
         }
 
         self.draw_rail_indicator(&ctx, &painter);
-        if crate::glass::available() {
-            painter.add(crate::glass::ui_marker(ctx.content_rect(), ctx.cumulative_pass_nr()));
-        }
 
         if self.doc.layers.is_empty() {
             painter.text(

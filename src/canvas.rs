@@ -46,7 +46,7 @@ pub struct TexCache {
     frame: u64,
     images: HashMap<(u64, u64), (TextureHandle, u64)>,
     tiles: HashMap<(LayerId, (i32, i32)), (u64, TextureHandle, u64)>,
-    texts: HashMap<LayerId, (u64, TextureHandle, u64, std::sync::Arc<Vec<u8>>, [u32; 2])>,
+    texts: HashMap<LayerId, (u64, TextureHandle, u64)>,
     /// Flattened layers placed in 3D spaces: (content key, texture, last frame,
     /// content rect, texture size).
     placed: HashMap<LayerId, (u64, TextureHandle, u64, Rect, Vec2)>,
@@ -192,7 +192,7 @@ impl TexCache {
     }
 
     /// Text texture at `scale`: the whole box, or only `win` of it (box-local).
-    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32, win: Option<Rect>) -> Option<(egui::TextureId, Vec2, std::sync::Arc<Vec<u8>>, [u32; 2], u64)> {
+    fn text(&mut self, ctx: &Context, id: LayerId, t: &TextLayer, scale: f32, win: Option<Rect>) -> Option<(egui::TextureId, Vec2)> {
         let lay = crate::text::layout(t);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         t.text.hash(&mut h);
@@ -211,7 +211,7 @@ impl TexCache {
         if let Some(e) = self.texts.get_mut(&id) {
             if e.0 == key {
                 e.2 = frame;
-                return Some((e.1.id(), lay.size, e.3.clone(), e.4, key));
+                return Some((e.1.id(), lay.size));
             }
         }
         let pm = match win {
@@ -221,10 +221,8 @@ impl TexCache {
         let ci = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
         let tex = ctx.load_texture(format!("text{id}"), ci, TEX_OPTS);
         let tid = tex.id();
-        let px = std::sync::Arc::new(pm.data().to_vec());
-        let dims = [pm.width(), pm.height()];
-        self.texts.insert(id, (key, tex, frame, px.clone(), dims));
-        Some((tid, lay.size, px, dims, key))
+        self.texts.insert(id, (key, tex, frame));
+        Some((tid, lay.size))
     }
 }
 
@@ -523,47 +521,7 @@ pub fn draw_doc(
         }
         let timed = crate::anim::layer_at_time(doc, layer);
         let layer = timed.as_ref().unwrap_or(layer);
-        let mask = doc.layers.iter().find(|m| m.mask_of == Some(layer.id) && m.visible);
-        let masking = mask.is_some() && crate::glass::gl_ok();
-        if masking {
-            painter.add(crate::glass::mask_begin(painter.clip_rect()));
-        }
-        match group_of(layer).filter(|_| crate::glass::gl_ok()) {
-            Some((mode, op)) => {
-                // drawn opaque twice (over black, over white), then put back once
-                // with its opacity and blend mode
-                let region = painter.clip_rect();
-                let mut solid = layer.clone();
-                solid.opacity = 1.0;
-                painter.add(crate::glass::group_begin(region));
-                draw_one(painter, ctx, doc, &solid, xf, cache, skip_text, view_w, ppp, &cams);
-                painter.add(crate::glass::group_flip(region));
-                draw_one(painter, ctx, doc, &solid, xf, cache, skip_text, view_w, ppp, &cams);
-                for sh in crate::glass::group_end(region, mode.code(), op) {
-                    painter.add(sh);
-                }
-            }
-            None => draw_one(painter, ctx, doc, layer, xf, cache, skip_text, view_w, ppp, &cams),
-        }
-        if let (true, Some(m)) = (masking, mask) {
-            if let LayerKind::Raster(r) = &m.kind {
-                // anchored masks follow their anchor live (playback, before a resample)
-                let map = crate::export::mask_map(doc, m);
-                let mut tiles = Vec::new();
-                for (&key, t) in &r.tiles {
-                    let tr = Rect::from_min_size(pos2((key.0 * TILE) as f32, (key.1 * TILE) as f32), vec2(TILE as f32, TILE as f32)).translate(r.offset);
-                    let corners = [tr.left_top(), tr.right_top(), tr.right_bottom(), tr.left_bottom()].map(|p| map.map_or(p, |mm| mm.fwd(p)));
-                    if !Rect::from_points(&corners).intersects(view_w) {
-                        continue;
-                    }
-                    tiles.push((corners.map(|p| xf.w2s(p)), cache.tile(ctx, m.id, key, t)));
-                }
-                let k = m.opacity.clamp(0.0, 1.0);
-                if (!tiles.is_empty() || m.mask_invert) && k > 0.0 {
-                    painter.add(crate::glass::mask_restore(painter.clip_rect(), tiles, k, m.mask_invert));
-                }
-            }
-        }
+        draw_one(painter, ctx, doc, layer, xf, cache, skip_text, view_w, ppp, &cams);
     }
 }
 
@@ -676,18 +634,13 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
                 while size_of(scale) > MAX_TEX as f32 && scale > 1.0 / 16.0 {
                     scale *= 0.5;
                 }
-                if let Some((tex, size, px, dims, key)) = cache.text(ctx, layer.id, t, scale, win) {
+                if let Some((tex, size)) = cache.text(ctx, layer.id, t, scale, win) {
                     let shown = win.map_or(size, |w| w.size());
                     let pm_size = vec2((shown.x * scale).ceil() + 1.0, (shown.y * scale).ceil() + 1.0);
                     let origin = t.pos + win.map_or(Vec2::ZERO, |w| w.min.to_vec2());
                     let sr = Rect::from_min_size(xf.w2s(origin), pm_size / scale * xf.zoom);
                     let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
-                    if t.blend != crate::doc::Blend::Normal && crate::glass::gl_ok() {
-                        let c = xf.w2s(Rect::from_min_size(t.pos, size).center());
-                        let corners = [sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom()]
-                            .map(|p| crate::doc::rot_about(p, c, t.rotation));
-                        painter.add(crate::glass::blend_shape(corners, px, dims, key, t.blend.code(), op));
-                    } else if t.rotation == 0.0 {
+                    if t.rotation == 0.0 {
                         painter.image(tex, sr, uv, tint(op));
                     } else {
                         // rotate about the text box centre (not the padded texture's)

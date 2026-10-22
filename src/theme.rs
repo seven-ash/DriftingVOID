@@ -76,18 +76,17 @@ pub fn glass<R>(ui: &mut egui::Ui, margin: Margin, radius: u8, add: impl FnOnce(
     }
     let idx = ui.painter().add(egui::Shape::Noop);
     let r = egui::Frame::NONE.inner_margin(margin).corner_radius(radius).show(ui, add);
-    ui.painter().set(idx, glass_shape(ui.ctx(), r.response.rect, radius));
+    ui.painter().set(idx, glass_shape(r.response.rect, radius));
     r
 }
 
-pub fn glass_shape(ctx: &egui::Context, rect: Rect, radius: u8) -> egui::Shape {
+pub fn glass_shape(rect: Rect, radius: u8) -> egui::Shape {
     let [tr, tg, tb, _] = PAPER_2().to_array();
     let look = crate::glass::Look {
         radius: radius as f32,
         refract: 7.0,
         tint: [tr as f32 / 255.0, tg as f32 / 255.0, tb as f32 / 255.0, 0.62],
         dispersion: 5.0,
-        frame: ctx.cumulative_pass_nr(),
     };
     crate::glass::shape(rect, look)
 }
@@ -122,7 +121,7 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     let r = Rect::from_min_max(mr.min, pos2(mr.max.x.max(nr.max.x), nr.max.y)).intersect(ui.clip_rect());
     let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
     let radius = ui.visuals().menu_corner_radius.nw;
-    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(ui.ctx(), r, radius));
+    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(r, radius));
     out
 }
 

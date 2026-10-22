@@ -16,7 +16,7 @@ it as the first argument.
 
 Requires a Rust toolchain with MSVC on Windows. Rendering uses wgpu (DX12 or
 Vulkan): one GPU renderer draws the canvas, the glass cards, playback and every
-export. `DV_GL=1` still starts the older OpenGL (glow) build for comparison.
+export.
 Video needs ffmpeg/ffprobe (`%APPDATA%\DriftingVOID\ffmpeg`, next to the exe,
 or on PATH).
 
@@ -120,11 +120,11 @@ right-click cancels. Alt+G/R/S clears the value.
 | `src/sides.wgsl` | Thick layers' sides on the GPU |
 | `src/glass_gpu.rs`, `src/glass.wgsl` | Glass cards under wgpu |
 | `src/playcache.rs`, `src/vcache.rs` | Playback cache (rendered frames) and video frame cache |
-| `src/canvas.rs` | Glow canvas (until glow is removed) and shared layer helpers |
+| `src/canvas.rs` | Mesh drawing for the 3D peek card, and shared layer helpers |
 | `src/export.rs` | CPU reference renderer (tests, fallback past the GPU texture limit) |
 | `src/segment.rs` | GrabCut and intelligent scissors |
 | `src/text.rs`, `src/fontdb.rs` | Text layout/raster, installed font scan |
-| `src/glass.rs` | Glass settings and the glow glass callbacks |
+| `src/glass.rs` | Glass settings |
 | `src/theme.rs` | Tokens, visuals, icons |
 | `src/view3d.rs` | 3D workspace: orbit view, presets, picking, G/R/S modal |
 | `src/anim.rs` | Timeline, keyframes, easing, canvas cameras |

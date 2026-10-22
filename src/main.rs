@@ -68,10 +68,8 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true)
             .with_icon(window_icon()),
         multisampling: 4,
-        // wgpu: the canvas and glass draw on the GPU renderer (gpu.rs, glass_gpu.rs).
-        // DV_GL=1 runs the old glow backend (GL glass and effects) to compare,
-        // until it is removed.
-        renderer: if std::env::var_os("DV_GL").is_some() { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu },
+        // wgpu: the canvas and glass draw on the GPU renderer (gpu.rs, glass_gpu.rs)
+        renderer: eframe::Renderer::Wgpu,
         // the export renders on this device too: the adapter's full texture size
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
