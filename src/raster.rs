@@ -167,23 +167,14 @@ impl RasterLayer {
         self.pixel(l.x.floor() as i32, l.y.floor() as i32)[3]
     }
 
-    /// Exact bounds of non-transparent pixels, in world space.
+    /// Exact bounds of non-transparent pixels, in world space. Each tile's
+    /// own bounds are kept by its revision (`tile_bounds`), so this costs a
+    /// look-up per tile, not a scan of every pixel (it runs several times a
+    /// frame; Ash saw frame times grow with the tile count, 10-22).
     pub fn bounds(&self) -> Option<Rect> {
         let mut acc: Option<(i32, i32, i32, i32)> = None;
         for (&(tx, ty), t) in &self.tiles {
-            let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-            for y in 0..TILE {
-                let row = &t.px[(y as usize * TILE_US) * 4..((y as usize + 1) * TILE_US) * 4];
-                for x in 0..TILE {
-                    if row[x as usize * 4 + 3] != 0 {
-                        x0 = x0.min(x);
-                        x1 = x1.max(x);
-                        y0 = y0.min(y);
-                        y1 = y1.max(y);
-                    }
-                }
-            }
-            if x0 <= x1 {
+            if let Some([x0, y0, x1, y1]) = tile_bounds(t) {
                 let r = (tx * TILE + x0, ty * TILE + y0, tx * TILE + x1 + 1, ty * TILE + y1 + 1);
                 acc = Some(match acc {
                     None => r,
@@ -197,6 +188,41 @@ impl RasterLayer {
         })
     }
 
+}
+
+/// A tile's non-transparent pixels (first and last column and row), kept by
+/// the tile's revision: every change to a tile's pixels gives it a new one.
+fn tile_bounds(t: &Tile) -> Option<[i32; 4]> {
+    type Cache = std::collections::HashMap<u64, Option<[i32; 4]>>;
+    static CACHE: std::sync::Mutex<Option<Cache>> = std::sync::Mutex::new(None);
+    if let Some(b) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|c| c.get(&t.rev).copied())) {
+        return b;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for y in 0..TILE {
+        let row = &t.px[(y as usize * TILE_US) * 4..((y as usize + 1) * TILE_US) * 4];
+        for x in 0..TILE {
+            if row[x as usize * 4 + 3] != 0 {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    let b = (x0 <= x1).then_some([x0, y0, x1, y1]);
+    if let Ok(mut c) = CACHE.lock() {
+        let c = c.get_or_insert_with(Default::default);
+        // revisions only grow; old ones are dropped wholesale now and then
+        if c.len() > 200_000 {
+            c.clear();
+        }
+        c.insert(t.rev, b);
+    }
+    b
+}
+
+impl RasterLayer {
     /// Copies the local pixel rectangle [x0,x1)x[y0,y1) into a premultiplied buffer.
     pub fn read_region(&self, x0: i32, y0: i32, w: i32, h: i32) -> Vec<u8> {
         let mut out = vec![0u8; (w * h * 4) as usize];

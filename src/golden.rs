@@ -484,6 +484,20 @@ fn write_flat_void() {
         doc.insert("brush2".into(), LayerKind::Raster(r), None);
         crate::io::save_project(&doc, std::path::Path::new(&p)).unwrap();
     }
+    // DV_WRITE_TILES: a brush layer of 400 tiles (20×20, 5120 px square, a
+    // stroke pattern in each) for frame-time checks
+    if let Some(p) = std::env::var_os("DV_WRITE_TILES") {
+        let mut r = crate::raster::RasterLayer::default();
+        for k in 0..20 {
+            let y = k as f32 * 256.0 + 40.0;
+            r.fill_rect(Rect::from_min_max(pos2(0.0, y), pos2(5120.0, y + 30.0)), true);
+            let x = k as f32 * 256.0 + 100.0;
+            r.fill_rect(Rect::from_min_max(pos2(x, 0.0), pos2(x + 30.0, 5120.0)), true);
+        }
+        let mut doc = Document::default();
+        doc.insert("tiles".into(), LayerKind::Raster(r), None);
+        crate::io::save_project(&doc, std::path::Path::new(&p)).unwrap();
+    }
     // DV_WRITE_PEN: the 400-stroke pen layer of `bench_cpu_work` (canvas sweeps)
     if let Some(p) = std::env::var_os("DV_WRITE_PEN") {
         crate::io::save_project(&pen_doc(400, 1), std::path::Path::new(&p)).unwrap();

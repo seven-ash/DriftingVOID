@@ -174,6 +174,10 @@ pub struct Gpu {
     /// Brush layers on the canvas: their tiles in one texture each, updated tile
     /// by tile as they change (painting re-uploads only the touched tiles).
     atlases: HashMap<LayerId, Atlas>,
+    /// Brush layers on the canvas: their tiles in pages of PAGE×PAGE tiles,
+    /// only where there are tiles (any size of layer; no texture for the
+    /// empty space between strokes).
+    pages: HashMap<LayerId, Paged>,
     frame: u64,
     /// A picture drawn between the canvas's frames (`render_aside`).
     aside: bool,
@@ -576,6 +580,7 @@ impl Gpu {
             pool: HashMap::new(),
             ms_pool: HashMap::new(),
             atlases: HashMap::new(),
+            pages: HashMap::new(),
             edge_bufs: HashMap::new(),
             frame: 0,
             aside: false,
@@ -587,6 +592,7 @@ impl Gpu {
     /// Drops everything kept between frames (after a job).
     pub fn clear(&mut self) {
         self.atlases.clear();
+        self.pages.clear();
         self.edge_bufs.clear();
         self.flat = Arc::default();
         self.rasters.clear();
@@ -866,6 +872,7 @@ impl Gpu {
         self.sources.retain(|_, v| v.1 + 2 >= g);
         self.flats.retain(|_, v| v.2 + 1800 >= g);
         self.atlases.retain(|_, a| a.used + 600 >= g);
+        self.pages.retain(|_, p| p.used + 600 >= g);
         self.edge_bufs.retain(|_, v| v.2 + 1800 >= g);
         self.ms_pool.retain(|_, v| v.3 + 30 >= g);
         self.flat.sweep();
@@ -996,9 +1003,7 @@ impl Gpu {
         match d {
             Draw::Flat(layer) if matches!(layer.kind, crate::doc::LayerKind::Image(_)) => self.image(layer, v, jobs, out),
             Draw::Flat(layer) if v.origin.is_some() && matches!(layer.kind, crate::doc::LayerKind::Raster(_)) => {
-                if let Some(n) = self.atlas(&layer, v) {
-                    out.push(n);
-                }
+                self.atlas(&layer, v, out);
             }
             Draw::Flat(layer) => {
                 let opacity = layer.opacity;
@@ -1442,21 +1447,84 @@ impl Gpu {
         Arc::new(tex)
     }
 
-    /// A brush layer from its tile atlas (canvas): sampled as a photo is, nearest
-    /// at 1:1 and bicubic otherwise. None when it would not fit one texture.
-    fn atlas(&mut self, layer: &Layer, v: &View) -> Option<Node> {
-        let (tex, o) = self.atlas_of(layer)?;
-        let a = self.atlases.get(&layer.id)?;
+    /// A brush layer on the canvas from its pages of tiles: each page in view
+    /// sampled as a photo is (nearest at 1:1, bicubic otherwise), with hard
+    /// edges, so neighbouring pages meet without a seam (and never overlap,
+    /// so each takes the layer's opacity).
+    fn atlas(&mut self, layer: &Layer, v: &View, out: &mut Vec<Node>) {
+        use crate::raster::TILE;
+        let side = (PAGE * TILE) as f32;
         let s = v.s;
-        let (fx, fy) = ((o.x - v.full.min.x) * s, (o.y - v.full.min.y) * s);
-        let inv = [[1.0 / s, 0.0, -fx / s], [0.0, 1.0 / s, -fy / s]];
-        let (w, h) = ((a.n.0 * crate::raster::TILE) as f32 * s, (a.n.1 * crate::raster::TILE) as f32 * s);
-        let rect = [(fx.floor() as i32).max(0), (fy.floor() as i32).max(0), ((fx + w).ceil() as i32).min(v.tw as i32), ((fy + h).ceil() as i32).min(v.th as i32)];
-        if rect[2] <= rect[0] || rect[3] <= rect[1] {
-            return None;
-        }
         let nearest = (s - 1.0).abs() < 1e-4;
-        Some(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src: s, level: 0.0 })
+        for (tex, o) in self.pages_of(layer) {
+            let (fx, fy) = ((o.x - v.full.min.x) * s, (o.y - v.full.min.y) * s);
+            let inv = [[1.0 / s, 0.0, -fx / s], [0.0, 1.0 / s, -fy / s]];
+            let rect = [(fx.floor() as i32).max(0), (fy.floor() as i32).max(0), ((fx + side * s).ceil() as i32).min(v.tw as i32), ((fy + side * s).ceil() as i32).min(v.th as i32)];
+            if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                continue;
+            }
+            // px_per_src this large: the page's edge is a hard cut, not anti-aliased
+            out.push(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest, px_per_src: 1e6, level: 0.0 });
+        }
+    }
+
+    /// A brush layer's tiles in pages (made where tiles are, dropped where
+    /// none are left, updated tile by tile): each page's texture and the
+    /// canvas point of its top left.
+    fn pages_of(&mut self, layer: &Layer) -> Vec<(Arc<wgpu::Texture>, Pos2)> {
+        use crate::raster::TILE;
+        let crate::doc::LayerKind::Raster(r) = &layer.kind else { return Vec::new() };
+        let frame = self.frame;
+        let page_of = |k: (i32, i32)| (k.0.div_euclid(PAGE), k.1.div_euclid(PAGE));
+        let mut want: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+        for &k in r.tiles.keys() {
+            want.entry(page_of(k)).or_default().push(k);
+        }
+        let side = (PAGE * TILE) as u32;
+        let p = self.pages.entry(layer.id).or_insert_with(|| Paged { pages: HashMap::new(), used: frame });
+        p.used = frame;
+        p.pages.retain(|k, _| want.contains_key(k));
+        let blank = vec![0u8; (TILE * TILE * 4) as usize];
+        let mut out = Vec::new();
+        for (pk, keys) in want {
+            let page = p.pages.entry(pk).or_insert_with(|| {
+                let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("brush page"),
+                    size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: FMT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                Page { tex: Arc::new(t), revs: HashMap::new() }
+            });
+            let put = |q: &wgpu::Queue, tex: &wgpu::Texture, key: (i32, i32), px: &[u8]| {
+                q.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x: (key.0.rem_euclid(PAGE) * TILE) as u32, y: (key.1.rem_euclid(PAGE) * TILE) as u32, z: 0 }, aspect: wgpu::TextureAspect::All },
+                    px,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((TILE * 4) as u32), rows_per_image: Some(TILE as u32) },
+                    wgpu::Extent3d { width: TILE as u32, height: TILE as u32, depth_or_array_layers: 1 },
+                );
+            };
+            // tiles gone: cleared; tiles new or changed: uploaded
+            let gone: Vec<(i32, i32)> = page.revs.keys().copied().filter(|k| !r.tiles.contains_key(k)).collect();
+            for k in gone {
+                put(&self.queue, &page.tex, k, &blank);
+                page.revs.remove(&k);
+            }
+            for k in keys {
+                let t = &r.tiles[&k];
+                if page.revs.get(&k) != Some(&t.rev) {
+                    put(&self.queue, &page.tex, k, &t.px);
+                    page.revs.insert(k, t.rev);
+                }
+            }
+            // one canvas unit per page pixel
+            out.push((page.tex.clone(), Pos2::new(r.offset.x + (pk.0 * PAGE * TILE) as f32, r.offset.y + (pk.1 * PAGE * TILE) as f32)));
+        }
+        out
     }
 
     /// A brush (or mask) layer's tiles in one texture, updated tile by tile:
@@ -1962,6 +2030,19 @@ impl Gpu {
 
 /// A brush layer's tiles in one texture: tile `t0` at its top left, `n` tiles
 /// each way, and the revision of each tile uploaded.
+/// Tiles per side of a brush layer's page (1024 px).
+const PAGE: i32 = 4;
+
+struct Page {
+    tex: Arc<wgpu::Texture>,
+    revs: HashMap<(i32, i32), u64>,
+}
+
+struct Paged {
+    pages: HashMap<(i32, i32), Page>,
+    used: u64,
+}
+
 struct Atlas {
     tex: Arc<wgpu::Texture>,
     t0: (i32, i32),
@@ -2124,5 +2205,59 @@ impl Uniform {
     fn bytes(&self) -> &[u8] {
         // plain f32 arrays, no padding
         unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, std::mem::size_of::<Self>()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{pos2, vec2};
+
+    /// The canvas's picture of `doc` (`world_min`, `s`) as RGBA, w×h.
+    fn canvas(g: &mut Gpu, doc: &Document, world_min: Pos2, s: f32, w: u32, h: u32) -> Vec<u8> {
+        let out = g.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING);
+        g.render_canvas(doc, world_min, s, &out, None, false, None);
+        let bpr = (w * 4).div_ceil(256) * 256;
+        let buf = g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let idx = g.queue.submit([enc.finish()]);
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = g.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });
+        let m = buf.slice(..).get_mapped_range().unwrap();
+        m.chunks(bpr as usize).take(h as usize).flat_map(|r| r[..(w * 4) as usize].to_vec()).collect()
+    }
+
+    /// A brush stroke far longer than one texture (Ash, 10-22: past a certain
+    /// width or height a stroke vanished): drawn whole on the canvas, from
+    /// pages of tiles, without a seam between them.
+    #[test]
+    fn a_brush_layer_wider_than_a_texture_draws_whole() {
+        let mut r = crate::raster::RasterLayer::default();
+        // 100 tiles wide (25600 px), 40 px tall, from x = -300
+        r.fill_rect(egui::Rect::from_min_max(pos2(-300.0, 0.0), pos2(25300.0, 40.0)), true);
+        let mut doc = Document::default();
+        doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+        let ok = with_gpu(|g| {
+            // the whole stroke in 512 px: 50 canvas units a pixel
+            let (w, h) = (520u32, 8u32);
+            let px = canvas(g, &doc, pos2(-400.0, -180.0), 1.0 / 50.0, w, h);
+            let alpha = |x: u32, y: u32| px[((y * w + x) * 4 + 3) as usize];
+            // row 3 crosses the stroke (y 0..40 → 3.6..4.4 px): every pixel
+            // from its start (x 2) to its end (x 514) is covered, none after
+            let row = 4;
+            let covered = (3..513).filter(|&x| alpha(x, row) > 0).count();
+            assert!(covered == 510, "covered {covered} of 510 along the stroke");
+            assert_eq!(alpha(517, row), 0);
+            // pages: 25600 px of tiles in pages of 1024
+            assert!(g.pages.values().next().unwrap().pages.len() >= 25);
+        });
+        if ok.is_none() {
+            eprintln!("no GPU: skipped");
+        }
     }
 }
