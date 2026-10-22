@@ -238,8 +238,9 @@ pub struct Drawing {
 }
 
 /// Whether a layer is drawn here (text and shapes) rather than on the CPU.
+/// Text, shapes and pen strokes (the last through `Gpu::raster_strokes`).
 pub fn handles(layer: &Layer) -> bool {
-    matches!(layer.kind, LayerKind::Text(_) | LayerKind::Shape(_))
+    matches!(layer.kind, LayerKind::Text(_) | LayerKind::Shape(_) | LayerKind::Vector(_))
 }
 
 /// The layer as `export::draw_layer` draws it through `base` (canvas -> target

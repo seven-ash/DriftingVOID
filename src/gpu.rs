@@ -135,6 +135,12 @@ pub struct Gpu {
     sides_pipe: wgpu::RenderPipeline,
     path_layout: wgpu::BindGroupLayout,
     path_pipe: wgpu::RenderPipeline,
+    /// Pen strokes (`strokes.wgsl`): capsules into a coverage target, then
+    /// the colour over the layer, per stroke.
+    stroke_layout: wgpu::BindGroupLayout,
+    stroke_seg: wgpu::RenderPipeline,
+    stroke_zero: wgpu::RenderPipeline,
+    stroke_put: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
     y_plane: wgpu::RenderPipeline,
     uv_plane: wgpu::RenderPipeline,
@@ -482,6 +488,47 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
+        let stroke_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("strokes"), source: wgpu::ShaderSource::Wgsl(include_str!("strokes.wgsl").into()) });
+        let stroke_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: None },
+                    count: None,
+                },
+                tex_entry(1),
+            ],
+        });
+        let stroke_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&stroke_layout)], immediate_size: 0 });
+        let max_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max },
+        };
+        let stroke_pipe = |vs: &str, fs: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>, seg: bool| {
+            let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+            let buffers = [Some(wgpu::VertexBufferLayout { array_stride: 32, step_mode: wgpu::VertexStepMode::Instance, attributes: &attrs })];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fs),
+                layout: Some(&stroke_pl),
+                vertex: wgpu::VertexState { module: &stroke_module, entry_point: Some(vs), compilation_options: Default::default(), buffers: if seg { &buffers } else { &[] } },
+                fragment: Some(wgpu::FragmentState {
+                    module: &stroke_module,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let stroke_seg = stroke_pipe("vs_seg", "fs_seg", wgpu::TextureFormat::R8Unorm, Some(max_blend), true);
+        let stroke_zero = stroke_pipe("vs_rect", "fs_zero", wgpu::TextureFormat::R8Unorm, None, false);
+        let stroke_put = stroke_pipe("vs_rect", "fs_put", FMT, Some(over_blend), false);
         let dummy = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -506,6 +553,10 @@ impl Gpu {
             sides_pipe,
             path_layout,
             path_pipe,
+            stroke_layout,
+            stroke_seg,
+            stroke_zero,
+            stroke_put,
             image,
             y_plane,
             uv_plane,
@@ -1037,6 +1088,9 @@ impl Gpu {
     /// glyphs from the kept outlines, shape outlines made for this drawing.
     fn raster_paths(&mut self, layer: &Layer, rect: [i32; 4], v: &View) -> Option<Arc<wgpu::Texture>> {
         use crate::gpu_paths::inst_bytes;
+        if matches!(layer.kind, crate::doc::LayerKind::Vector(_)) {
+            return self.raster_strokes(layer, rect, v);
+        }
         let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
         let (full, s) = (v.full, v.s);
         let base = Transform::from_translate(-full.min.x, -full.min.y).post_scale(s, s).post_translate(-rect[0] as f32, -rect[1] as f32);
@@ -1093,6 +1147,106 @@ impl Gpu {
                 rp.set_bind_group(0, bg, &[]);
                 rp.set_vertex_buffer(0, vb.slice(..));
                 rp.draw(0..6, 0..*n);
+            }
+        }
+        self.queue.submit([enc.finish()]);
+        Some(Arc::new(tex))
+    }
+
+    /// A pen layer drawn into its box (target pixels `rect`) on the GPU, stroke
+    /// by stroke (`strokes.wgsl`): each stroke's capsules take the largest
+    /// coverage per pixel, then its colour goes over what the strokes before
+    /// it left, as the CPU fills each stroke's union in turn.
+    fn raster_strokes(&mut self, layer: &Layer, rect: [i32; 4], v: &View) -> Option<Arc<wgpu::Texture>> {
+        let crate::doc::LayerKind::Vector(vl) = &layer.kind else { return None };
+        let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
+        let (full, s) = (v.full, v.s);
+        let px = |x: f32, y: f32| [(x + vl.offset.x - full.min.x) * s - rect[0] as f32, (y + vl.offset.y - full.min.y) * s - rect[1] as f32];
+        let boxr = Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32));
+        // per stroke: its uniform (256-byte slots) and its capsules
+        const SLOT: usize = 256;
+        let mut uni: Vec<u8> = Vec::new();
+        let mut segs: Vec<f32> = Vec::new();
+        let mut list: Vec<(u32, std::ops::Range<u32>, [f32; 4])> = Vec::new();
+        for st in &vl.strokes {
+            if st.pts.is_empty() {
+                continue;
+            }
+            let (a, b) = (px(st.bounds.min.x, st.bounds.min.y), px(st.bounds.max.x, st.bounds.max.y));
+            let r = Rect::from_min_max(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])).expand(1.5).intersect(boxr);
+            if !r.is_positive() {
+                continue;
+            }
+            let r = [r.min.x.floor(), r.min.y.floor(), r.max.x.ceil(), r.max.y.ceil()];
+            let first = (segs.len() / 8) as u32;
+            let mut cap = |p: &[f32; 3], q: &[f32; 3]| {
+                let (p0, q0) = (px(p[0], p[1]), px(q[0], q[1]));
+                segs.extend_from_slice(&[p0[0], p0[1], p[2] * s, 0.0, q0[0], q0[1], q[2] * s, 0.0]);
+            };
+            if st.pts.len() == 1 {
+                cap(&st.pts[0], &st.pts[0]);
+            }
+            for pair in st.pts.windows(2) {
+                cap(&pair[0], &pair[1]);
+            }
+            let [cr, cg, cb, ca] = st.color.to_srgba_unmultiplied().map(|x| x as f32 / 255.0);
+            let off = uni.len() as u32;
+            for x in [r[0], r[1], r[2], r[3], w as f32, h as f32, 0.0, 0.0, cr * ca, cg * ca, cb * ca, ca] {
+                uni.extend_from_slice(&x.to_le_bytes());
+            }
+            uni.resize(off as usize + SLOT, 0);
+            list.push((off, first..(segs.len() / 8) as u32, r));
+        }
+        let tex = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.clear_to(&mut enc, &tex, wgpu::Color::TRANSPARENT);
+        if !list.is_empty() {
+            let cov = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: &uni, usage: wgpu::BufferUsages::UNIFORM });
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: f32_bytes(&segs), usage: wgpu::BufferUsages::VERTEX });
+            let (cov_view, out_view, dummy_view) = (cov.create_view(&Default::default()), tex.create_view(&Default::default()), self.dummy.create_view(&Default::default()));
+            let group = |t: &wgpu::TextureView| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.stroke_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &ub, offset: 0, size: std::num::NonZeroU64::new(48) }) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(t) },
+                    ],
+                })
+            };
+            let (g_cov, g_put) = (group(&dummy_view), group(&cov_view));
+            let pass = |enc: &'_ mut wgpu::CommandEncoder, view: &wgpu::TextureView| {
+                enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                    ..Default::default()
+                })
+                .forget_lifetime()
+            };
+            for (off, range, _) in &list {
+                {
+                    let mut rp = pass(&mut enc, &cov_view);
+                    rp.set_bind_group(0, &g_cov, &[*off]);
+                    rp.set_pipeline(&self.stroke_zero);
+                    rp.draw(0..6, 0..1);
+                    rp.set_pipeline(&self.stroke_seg);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.draw(0..6, range.clone());
+                }
+                let mut rp = pass(&mut enc, &out_view);
+                rp.set_bind_group(0, &g_put, &[*off]);
+                rp.set_pipeline(&self.stroke_put);
+                rp.draw(0..6, 0..1);
             }
         }
         self.queue.submit([enc.finish()]);

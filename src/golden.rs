@@ -264,6 +264,113 @@ fn gpu_parity() {
     assert!(fails.is_empty(), "GPU differs from the CPU reference: {fails:?}");
 }
 
+/// A pen layer of `n` random strokes of 150 points over 1600×1000 (`seed`),
+/// some translucent.
+fn pen_doc(n: usize, seed: u32) -> Document {
+    let mut strokes = Vec::new();
+    let mut seed = seed.wrapping_mul(2654435761).wrapping_add(7);
+    let mut rnd = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    for k in 0..n {
+        let (mut x, mut y) = (rnd() * 1600.0, rnd() * 1000.0);
+        let (mut dx, mut dy) = (rnd() - 0.5, rnd() - 0.5);
+        let mut pts = Vec::new();
+        for i in 0..150 {
+            dx += (rnd() - 0.5) * 0.4;
+            dy += (rnd() - 0.5) * 0.4;
+            x += dx * 4.0;
+            y += dy * 4.0;
+            pts.push([x, y, 0.4 + 6.0 * (i as f32 / 150.0 * 3.14).sin()]);
+        }
+        let col = match k % 3 {
+            0 => Color32::from_rgb(30, 60, 200),
+            1 => Color32::from_rgba_unmultiplied(220, 60, 40, 140),
+            _ => Color32::from_rgb(20, 20, 20),
+        };
+        strokes.push(std::sync::Arc::new(crate::vector::VStroke::new(pts, col)));
+    }
+    // a dot (one point)
+    strokes.push(std::sync::Arc::new(crate::vector::VStroke::new(vec![[800.0, 500.0, 9.0]], Color32::from_rgb(0, 160, 90))));
+    let mut doc = Document::default();
+    doc.insert("v".into(), LayerKind::Vector(crate::doc::VectorLayer { offset: vec2(3.5, -2.25), strokes }), None);
+    doc
+}
+
+/// Pen strokes on the GPU (largest capsule coverage per stroke) against the
+/// CPU's filled capsule outlines, at three scales. Measured: 2.4 % / 0.57 at
+/// 0.37; see the test output for the others.
+#[test]
+fn gpu_pen_matches_cpu() {
+    let doc = pen_doc(60, 3);
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 1000.0));
+    for s in [0.37f32, 1.0, 2.5] {
+        let cpu = render_ss(&doc, region.center(), region.size(), 0.0, s, Some(Color32::WHITE), 1).unwrap();
+        let Some(gpu) = crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, s, Some(Color32::WHITE), 1)) else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let gpu = gpu.unwrap();
+        let (big, mean, worst) = diff(&cpu, &gpu);
+        eprintln!("pen at {s}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
+        if std::env::var_os("DV_SAVE_PEN").is_some() {
+            let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"));
+            crate::export::to_rgba(&gpu).save(dir.join(format!("pen_{s}.gpu.got.png"))).unwrap();
+            crate::export::to_rgba(&cpu).save(dir.join(format!("pen_{s}.cpu.got.png"))).unwrap();
+        }
+        // shown small, the CPU's capsule outlines are coarse polygons: edge
+        // pixels differ more there (the small-photo tolerance)
+        let (big_max, mean_max) = if s < 0.5 { (0.04, 1.5) } else { (0.015, 0.5) };
+        assert!(big < big_max && mean < mean_max, "pen at {s}: {:.3} %, mean {mean:.3}", big * 100.0);
+    }
+}
+
+/// What is left on the CPU, timed (render-finish items 3–5): a pen layer
+/// rasterized, a thick text flattened and traced, big brush dabs.
+/// `cargo test --release bench_cpu_work -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_cpu_work() {
+    use std::time::Instant;
+    // 3. a pen layer: 400 strokes of 150 points over 1600×1000
+    let doc = pen_doc(400, 1);
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 1000.0));
+    for s in [0.5f32, 1.0, 2.0] {
+        let t = Instant::now();
+        let _ = render(&doc, region, s, None).unwrap();
+        eprintln!("pen layer, 400 strokes × 150 points, at {s}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let _ = crate::gpu::with_gpu(|g| {
+            g.clear();
+            let t = Instant::now();
+            let _ = g.render_ss(&doc, region.center(), region.size(), 0.0, s, None, 1);
+            eprintln!("  on the GPU (with read back): {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        });
+    }
+    // 4. a thick text flattened and its outline traced (cold cache)
+    let room = room_doc(false, 0.0);
+    let l = room.layers.iter().find(|l| l.place.as_ref().is_some_and(|p| p.thick > 0.0)).unwrap();
+    let pl = l.place.clone().unwrap();
+    for res in [1.0f32, 2.0, 4.0] {
+        let fc = crate::export::FlatCache::default();
+        let t = Instant::now();
+        let f = fc.get(l, &pl, res);
+        eprintln!("thick text flatten + outline at {res}: {:.1} ms ({} edges)", t.elapsed().as_secs_f64() * 1e3, f.and_then(|f| f.3.clone()).map_or(0, |e| e.len()));
+    }
+    // 5. brush dabs: soft radius 200 and 40, points 4 px apart (a quick pen move)
+    for (r, hard) in [(200.0f32, 0.2f32), (40.0, 0.8)] {
+        let mut layer = crate::raster::RasterLayer::default();
+        let mut st = crate::raster::RasterStroke::new(crate::raster::BrushParams { color: Color32::RED, radius: r, opacity: 1.0, hardness: hard, pressure_size: false, pressure_opacity: false, erase: false });
+        let t = Instant::now();
+        let n = 200;
+        for i in 0..n {
+            st.add_point(&mut layer, pos2(100.0 + i as f32 * 4.0, 300.0 + (i as f32 * 0.05).sin() * 80.0), 1.0);
+        }
+        st.finish(&mut layer);
+        eprintln!("brush radius {r}: {:.2} ms per pen point ({n} points)", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+    }
+}
+
 /// The loupe, the eyedropper and copying draw on the canvas's renderer
 /// between its frames (`render_aside`): small regions at a high scale and a
 /// single pixel must match the CPU, and drawing aside must leave the caches
@@ -376,6 +483,10 @@ fn write_flat_void() {
         r.fill_rect(Rect::from_min_size(pos2(10.0, 10.0), vec2(30.0, 280.0)), true);
         doc.insert("brush2".into(), LayerKind::Raster(r), None);
         crate::io::save_project(&doc, std::path::Path::new(&p)).unwrap();
+    }
+    // DV_WRITE_PEN: the 400-stroke pen layer of `bench_cpu_work` (canvas sweeps)
+    if let Some(p) = std::env::var_os("DV_WRITE_PEN") {
+        crate::io::save_project(&pen_doc(400, 1), std::path::Path::new(&p)).unwrap();
     }
 }
 
