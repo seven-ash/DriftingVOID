@@ -86,6 +86,9 @@ enum Node {
     Image { img: Img, inv: [[f32; 3]; 2], rect: [i32; 4], opacity: f32, nearest: bool, px_per_src: f32, level: f32 },
     /// A flattened layer through `hi` (inverse homography, target -> canvas).
     Warp { img: Img, hi: [[f32; 3]; 3], src: [f32; 3], rect: [i32; 4], opacity: f32, shade: f32 },
+    /// A photo or video frame in a 3D space through `hi` (inverse homography,
+    /// target -> source pixel), from its mipmapped texture.
+    WarpImage { tex: Arc<wgpu::Texture>, hi: [[f32; 3]; 3], rect: [i32; 4], opacity: f32 },
     /// Text with a blend mode.
     Blend { img: Img, off: [i32; 2], mode: Blend, opacity: f32 },
     /// Drawn alone into a target of its own, then blended down once.
@@ -124,6 +127,7 @@ pub struct Gpu {
     layout: wgpu::BindGroupLayout,
     over: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
+    warp_image: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     mask: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
@@ -186,6 +190,37 @@ struct Shared {
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+
+/// A photo's crop in source pixels: logical-to-pixel factor `k`, top left
+/// `px`, size `w`×`h`, and a key for its look (source, adjustment, crop).
+struct Crop {
+    k: f32,
+    px: [f32; 2],
+    w: f32,
+    h: f32,
+    key: u64,
+}
+
+fn crop_of(im: &crate::doc::ImageLayer) -> Crop {
+    // source pixels -> canvas: as export::draw_image (logical size k)
+    let (iw, ih) = im.src.px_size();
+    let (iw, ih) = (iw as f32, ih as f32);
+    let k = iw / im.src.size().x.max(1.0);
+    let px = [((im.crop.min.x * k).round()).clamp(0.0, iw - 1.0), ((im.crop.min.y * k).round()).clamp(0.0, ih - 1.0)];
+    let w = ((im.crop.max.x * k).round()).clamp(px[0] + 1.0, iw) - px[0];
+    let h = ((im.crop.max.y * k).round()).clamp(px[1] + 1.0, ih) - px[1];
+    // the source as it is shown, whatever size it is drawn at
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        (im.src.id, im.adjust.key()).hash(&mut hs);
+        for x in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y] {
+            x.to_bits().hash(&mut hs);
+        }
+        hs.finish()
+    };
+    Crop { k, px, w, h, key }
+}
 
 /// Called once at start when eframe runs on wgpu.
 pub fn install(rs: &eframe::egui_wgpu::RenderState) {
@@ -351,6 +386,7 @@ impl Gpu {
         let mask_atlas = pipe("fs_mask_atlas", Some(over_blend));
         let over = pipe("fs_over", Some(over_blend));
         let warp = pipe("fs_warp", Some(over_blend));
+        let warp_image = pipe("fs_warp_image", Some(over_blend));
         let blend = pipe("fs_blend", None);
         let mask = pipe("fs_mask", Some(over_blend));
         let down = pipe("fs_down", None);
@@ -462,6 +498,7 @@ impl Gpu {
             layout,
             over,
             warp,
+            warp_image,
             blend,
             mask,
             down,
@@ -1070,26 +1107,8 @@ impl Gpu {
     fn image(&mut self, layer: Layer, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         let crate::doc::LayerKind::Image(im) = &layer.kind else { return };
         let target = im.scale * v.s;
-        // source pixels -> canvas: as export::draw_image (logical size k)
-        let (iw, ih) = im.src.px_size();
-        let (iw, ih) = (iw as f32, ih as f32);
-        let k = iw / im.src.size().x.max(1.0);
-        let crop_px = [
-            ((im.crop.min.x * k).round()).clamp(0.0, iw - 1.0),
-            ((im.crop.min.y * k).round()).clamp(0.0, ih - 1.0),
-        ];
-        let cw0 = ((im.crop.max.x * k).round()).clamp(crop_px[0] + 1.0, iw) - crop_px[0];
-        let ch0 = ((im.crop.max.y * k).round()).clamp(crop_px[1] + 1.0, ih) - crop_px[1];
-        // the source as it is shown, whatever size it is drawn at
-        let src_key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (im.src.id, im.adjust.key()).hash(&mut h);
-            for x in [im.crop.min.x, im.crop.min.y, im.crop.max.x, im.crop.max.y] {
-                x.to_bits().hash(&mut h);
-            }
-            h.finish()
-        };
+        let c = crop_of(im);
+        let (k, cw0, ch0, src_key) = (c.k, c.w, c.h, c.key);
         let on_gpu = cw0 as u32 <= self.max_side && ch0 as u32 <= self.max_side;
         let (sw, sh, factor, ts) = if on_gpu {
             (cw0, ch0, 1.0 / k, 1.0)
@@ -1136,18 +1155,7 @@ impl Gpu {
         let px_per_src = (m.sx * m.sy - m.kx * m.ky).abs().sqrt();
         let inv = [[inv.sx, inv.kx, inv.tx], [inv.ky, inv.sy, inv.ty]];
         if on_gpu {
-            let key = Key { id: layer.id, content: src_key, rect: [sw as i32, sh as i32, 0, 0], view: [1; 4] };
-            let tex = match self.rasters.get_mut(&key) {
-                Some(e) => {
-                    e.1 = self.frame;
-                    e.0.clone()
-                }
-                None => {
-                    let t = self.prepared(im, [crop_px[0] as u32, crop_px[1] as u32], sw as u32, sh as u32);
-                    self.rasters.insert(key, (t.clone(), self.frame));
-                    t
-                }
-            };
+            let tex = self.image_tex(layer.id, im, &c);
             // shown under half size: between the levels about 1.5 texels per
             // target pixel (as the CPU's smaller copy at 1.5)
             let level = match nearest || px_per_src >= 0.5 {
@@ -1176,6 +1184,53 @@ impl Gpu {
             }
         };
         out.push(Node::Image { img, inv, rect, opacity: layer.opacity, nearest, px_per_src, level: 0.0 });
+    }
+
+    /// A photo's cropped, adjusted, mipmapped texture (whole crop, pixel for
+    /// pixel), kept by its look; it must fit the GPU (`Crop` w, h).
+    fn image_tex(&mut self, id: LayerId, im: &crate::doc::ImageLayer, c: &Crop) -> Arc<wgpu::Texture> {
+        let key = Key { id, content: c.key, rect: [c.w as i32, c.h as i32, 0, 0], view: [1; 4] };
+        if let Some(e) = self.rasters.get_mut(&key) {
+            e.1 = self.frame;
+            return e.0.clone();
+        }
+        let t = self.prepared(im, [c.px[0] as u32, c.px[1] as u32], c.w as u32, c.h as u32);
+        self.rasters.insert(key, (t.clone(), self.frame));
+        t
+    }
+
+    /// A thin photo or video frame in a 3D space, sampled straight from its
+    /// texture through the plane's homography `h` (content -> target pixel):
+    /// nothing flattened on the CPU, so a playing video costs one upload a
+    /// frame. None when the photo doesn't fit the GPU (it is flattened then).
+    fn placed_image(&mut self, layer: &Layer, h: &crate::persp::M3, clip: Option<Rect>, v: &View) -> Option<Option<Node>> {
+        let crate::doc::LayerKind::Image(im) = &layer.kind else { return None };
+        let c = crop_of(im);
+        if c.w as u32 > self.max_side || c.h as u32 > self.max_side {
+            return None;
+        }
+        let tex = self.image_tex(layer.id, im, &c);
+        // source pixel -> content (canvas) point, as `image` places it
+        let (sn, cs) = im.rotation.sin_cos();
+        let f = 1.0 / c.k;
+        let place = Transform::from_row(cs * im.scale, sn * im.scale, -sn * im.scale, cs * im.scale, im.center.x, im.center.y).pre_translate(-c.w * f / 2.0, -c.h * f / 2.0).pre_scale(f, f);
+        let a = [[place.sx as f64, place.kx as f64, place.tx as f64], [place.ky as f64, place.sy as f64, place.ty as f64], [0.0, 0.0, 1.0]];
+        let Some(hi) = crate::persp::invert(&crate::persp::mul_mm(h, &a)) else { return Some(None) };
+        let Some(q) = crate::persp::project_poly(h, &im.corners()) else { return Some(None) };
+        let mut bb = Rect::from_points(&q);
+        if let Some(cl) = clip {
+            bb = bb.intersect(cl);
+        }
+        let r = [
+            (bb.min.x.floor() as i32 - 1).max(0),
+            (bb.min.y.floor() as i32 - 1).max(0),
+            (bb.max.x.ceil() as i32 + 1).min(v.tw as i32),
+            (bb.max.y.ceil() as i32 + 1).min(v.th as i32),
+        ];
+        if !bb.is_positive() || r[2] <= r[0] || r[3] <= r[1] {
+            return Some(None);
+        }
+        Some(Some(Node::WarpImage { tex, hi: hi.map(|row| row.map(|x| x as f32)), rect: r, opacity: layer.opacity }))
     }
 
     /// A photo or video frame as it came (straight alpha; a decoded video frame
@@ -1349,6 +1404,13 @@ impl Gpu {
         let h = crate::persp::mul_mm(&out_m, &pl.homography(&cam));
         let res = crate::export::magnification(&h, layer.bounds().unwrap_or(full)).clamp(0.05, 4.0);
         let clip = clip.map(|m| Rect::from_min_max(((m.min - full.min) * v.s).to_pos2(), ((m.max - full.min) * v.s).to_pos2()));
+        // thin photos and video frames: sampled straight from their texture
+        if pl.thick <= 0.0 && std::env::var_os("DV_FLAT_IMAGES").is_none() {
+            if let Some(n) = self.placed_image(&layer, &h, clip, v) {
+                out.extend(n);
+                return;
+            }
+        }
         // flat text and shapes: drawn flat on the GPU from their outlines (no
         // CPU picture, so turning and zooming make nothing on the CPU)
         let gpu_flat = match pl.thick <= 0.0 && crate::gpu_paths::handles(&layer) && std::env::var_os("DV_CPU_2D").is_none() {
@@ -1591,6 +1653,16 @@ impl Gpu {
                 u.h1 = [inv[1][0], inv[1][1], inv[1][2], 0.0];
                 u.p1 = [*px_per_src, *nearest as u8 as f32, *level, 0.0];
                 self.pass(enc, &self.image, target, &u, &t, &self.dummy);
+            }
+            Node::WarpImage { tex, hi, rect, opacity } => {
+                let mut u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                u.tsize[2] = *opacity;
+                u.tsize[3] = 1.0;
+                u.h0 = [hi[0][0], hi[0][1], hi[0][2], 0.0];
+                u.h1 = [hi[1][0], hi[1][1], hi[1][2], 0.0];
+                u.h2 = [hi[2][0], hi[2][1], hi[2][2], 0.0];
+                u.p1[3] = (tex.mip_level_count() - 1) as f32;
+                self.pass(enc, &self.warp_image, target, &u, tex, &self.dummy);
             }
             Node::Warp { img, hi, src, rect, opacity, shade } => {
                 let t = Self::img(img, ready);

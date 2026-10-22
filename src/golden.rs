@@ -205,7 +205,26 @@ fn gpu_parity() {
                 im.rotation = 0.2;
             }
         }
+        // a copy of the photo, smaller and cropped, placed in the space and turned
+        // (sampled straight from its texture on the GPU, flattened on the CPU)
+        let mut p3 = room_doc(false, 0.0);
+        let photo = p3.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))).unwrap().clone();
+        let sid = p3.spaces[0].id;
+        let cam = crate::persp::solve(&p3.spaces[0]).unwrap();
+        if let LayerKind::Image(mut im) = photo.kind {
+            im.scale *= 0.35;
+            im.crop = Rect::from_min_max(im.crop.min + vec2(20.0, 10.0), im.crop.max - vec2(30.0, 40.0));
+            im.center += vec2(60.0, -30.0);
+            let id = p3.insert("p".into(), LayerKind::Image(im), None);
+            let l = p3.get_mut(id).unwrap();
+            let mut pl = crate::persp::Placement::facing(sid, &cam, l.bounds().unwrap().center());
+            pl.rot[1] += 35.0;
+            pl.rot[0] -= 15.0;
+            l.place = Some(pl);
+        }
         vec![
+            ("room_photo3d", p3.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
+            ("room_photo3d_small", p3, rr.center(), rr.size(), 0.0, 0.3, None, 1),
             ("room_small", room.clone(), rr.center(), rr.size(), 0.0, 0.2, None, 1),
             ("room_tiny_ss2", room.clone(), rr.center(), rr.size(), 0.0, 0.07, None, 2),
             ("room_adj", adj.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),

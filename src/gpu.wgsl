@@ -253,6 +253,44 @@ fn fs_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return c * (cov * u.tsize.z);
 }
 
+// A photo or video frame in a 3D space: target pixel -> source pixel through
+// the inverse homography (h0..h2), bicubic between the mip levels its
+// footprint asks for, per pixel (as fs_image: about 1.5 texels per target
+// pixel; the larger axis, so steep views don't alias); edges anti-aliased.
+// Opacity and shade in tsize.z/w, the top mip level in p1.w.
+@fragment
+fn fs_warp_image(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let q = vec3f(pos.xy, 1.0);
+    let w = dot(u.h2.xyz, q);
+    if w <= 1e-12 {
+        discard;
+    }
+    let sp = vec2f(dot(u.h0.xyz, q), dot(u.h1.xyz, q)) / w;
+    // source pixels per target pixel, along x and along y
+    let jx = (vec2f(u.h0.x, u.h1.x) - sp * u.h2.x) / w;
+    let jy = (vec2f(u.h0.y, u.h1.y) - sp * u.h2.y) / w;
+    let rho = max(max(length(jx), length(jy)), 1e-6);
+    let d = vec2f(textureDimensions(tex0));
+    let edge = min(min(sp.x, d.x - sp.x), min(sp.y, d.y - sp.y)) / rho;
+    let cov = clamp(edge + 0.5, 0.0, 1.0);
+    if cov <= 0.0 {
+        discard;
+    }
+    var lv = 0.0;
+    if rho > 2.0 {
+        lv = clamp(log2(rho / 1.5), 0.0, u.p1.w);
+    }
+    let l = i32(floor(lv));
+    let t = lv - floor(lv);
+    var c = bicubic(sp, d, l);
+    if t > 0.0 {
+        c = mix(c, bicubic(sp, d, l + 1), t);
+    }
+    let a = clamp(c.a, 0.0, 1.0);
+    c = vec4f(clamp(c.rgb, vec3f(0.0), vec3f(a)), a) * (cov * u.tsize.z);
+    return vec4f(c.rgb * u.tsize.w, c.a);
+}
+
 // Video output as NV12 (BT.709, limited range), from the finished picture in
 // tex0 (premultiplied, opaque for these codecs): fs_y writes the luma plane,
 // fs_uv the half-size interleaved chroma plane (2x2 average).
