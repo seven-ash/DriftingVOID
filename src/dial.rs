@@ -68,11 +68,19 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
     label_cell_nav(ui, text, mark, hit, None);
 }
 
+/// A dial row's width, and where its parts sit along it: the ring starts at
+/// LABEL_SLOT (after the label, key mark and navigator), the number box
+/// (BOX_W, room for "-99999.99") and the reset pin's room (PIN_W) end the
+/// row, GAP apart.
+pub const ROW_W: f32 = 280.0;
+const LABEL_SLOT: f32 = 78.0;
+const BOX_W: f32 = 72.0;
+const PIN_W: f32 = 16.0;
+const GAP: f32 = 8.0;
+
 /// Width of a < or > beside the key mark.
 const NAV_W: f32 = 8.0;
 
-/// Extra room after a keyable row's label, so the > never touches the ring.
-const NAV_GAP: f32 = 6.0;
 
 /// `label_cell` with the key navigator: when the value has keys, a < just left
 /// of its key mark and a > in the gap after it jump the playhead to the key
@@ -268,36 +276,38 @@ impl Widget for Dial<'_> {
         let before = *value;
 
         let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
-        let width = ui.available_width();
+        // the row's parts sit at fixed places along it (Ash, 10-22): label and
+        // key from the left, the ring from LABEL_SLOT, the number box and the
+        // reset pin's room at the right end, each with a margin; the row is
+        // ROW_W wide (less only where the room is narrower), and nothing in it
+        // can push it wider
+        let row_w = ROW_W.min(ui.available_width());
         // the row is as tall as a number box, so ring, label and box share one centre
         let row_h = ui.spacing().interact_size.y.max(24.0);
-        let mut out = ui
-            .allocate_ui_with_layout(vec2(width, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                // a fixed-height row, so every item centres on the same line
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let label_w = label_width(&text, key.is_some());
-                let key_cell = key.is_some();
+        let (row, _) = ui.allocate_exact_size(vec2(row_w, row_h), Sense::hover());
+        let label_w = label_width(&text, key.is_some());
+        let box_w = BOX_W + if suffix.is_empty() { 0.0 } else { 14.0 };
+        let pin_r = egui::Rect::from_min_max(egui::pos2(row.right() - PIN_W, row.top()), row.max);
+        let box_h = ui.spacing().interact_size.y;
+        let box_r = egui::Rect::from_center_size(egui::pos2(pin_r.left() - GAP - box_w * 0.5, row.center().y), vec2(box_w, box_h));
+        let ring_x0 = if label_w > 0.0 { row.left() + LABEL_SLOT } else { row.left() };
+        let r = egui::Rect::from_min_max(egui::pos2(ring_x0, row.top() + 2.0), egui::pos2((box_r.left() - GAP).max(ring_x0 + 30.0), row.bottom() - 2.0));
+        let mut out = {
+            {
                 if label_w > 0.0 {
                     let mut dummy = false;
                     let (mark, hit) = match key {
                         Some((m, h)) => (Some(m), h),
                         None => (None, &mut dummy),
                     };
-                    label_cell_nav(ui, &text, mark, hit, nav);
+                    let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(row.min, vec2(label_w, row_h))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                    label_cell_nav(&mut lu, &text, mark, hit, nav);
                 }
-                // keyable rows leave the key navigator's > room before the ring (on
-                // every keyable row, keyed or not, so their rings line up)
-                let nav_gap = if key_cell { NAV_GAP } else { 0.0 };
-                ui.add_space(nav_gap);
-                // fixed slots, so every row's ring starts and ends at the same x:
-                // the number box never grows with its text, and rows without a
-                // default keep the pin's room empty
-                let value_w = 58.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
-                let pin_w = 16.0;
-                let ring_w = (width - label_w - nav_gap - value_w - pin_w - 18.0).max(60.0);
 
                 // ---- the ring
-                let (r, resp) = ui.allocate_exact_size(vec2(ring_w, row_h - 4.0), Sense::click_and_drag());
+                let rid = ui.next_auto_id();
+                ui.skip_ahead_auto_ids(1);
+                let resp = ui.interact(r, rid, Sense::click_and_drag());
                 // while dragging, keep turning from the unrounded position as long as
                 // nobody else changed the value (integer dials and callers that
                 // round would otherwise eat sub-step motion and stutter)
@@ -388,11 +398,15 @@ impl Widget for Dial<'_> {
                 if mixed {
                     dv = dv.custom_formatter(|_, _| MIXED.into());
                 }
-                ui.spacing_mut().interact_size.x = value_w;
-                let vr = ui.add_sized(vec2(value_w, ui.spacing().interact_size.y), dv);
+                // in a Ui of its own: a long value draws inside its box and never
+                // moves or widens anything else
+                let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(box_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                bu.set_clip_rect(ui.clip_rect().intersect(box_r.expand(1.0)));
+                bu.spacing_mut().interact_size.x = box_w;
+                let vr = bu.add_sized(box_r.size(), dv);
 
                 // ---- reset pin
-                let (pr, presp) = ui.allocate_exact_size(vec2(pin_w, row_h), Sense::click());
+                let (pr, presp) = (pin_r, ui.interact(pin_r, rid.with("pin"), Sense::click()));
                 if let Some(d) = default {
                     let off = (*value - d).abs() > (hi - lo).abs() * 1e-4;
                     if off {
@@ -407,8 +421,8 @@ impl Widget for Dial<'_> {
                     }
                 }
                 resp.union(vr)
-            })
-            .inner;
+            }
+        };
         if (*value - before).abs() > f32::EPSILON {
             out.mark_changed();
         }

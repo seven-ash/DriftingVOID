@@ -9198,7 +9198,8 @@ impl App {
                 });
             });
         let mut x = SPACE_LG + card(layers_w) + gap;
-        let main_w = 244.0;
+        // as wide as a dial row (its parts sit at fixed places)
+        let main_w = crate::dial::ROW_W;
         egui::Area::new(egui::Id::new("inspector"))
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
@@ -9226,7 +9227,7 @@ impl App {
             });
         x += card(main_w) + gap;
         if self.tool == Tool::Frame {
-            let side_w = 244.0;
+            let side_w = crate::dial::ROW_W;
             egui::Area::new(egui::Id::new("inspector2"))
                 .order(egui::Order::Middle)
                 .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
