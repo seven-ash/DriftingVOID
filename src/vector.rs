@@ -184,7 +184,118 @@ fn capsule(p0: Pos2, r0: f32, p1: Pos2, r1: f32, seg_scale: f32) -> Vec<Pos2> {
     pts
 }
 
+/// The pointer's path as a curve through its samples (centripetal
+/// Catmull-Rom; pressure eased linearly between samples): a quick stroke's
+/// samples lie far apart, and joining them straight shows as a polygon. A
+/// piece is made once the sample after it has arrived, so the stroke trails
+/// the pen by one sample; `finish` draws the last piece.
+pub struct Curve {
+    q: Vec<[f32; 3]>,
+}
+
+impl Curve {
+    /// Starting at `p` (x, y, pressure), already drawn by the caller.
+    pub fn new(p: [f32; 3]) -> Self {
+        Self { q: vec![p] }
+    }
+
+    /// A new sample: the points of the curve up to the sample before it, about
+    /// `step` apart (the last one on that sample).
+    pub fn push(&mut self, p: [f32; 3], step: f32) -> Vec<[f32; 3]> {
+        if self.q.last().is_some_and(|l| (l[0] - p[0]).abs() < 1e-4 && (l[1] - p[1]).abs() < 1e-4) {
+            return Vec::new();
+        }
+        self.q.push(p);
+        if self.q.len() > 4 {
+            self.q.remove(0);
+        }
+        let q = &self.q;
+        match q.len() {
+            3 => piece(q[0], q[0], q[1], q[2], step),
+            4 => piece(q[0], q[1], q[2], q[3], step),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The last piece, to the last sample.
+    pub fn finish(&mut self, step: f32) -> Vec<[f32; 3]> {
+        let q = &self.q;
+        let n = q.len();
+        let out = match n {
+            0 | 1 => Vec::new(),
+            2 => piece(q[0], q[0], q[1], q[1], step),
+            _ => piece(q[n - 3], q[n - 2], q[n - 1], q[n - 1], step),
+        };
+        self.q.truncate(n.min(1));
+        out
+    }
+}
+
+/// Points from `b` (left out) to `c` (included) on the centripetal
+/// Catmull-Rom curve through a, b, c, d (Barry–Goldman).
+fn piece(a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], step: f32) -> Vec<[f32; 3]> {
+    let xy = |p: [f32; 3]| vec2(p[0], p[1]);
+    let (pa, pb, pc, pd) = (xy(a), xy(b), xy(c), xy(d));
+    let len = (pc - pb).length();
+    let n = ((len / step.max(1e-3)).ceil() as usize).clamp(1, 256);
+    // knot spacing: square root of the distance (no loops or cusps on uneven samples)
+    let gap = |u: Vec2, v: Vec2| (u - v).length().sqrt().max(1e-3);
+    let t0 = 0.0;
+    let t1 = t0 + gap(pa, pb);
+    let t2 = t1 + gap(pb, pc);
+    let t3 = t2 + gap(pc, pd);
+    let lerp = |p: Vec2, q: Vec2, ta: f32, tb: f32, t: f32| p + (q - p) * ((t - ta) / (tb - ta));
+    (1..=n)
+        .map(|i| {
+            let f = i as f32 / n as f32;
+            let t = t1 + (t2 - t1) * f;
+            let a1 = lerp(pa, pb, t0, t1, t);
+            let a2 = lerp(pb, pc, t1, t2, t);
+            let a3 = lerp(pc, pd, t2, t3, t);
+            let b1 = lerp(a1, a2, t0, t2, t);
+            let b2 = lerp(a2, a3, t1, t3, t);
+            let p = if i == n { pc } else { lerp(b1, b2, t1, t2, t) };
+            [p.x, p.y, b[2] + (c[2] - b[2]) * f]
+        })
+        .collect()
+}
+
 /// Point radius for a given pressure.
 pub fn radius_for(base: f32, pressure: f32, use_pressure: bool) -> f32 {
     if use_pressure { base * (0.1 + 0.9 * pressure.clamp(0.0, 1.0)) } else { base }.max(0.3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quick_circle_stays_round() {
+        // samples every 30° on a circle of radius 100: joined straight they
+        // miss it by 3.4 at each chord's middle
+        let at = |k: usize| {
+            let a = k as f32 * std::f32::consts::PI / 6.0;
+            [100.0 * a.cos(), 100.0 * a.sin(), k as f32 / 12.0]
+        };
+        let mut c = Curve::new(at(0));
+        let mut pts = vec![at(0)];
+        for k in 1..=12 {
+            pts.extend(c.push(at(k), 1.5));
+        }
+        pts.extend(c.finish(1.5));
+        let last = pts.last().unwrap();
+        assert!((last[0] - 100.0).abs() < 1e-3 && last[1].abs() < 1e-2, "ends on the last sample");
+        // where both neighbouring samples are known (30°–330°), within half a
+        // unit of the circle
+        let inner = |p: &&[f32; 3]| {
+            let a = p[1].atan2(p[0]).rem_euclid(std::f32::consts::TAU).to_degrees();
+            (31.0..329.0).contains(&a)
+        };
+        let worst = pts.iter().filter(inner).map(|p| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 100.0).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.5, "off the circle by {worst}");
+        // dense: no gap much wider than the step (the curve is a little longer than its chord)
+        assert!(pts.windows(2).all(|w| (vec2(w[1][0], w[1][1]) - vec2(w[0][0], w[0][1])).length() <= 2.5));
+        // pressure rises monotonically with the samples
+        assert!(pts.windows(2).all(|w| w[1][2] >= w[0][2] - 1e-6));
+    }
 }

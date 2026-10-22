@@ -157,8 +157,8 @@ enum Drag {
     NewShape { id: LayerId, start: Pos2 },
     Crop { id: LayerId, handle: u8, start_src: Pos2, orig: ImageLayer },
     Frame { handle: u8, start: Pos2, orig: Rect },
-    Raster { id: LayerId, stroke: Option<RasterStroke>, smooth: (Pos2, f32) },
-    Vector { id: LayerId, pts: Vec<[f32; 3]>, smooth: (Pos2, f32), base_r: f32, pressure: bool, color: Color32 },
+    Raster { id: LayerId, stroke: Option<RasterStroke>, smooth: (Pos2, f32), curve: crate::vector::Curve },
+    Vector { id: LayerId, pts: Vec<[f32; 3]>, smooth: (Pos2, f32), base_r: f32, pressure: bool, color: Color32, curve: crate::vector::Curve },
     VErase { id: LayerId, r: f32 },
     Zoom { anchor: Pos2 },
     Size { anchor: Pos2, start: f32, x0: f32 },
@@ -1039,6 +1039,9 @@ fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<
     let c = pm.pixel(0, 0)?.demultiply();
     (c.alpha() > 0).then(|| Color32::from_rgb(c.red(), c.green(), c.blue()))
 }
+
+/// Screen points between the points of a drawn curve (`vector::Curve`).
+const CURVE_STEP: f32 = 1.5;
 
 const SLOT_CANVAS: u8 = 0;
 const SLOT_3D: u8 = 1;
@@ -5207,7 +5210,7 @@ impl App {
                         }
                         let mut st = RasterStroke::new(p);
                         st.add_point(r, w - r.offset, pressure);
-                        self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure) });
+                        self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure), curve: crate::vector::Curve::new([w.x, w.y, pressure]) });
                         if !erase {
                             self.remember_color(self.s.color);
                         }
@@ -5244,6 +5247,7 @@ impl App {
                     base_r,
                     pressure: self.s.pen_pressure,
                     color: self.s.color,
+                    curve: crate::vector::Curve::new([w.x, w.y, pressure]),
                 });
                 self.remember_color(self.s.color);
             }
@@ -6563,23 +6567,19 @@ impl App {
                 self.changed = true;
                 self.modified = true;
             }
-            Drag::Raster { id, stroke, smooth } => {
+            Drag::Raster { id, stroke, smooth, curve } => {
                 let np = smooth.0 + (w - smooth.0) * (1.0 - smoothing);
                 let npr = smooth.1 + (pressure - smooth.1) * (1.0 - smoothing * 0.5);
                 *smooth = (np, npr);
                 let id = *id;
+                let more = curve.push([np.x, np.y, npr], CURVE_STEP / zoom);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
-                    st.add_point(r, np - r.offset, npr);
-                    if let Some((c, _, live)) = self.rec_clock {
-                        let lp = np - r.offset;
-                        self.rec_pts.push([lp.x, lp.y, npr]);
-                        self.rec_times.push(if live { c.elapsed().as_secs_f32() } else { 0.0 });
-                    }
+                    Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                 }
                 self.changed = true;
                 self.modified = true;
             }
-            Drag::Vector { id, pts, smooth, base_r, pressure: use_p, .. } => {
+            Drag::Vector { id, pts, smooth, base_r, pressure: use_p, curve, .. } => {
                 let np = smooth.0 + (w - smooth.0) * (1.0 - smoothing);
                 let npr = smooth.1 + (pressure - smooth.1) * (1.0 - smoothing * 0.5);
                 *smooth = (np, npr);
@@ -6587,14 +6587,8 @@ impl App {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
                 };
-                let l = np - off;
-                let last = pts.last().copied().unwrap();
-                if (pos2(last[0], last[1]) - l).length() >= 0.75 / zoom {
-                    pts.push([l.x, l.y, radius_for(*base_r, npr, *use_p)]);
-                    if let Some((c, _, _)) = self.rec_clock {
-                        self.rec_times.push(c.elapsed().as_secs_f32());
-                    }
-                }
+                let more = curve.push([np.x, np.y, npr], CURVE_STEP / zoom);
+                Self::vector_points(pts, &more, off, *base_r, *use_p, zoom, self.rec_clock, &mut self.rec_times);
             }
             Drag::VErase { id, r } => {
                 let id = *id;
@@ -6607,6 +6601,33 @@ impl App {
                         self.changed = true;
                         self.modified = true;
                     }
+                }
+            }
+        }
+    }
+
+    /// Curve points into a brush stroke (and its recording).
+    fn raster_points(st: &mut RasterStroke, r: &mut crate::raster::RasterLayer, more: &[[f32; 3]], rec: Option<(std::time::Instant, f64, bool)>, rec_pts: &mut Vec<[f32; 3]>, rec_times: &mut Vec<f32>) {
+        for p in more {
+            let lp = pos2(p[0], p[1]) - r.offset;
+            st.add_point(r, lp, p[2]);
+            if let Some((c, _, live)) = rec {
+                rec_pts.push([lp.x, lp.y, p[2]]);
+                rec_times.push(if live { c.elapsed().as_secs_f32() } else { 0.0 });
+            }
+        }
+    }
+
+    /// Curve points into a pen stroke's points (and its recording times).
+    #[allow(clippy::too_many_arguments)]
+    fn vector_points(pts: &mut Vec<[f32; 3]>, more: &[[f32; 3]], off: Vec2, base_r: f32, use_p: bool, zoom: f32, rec: Option<(std::time::Instant, f64, bool)>, rec_times: &mut Vec<f32>) {
+        for p in more {
+            let l = pos2(p[0], p[1]) - off;
+            let last = pts.last().copied().unwrap();
+            if (pos2(last[0], last[1]) - l).length() >= 0.75 / zoom {
+                pts.push([l.x, l.y, radius_for(base_r, p[2], use_p)]);
+                if let Some((c, _, _)) = rec {
+                    rec_times.push(c.elapsed().as_secs_f32());
                 }
             }
         }
@@ -6739,9 +6760,11 @@ impl App {
             Drag::Group { center, s, th, .. } => {
                 self.remap_pixel_sel(center, s, th, Vec2::ZERO);
             }
-            Drag::Raster { id, stroke: Some(st), .. } => {
+            Drag::Raster { id, stroke: Some(mut st), mut curve, .. } => {
                 let params = st.p;
+                let more = curve.finish(CURVE_STEP / self.zoom);
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    Self::raster_points(&mut st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                     st.finish(r);
                     if let Some((_, start, live)) = self.rec_clock.take() {
                         let rec = crate::raster::BrushRec { start, params, pts: std::mem::take(&mut self.rec_pts), times: std::mem::take(&mut self.rec_times) };
@@ -6753,9 +6776,12 @@ impl App {
                     }
                 }
             }
-            Drag::Vector { id, mut pts, color, smooth, base_r, pressure, .. } => {
+            Drag::Vector { id, mut pts, color, smooth, base_r, pressure, mut curve, .. } => {
                 let wsp = self.xf().s2w(sp);
+                let more = curve.finish(CURVE_STEP / self.zoom);
+                let zoom = self.zoom;
                 if let Some(LayerKind::Vector(v)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    Self::vector_points(&mut pts, &more, v.offset, base_r, pressure, zoom, self.rec_clock, &mut self.rec_times);
                     let l = wsp - v.offset;
                     let last = pts.last().copied().unwrap();
                     if (pos2(last[0], last[1]) - l).length() > 0.5 {
@@ -8067,8 +8093,10 @@ impl App {
                             if ui.button("다음").on_hover_text("다음 프레임 ( . )").clicked() {
                                 vid_act = Some(VidAct::Step(1));
                             }
-                            ui.label(egui::RichText::new(format!("{} / {}", crate::video::timecode(v.time), crate::video::timecode(v.info.duration))).monospace());
                         });
+                        // on its own line: beside the buttons it was wider than the card,
+                        // and egui widened every row below with it
+                        ui.label(egui::RichText::new(format!("{} / {}", crate::video::timecode(v.time), crate::video::timecode(v.info.duration))).monospace());
                         let mut t = v.time;
                         ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                         let sr = ui.add(egui::Slider::new(&mut t, 0.0..=v.info.duration.max(0.01)).show_value(false));
