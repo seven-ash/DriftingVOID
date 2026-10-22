@@ -6585,7 +6585,7 @@ impl App {
                 *smooth = (w, pressure);
                 self.stroke_fed = self.now;
                 let id = *id;
-                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
+                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom, self.now);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
                     Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                 }
@@ -6599,7 +6599,7 @@ impl App {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
                 };
-                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
+                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom, self.now);
                 Self::vector_points(pts, &more, off, *base_r, *use_p, zoom, self.rec_clock, &mut self.rec_times);
             }
             Drag::VErase { id, r } => {
@@ -6618,17 +6618,15 @@ impl App {
         }
     }
 
-    /// Stroke catch-up for `dt` seconds of a resting pen (`vector::Curve::catch_up`):
-    /// the brush closes on the pen with a time constant that grows with
-    /// 손떨림 보정 (0.05 s at 0, 0.2 s at 1). True while it is still closing.
-    fn stroke_catch_up(&mut self, dt: f32) -> bool {
-        let tau = 0.05 + 0.15 * self.s.smoothing.clamp(0.0, 1.0);
-        let frac = 1.0 - (-dt / tau).exp();
+    /// A frame of a pen or brush stroke without a pen sample (`dt` seconds):
+    /// the brush keeps following at its pace (`vector::Curve::follow`), and
+    /// settles on the pen once it has `rested`. True while it still moves.
+    fn stroke_follow(&mut self, dt: f32, rested: bool) -> bool {
         let step = CURVE_STEP / self.zoom;
         let zoom = self.zoom;
         match &mut self.drag {
             Some(Drag::Raster { id, stroke: Some(st), curve, .. }) => {
-                let (more, going) = curve.catch_up(frac, step);
+                let (more, going) = curve.follow(dt, rested, step);
                 let id = *id;
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                     Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
@@ -6640,7 +6638,7 @@ impl App {
                 going
             }
             Some(Drag::Vector { id, pts, base_r, pressure, curve, .. }) => {
-                let (more, going) = curve.catch_up(frac, step);
+                let (more, going) = curve.follow(dt, rested, step);
                 let off = match self.doc.get(*id).map(|l| &l.kind) {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
@@ -7173,19 +7171,20 @@ impl App {
             }
         }
 
-        // a pen or brush stroke whose pen has rested a moment: the brush catches
-        // up (not between the samples of a moving pen: that pulled the brush
-        // straight at the pen's newest point and left burrs at corners)
-        let resting = self.now - self.stroke_fed > STROKE_REST;
+        // a pen or brush stroke: in frames without a pen sample the brush keeps
+        // following at its pace, and once the pen has rested a moment the path
+        // is completed up to it and the brush settles there (not sooner: that
+        // pulled the brush straight at the pen's newest point and left burrs)
         if matches!(self.drag, Some(Drag::Raster { .. } | Drag::Vector { .. })) {
-            if !resting {
+            let rested = self.now - self.stroke_fed > STROKE_REST;
+            let fed_now = self.stroke_fed == self.now;
+            let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.1);
+            let going = !fed_now && self.stroke_follow(dt, rested);
+            if going {
+                ctx.request_repaint();
+            } else if !rested {
                 // frames keep coming while the pen holds still
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(STROKE_REST));
-            } else {
-                let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.1);
-                if self.stroke_catch_up(dt) {
-                    ctx.request_repaint();
-                }
             }
         }
 

@@ -196,9 +196,10 @@ fn capsule(p0: Pos2, r0: f32, p1: Pos2, r1: f32, seg_scale: f32) -> Vec<Pos2> {
 ///    that much path). It only ever moves part of the way towards where it is
 ///    pulled, so it never overshoots: a zigzag comes out as a wave, a jitter
 ///    as a calm line, and it trails the pen by about `length`.
-/// 3. When the pen rests (`catch_up`), the path is completed up to the pen
-///    and the brush closes on it over time; when the pen moves on, the path
-///    carries on from there, so the brush never turns back.
+/// 3. Between samples and while the pen rests (`follow`), the brush keeps
+///    closing on its path at the pace it had; after a moment's rest the path
+///    is completed up to the pen and the brush settles on it. When the pen
+///    moves on, the path carries on from there, so the brush never turns back.
 ///
 /// Points come out about `step` apart. `finish` ends the stroke where the
 /// brush has got to (after the path's last stretch to the pen).
@@ -214,52 +215,83 @@ pub struct Curve {
     ctrl: [f32; 3],
     /// Where the path has been fed up to.
     fed: [f32; 3],
+    /// How fast the path has been growing (units a second, smoothed), the
+    /// path fed since `last_t`, and that time: a resting pen is followed at
+    /// the pace the brush had.
+    speed: f32,
+    grown: f32,
+    last_t: f64,
 }
 
 impl Curve {
     /// Starting at `p` (x, y, pressure), already drawn by the caller;
     /// `length`: the smoothing length (0: none), in the points' units.
     pub fn new(p: [f32; 3], length: f32) -> Self {
-        Self { length: length.max(0.0), brush: p, out_last: p, start: p, ctrl: p, fed: p }
+        Self { length: length.max(0.0), brush: p, out_last: p, start: p, ctrl: p, fed: p, speed: 0.0, grown: 0.0, last_t: f64::NAN }
     }
 
-    /// A new sample: the points the brush has drawn on the way.
-    pub fn push(&mut self, p: [f32; 3], step: f32) -> Vec<[f32; 3]> {
+    /// A new sample at time `t` (seconds): the points the brush has drawn on
+    /// the way.
+    pub fn push(&mut self, p: [f32; 3], step: f32, t: f64) -> Vec<[f32; 3]> {
         let c = self.ctrl;
         if (p[0] - c[0]).abs() < 1e-4 && (p[1] - c[1]).abs() < 1e-4 {
             return Vec::new();
         }
         let end = mid(c, p);
         let mut out = Vec::new();
+        let before = self.fed;
         self.feed_quad(self.start, c, end, step, &mut out);
+        self.grown += dist(before, self.fed);
+        // samples of one frame share its time: the pace is taken per frame
+        if self.last_t.is_nan() {
+            self.last_t = t;
+            self.grown = 0.0;
+        } else if t > self.last_t + 1e-4 {
+            let v = self.grown / (t - self.last_t) as f32;
+            self.speed = if self.speed > 0.0 { self.speed * 0.6 + v * 0.4 } else { v };
+            self.grown = 0.0;
+            self.last_t = t;
+        }
         self.start = end;
         self.ctrl = p;
         out
     }
 
-    /// The pen rests (no sample for a moment): the path is completed up to
-    /// the pen, and the brush moves `frac` of the way on to it (time-based
-    /// catch-up). False once it is there.
-    pub fn catch_up(&mut self, frac: f32, step: f32) -> (Vec<[f32; 3]>, bool) {
+    /// A frame without a pen sample (`dt` seconds): the brush keeps closing
+    /// on the end of its path at the pace it had, as it would have over
+    /// that much more path, so it neither stalls nor rushes and brakes. Once
+    /// the pen has `rested`, the path is completed up to the pen first, and
+    /// the brush settles on it. False once there is nothing left to close.
+    pub fn follow(&mut self, dt: f32, rested: bool, step: f32) -> (Vec<[f32; 3]>, bool) {
         let mut out = Vec::new();
-        self.complete(step, &mut out);
-        let p = self.ctrl;
-        let gap = dist(self.brush, p);
+        if rested {
+            self.complete(step, &mut out);
+        }
+        let target = self.fed;
+        let gap = dist(self.brush, target);
         if gap < step * 0.3 {
-            // there: settled on the pen
-            self.brush = p;
-            if dist(self.out_last, p) > 1e-3 {
-                self.out_last = p;
-                out.push(p);
+            if rested {
+                // there: settled on the pen
+                self.brush = target;
+                if dist(self.out_last, target) > 1e-3 {
+                    self.out_last = target;
+                    out.push(target);
+                }
             }
             return (out, false);
         }
-        let f = frac.clamp(0.0, 1.0);
+        // over a smoothing length the pace closes 1/e of the gap; never slower
+        // than a length per 0.6 s (a pen that crept, then stopped)
+        let f = if self.length <= 1e-4 {
+            1.0
+        } else {
+            let v = self.speed.max(self.length / 0.6);
+            1.0 - (-v * dt.max(0.0) / self.length).exp()
+        };
         let b = self.brush;
         let n = ((gap * f / (step * 0.5).max(1e-3)).ceil() as usize).clamp(1, 256);
         for i in 1..=n {
-            let k = f * i as f32 / n as f32;
-            self.brush = lerp3(b, p, k);
+            self.brush = lerp3(b, target, f * i as f32 / n as f32);
             self.emit(step, &mut out);
         }
         (out, true)
@@ -344,9 +376,11 @@ mod tests {
             [100.0 * a.cos(), 100.0 * a.sin(), k as f32 / 12.0]
         };
         let mut c = Curve::new(at(0), 0.0);
+        let mut t = 0.0;
         let mut pts = vec![at(0)];
         for k in 1..=12 {
-            pts.extend(c.push(at(k), 1.5));
+            t += 1.0 / 120.0;
+            pts.extend(c.push(at(k), 1.5, t));
         }
         pts.extend(c.finish(1.5));
         let last = pts.last().unwrap();
@@ -376,28 +410,48 @@ mod tests {
     }
 
     /// The pen stops after a quick line with strong smoothing: the brush,
-    /// left behind by its smoothing distance, follows on to the pen frame by
-    /// frame and settles under it (Ash, 10-22: it waited at a distance).
+    /// left behind by its smoothing length, carries on to the pen frame by
+    /// frame and settles under it (Ash, 10-22: it waited at a distance), at
+    /// the pace it had, slowing smoothly, not rushing and braking.
     #[test]
-    fn a_resting_pen_is_caught_up() {
-        let mut c = Curve::new([0.0, 0.0, 0.5], 90.0);
+    fn a_resting_pen_is_followed_at_its_pace() {
+        let mut c = Curve::new([0.0, 0.0, 0.5], 54.0);
         let mut pts = Vec::new();
+        let mut t = 0.0;
+        // 15 px every 1/120 s: 1800 px/s
+        let mut last = [0.0f32; 2];
+        let mut moved = 0.0;
         for k in 1..=20 {
-            pts.extend(c.push([k as f32 * 15.0, 0.0, 0.5], 1.5));
+            t += 1.0 / 120.0;
+            pts.extend(c.push([k as f32 * 15.0, 0.0, 0.5], 1.5, t));
+            let b = c.brush;
+            if k > 10 {
+                moved = (b[0] - last[0]) * 120.0;
+            }
+            last = [b[0], b[1]];
         }
-        let behind = 300.0 - pts.last().unwrap()[0];
+        let behind = 300.0 - c.brush[0];
         assert!(behind > 20.0, "smoothing left it {behind} behind");
+        // frames at 165 Hz without samples (a moment, then a rest)
         let mut frames = 0;
+        let mut first = None;
         loop {
-            let (more, going) = c.catch_up(0.1, 1.5);
+            let x0 = c.brush[0];
+            let (more, going) = c.follow(1.0 / 165.0, frames >= 16, 1.5);
             pts.extend(more);
+            if first.is_none() {
+                first = Some((c.brush[0] - x0) * 165.0);
+            }
             frames += 1;
-            if !going || frames > 200 {
+            if (!going && frames >= 16) || frames > 400 {
                 break;
             }
         }
         let gap = 300.0 - pts.last().unwrap()[0];
-        assert!(gap < 1.0 && frames < 80, "{gap} short after {frames} frames");
+        assert!(gap.abs() < 0.5 && frames < 200, "{gap} short after {frames} frames");
+        // its first pace once the samples stop matches the pace it had
+        let v0 = first.unwrap();
+        assert!(v0 > moved * 0.5 && v0 < moved * 1.5, "paced {v0} px/s after {moved}");
         // straight on, never back
         assert!(pts.windows(2).all(|w| w[1][0] >= w[0][0] - 1e-3 && w[1][1].abs() < 1e-3));
     }
@@ -409,6 +463,7 @@ mod tests {
     fn a_zigzag_with_rests_has_no_burrs() {
         for rest in [true, false] {
             let mut c = Curve::new([0.0, 0.0, 0.5], 24.0);
+            let mut t = 0.0;
             let mut pts = vec![[0.0f32, 0.0, 0.5]];
             let mut p = [0.0f32, 0.0];
             for k in 0..8 {
@@ -416,11 +471,13 @@ mod tests {
                 let d = if k % 2 == 0 { [1.0, 0.3] } else { [0.3, 1.0] };
                 for _ in 0..5 {
                     p = [p[0] + d[0] * 12.0, p[1] + d[1] * 12.0];
-                    pts.extend(c.push([p[0], p[1], 0.5], 1.5));
+                    t += 1.0 / 120.0;
+                    pts.extend(c.push([p[0], p[1], 0.5], 1.5, t));
                 }
                 if rest {
-                    for _ in 0..40 {
-                        pts.extend(c.catch_up(0.15, 1.5).0);
+                    for f in 0..80 {
+                        t += 1.0 / 165.0;
+                        pts.extend(c.follow(1.0 / 165.0, f >= 16, 1.5).0);
                     }
                 }
             }
@@ -457,17 +514,20 @@ mod tests {
             for (row, rest) in [false, true].into_iter().enumerate() {
                 let start = [ox, 20.0 + row as f32 * 200.0, 0.5];
                 let mut c = Curve::new(start, length);
+                let mut t = 0.0;
                 let mut pts = vec![start];
                 let mut p = [start[0], start[1]];
                 for k in 0..8 {
                     let d = if k % 2 == 0 { [1.0, 0.25] } else { [0.25, 1.0] };
                     for _ in 0..3 {
                         p = [p[0] + d[0] * 9.0 + rnd() * 2.0, p[1] + d[1] * 9.0 + rnd() * 2.0];
-                        pts.extend(c.push([p[0], p[1], 0.5], 1.5));
+                        t += 1.0 / 120.0;
+                        pts.extend(c.push([p[0], p[1], 0.5], 1.5, t));
                     }
                     if rest {
-                        for _ in 0..30 {
-                            pts.extend(c.catch_up(0.15, 1.5).0);
+                        for f in 0..60 {
+                            t += 1.0 / 165.0;
+                            pts.extend(c.follow(1.0 / 165.0, f >= 16, 1.5).0);
                         }
                     }
                 }
@@ -500,12 +560,14 @@ mod tests {
         // a line along x
         let mut x = 0.0;
         let mut c = Curve::new([0.0, 0.0, 0.5], 40.0);
+        let mut t = 0.0;
         let (mut pts, mut raw) = (Vec::new(), vec![[0.0f32, 0.0]]);
         while x < 600.0 {
             x += 10.0 + rnd() * 8.0;
             let y = rnd() * 3.0;
             raw.push([x, y]);
-            pts.extend(c.push([x, y, 0.5], 1.5));
+            t += 1.0 / 120.0;
+            pts.extend(c.push([x, y, 0.5], 1.5, t));
         }
         pts.extend(c.finish(1.5));
         let mid: Vec<&[f32; 3]> = pts.iter().filter(|p| p[0] > 60.0 && p[0] < 540.0).collect();
@@ -523,12 +585,14 @@ mod tests {
         // a letter-sized arc (radius 80) sampled every 10–16 px, each up to 0.5
         // off it
         let mut c = Curve::new([80.0, 0.0, 0.5], 40.0);
+        let mut t = 0.0;
         let mut pts = vec![[80.0f32, 0.0, 0.5]];
         let mut a = 0.0f32;
         while a < 4.0 {
             a += 0.16 + rnd() * 0.08;
             let r = 80.0 + rnd() * 1.0;
-            pts.extend(c.push([r * a.cos(), r * a.sin(), 0.5], 1.5));
+            t += 1.0 / 120.0;
+            pts.extend(c.push([r * a.cos(), r * a.sin(), 0.5], 1.5, t));
         }
         pts.extend(c.finish(1.5));
         // over every 15 px (ten steps) the heading turns the arc's way
