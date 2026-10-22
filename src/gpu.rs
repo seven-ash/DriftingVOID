@@ -97,6 +97,9 @@ enum Node {
     /// one instance per edge) into `rect`'s box, multisampled with a depth
     /// buffer, then put over the target; `scissor` in box pixels.
     Sides { edges: Arc<wgpu::Buffer>, count: u32, u: SideUniform, rect: [i32; 4], scissor: [u32; 4] },
+    /// Drawn alone, then multiplied by the alpha of `opening` (drawn alone
+    /// too): an engraving's floor and inner walls seen through its shape.
+    Cut { inner: Vec<Node>, opening: Vec<Node>, rect: [i32; 4] },
     /// Drawn alone, then multiplied by a mask's keep values.
     Masked { inner: Vec<Node>, keep: Img, off: [i32; 2], rect: [i32; 4], outside: f32 },
     /// Drawn alone, then cut by a mask sampled from its tile atlas: `a` maps a
@@ -130,6 +133,7 @@ pub struct Gpu {
     warp_image: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     mask: wgpu::RenderPipeline,
+    cut: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
     sides_layout: wgpu::BindGroupLayout,
     sides_pipe: wgpu::RenderPipeline,
@@ -411,6 +415,7 @@ impl Gpu {
         let warp_image = pipe("fs_warp_image", Some(over_blend));
         let blend = pipe("fs_blend", None);
         let mask = pipe("fs_mask", Some(over_blend));
+        let cut = pipe("fs_cut", Some(over_blend));
         let down = pipe("fs_down", None);
         let image = pipe("fs_image", Some(over_blend));
         let prep = pipe("fs_prep", None);
@@ -564,6 +569,7 @@ impl Gpu {
             warp_image,
             blend,
             mask,
+            cut,
             down,
             sides_layout,
             sides_pipe,
@@ -1687,7 +1693,7 @@ impl Gpu {
                 (tex, fl.1, fl.2, fl.3.clone())
             }
         };
-        let warp = |h: &crate::persp::M3, shade: f32| -> Option<Node> {
+        let warp = |h: &crate::persp::M3, shade: f32, opacity: f32| -> Option<Node> {
             let hi = crate::persp::invert(h)?;
             let q = crate::persp::project_poly(h, &[rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()])?;
             let mut bb = Rect::from_points(&q);
@@ -1707,13 +1713,26 @@ impl Gpu {
                 return None;
             }
             let hi = hi.map(|row| row.map(|x| x as f32));
-            Some(Node::Warp { img: Img::Ready(tex.clone()), hi, src: [rect.min.x, rect.min.y, fres], rect: r, opacity: layer.opacity, shade })
+            Some(Node::Warp { img: Img::Ready(tex.clone()), hi, src: [rect.min.x, rect.min.y, fres], rect: r, opacity, shade })
         };
         if pl.thick <= 0.0 {
-            out.extend(warp(&h, 1.0));
+            out.extend(warp(&h, 1.0, layer.opacity));
             return;
         }
         let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+        if pl.engrave {
+            // the floor, the inner walls over it, all seen through the shape
+            let Some(Node::Warp { rect: or, .. }) = warp(&h, 1.0, 1.0) else { return };
+            let (off, n) = crate::extrude::visible_cap(&pl, &to_eye);
+            let hc = crate::persp::mul_mm(&out_m, &pl.homography_at(&cam, off));
+            let mut inner: Vec<Node> = warp(&hc, light.map_or(1.0, |l| l.shade(n)), layer.opacity).into_iter().collect();
+            if let Some(edges) = &edges {
+                inner.extend(self.sides(edges, &layer, &pl, &cam, light.as_ref(), &out_m, rect, clip, v));
+            }
+            let opening = warp(&h, 1.0, 1.0).into_iter().collect();
+            out.push(Node::Cut { inner, opening, rect: or });
+            return;
+        }
         if let Some(edges) = &edges {
             if let Some(n) = self.sides(edges, &layer, &pl, &cam, light.as_ref(), &out_m, rect, clip, v) {
                 out.push(n);
@@ -1721,7 +1740,7 @@ impl Gpu {
         }
         let (off, n) = crate::extrude::visible_cap(&pl, &to_eye);
         let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(&cam, off)) };
-        out.extend(warp(&hc, light.map_or(1.0, |l| l.shade(n))));
+        out.extend(warp(&hc, light.map_or(1.0, |l| l.shade(n)), layer.opacity));
     }
 
     /// A flat (thin) text or shape layer in a 3D space drawn flat on the GPU at
@@ -1822,7 +1841,7 @@ impl Gpu {
             light: [dir[0] as f32, dir[1] as f32, dir[2] as f32, light.map_or(0.0, |l| l.ambient)],
             box_: [ox, oy, bw as f32, bh as f32],
             k: [(layer.opacity.clamp(0.0, 1.0) * 255.0).round() / 255.0, crate::canvas::SIDE_SHADE, light.is_some() as u8 as f32, if near > 1e-6 { near * 0.5 } else { 1e-4 }],
-            anchor: [pl.anchor.x, pl.anchor.y, 0.0, 0.0],
+            anchor: [pl.anchor.x, pl.anchor.y, pl.engrave as u8 as f32, 0.0],
         };
         Some(Node::Sides { edges: buf, count: edges.len() as u32, u, rect: r, scissor })
     }
@@ -2017,6 +2036,21 @@ impl Gpu {
                 u.h1 = [a[1][0], a[1][1], a[1][2], 0.0];
                 u.p1 = [*invert as u8 as f32, *strength, 0.0, 0.0];
                 self.pass(enc, &self.mask_atlas, target, &u, &g, atlas);
+            }
+            Node::Cut { inner, opening, rect } => {
+                let g = self.pooled(tw, th, 2 + depth * 2);
+                self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
+                for n in inner {
+                    self.run(enc, n, &g, depth + 1, ready, v, bgp);
+                }
+                // (a slot of its own: the inner nodes may use the next depth's)
+                let o = self.pooled(tw, th, 1000 + depth);
+                self.clear_to(enc, &o, wgpu::Color::TRANSPARENT);
+                for n in opening {
+                    self.run(enc, n, &o, depth + 1, ready, v, bgp);
+                }
+                let u = Uniform::new(rect.map(|x| x as f32), tw, th);
+                self.pass(enc, &self.cut, target, &u, &g, &o);
             }
             Node::Masked { inner, keep, off, rect, outside } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);

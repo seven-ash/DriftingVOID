@@ -130,6 +130,14 @@ fn fs_mask(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return s * keep;
 }
 
+// An engraving's inside (tex0) seen through its opening: the opening's
+// alpha (tex1, the layer drawn on its plane) cuts it.
+@fragment
+fn fs_cut(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let q = vec2i(floor(pos.xy));
+    return load(tex0, q) * load(tex1, q).a;
+}
+
 fn to_lin(c: f32) -> f32 {
     if c <= 0.04045 {
         return c / 12.92;

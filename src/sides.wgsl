@@ -3,7 +3,8 @@
 // quad between the front face and the back one, as extrude::sides and
 // export::fill_sides make and draw them on the CPU. A turning layer changes
 // only this uniform. Faces turned away are dropped; overlaps resolve per pixel
-// in a depth buffer.
+// in a depth buffer. Engraved, the inner walls show: the sides turned away,
+// with their normals reversed.
 
 struct S {
     // (content x, y, offset along the normal, 1) -> homogeneous target pixel
@@ -20,7 +21,7 @@ struct S {
     light: vec4f,  // direction the light travels, ambient in w
     box_: vec4f,   // box min x, y (target pixels), box w, h
     k: vec4f,      // opacity, flat shade, lit when z > 0.5, near depth w
-    anchor: vec4f, // the placement's anchor (content), x, y
+    anchor: vec4f, // the placement's anchor (content), x, y; engraved when z > 0.5
 }
 
 @group(0) @binding(0) var<uniform> s: S;
@@ -86,6 +87,11 @@ fn vs_side(i: In, @builtin(vertex_index) vi: u32) -> Out {
     if dd > 1e-18 {
         sn = normalize(wn - d * (dot(wn, d) / dd));
     }
+    var inward = 1.0;
+    if s.anchor.z > 0.5 {
+        inward = -1.0;
+    }
+    sn = sn * inward;
     let mid = (wa + wb + ba + bb) * 0.25;
     if dot(sn, s.eye.xyz - mid) <= 0.0 {
         return o;
@@ -108,7 +114,7 @@ fn vs_side(i: In, @builtin(vertex_index) vi: u32) -> Out {
     if s.k.z > 0.5 {
         // smooth: each end lit by its blended normal
         if s.nrm.w > 0.5 {
-            sh = shade(lin(select(i.na, i.nb, at_b)));
+            sh = shade(lin(select(i.na, i.nb, at_b)) * inward);
         } else {
             sh = shade(sn);
         }

@@ -530,12 +530,19 @@ fn draw_plane(painter: &Painter, ctx: &Context, l: &Layer, pl: &Placement, proj:
     // towards the viewer: the eye (perspective) or against the view axis (ortho)
     let fwd = proj.r[2];
     let to_eye = |w: V3| if proj.ppu.is_some() { scale(fwd, -1.0) } else { sub(proj.eye, w) };
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    let cap = crate::canvas::cap_tint(op, light.map_or(1.0, |l| l.shade(n)));
+    // engraved: the floor under the inner walls (not cut by the shape here)
+    if pl.engrave {
+        painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, cap));
+    }
     if let Some(edges) = cache.outline(l, res) {
         let sides = crate::extrude::sides(&edges, pl, &|w| proj.project(w), &to_eye, &|w| proj.to_view(w)[2], light, crate::canvas::SIDE_SHADE);
         painter.add(Shape::mesh(crate::canvas::side_mesh(&sides, op)));
     }
-    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
-    painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, crate::canvas::cap_tint(op, light.map_or(1.0, |l| l.shade(n)))));
+    if !pl.engrave {
+        painter.add(crate::canvas::face_mesh(tex, rect, size, face(off), grid, cap));
+    }
 }
 
 fn draw_selection(painter: &Painter, doc: &Document, proj: &Proj, sel: Option<LayerId>) {

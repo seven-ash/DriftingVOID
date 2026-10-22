@@ -408,15 +408,22 @@ fn draw_placed(painter: &Painter, ctx: &Context, layer: &Layer, pl: &crate::pers
     }
     let light = light.as_ref();
     let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    let hc = if off == 0.0 { h } else { pl.homography_at(cam, off) };
+    let color = cap_tint(op, light.map_or(1.0, |l| l.shade(n)));
+    // engraved: the floor under the inner walls (meshes can't cut them by the
+    // shape; the GPU renderer does)
+    if pl.engrave {
+        painter.add(face_mesh(tex, rect, size, |p| apply_h(&hc, p).map(|s| xf.w2s(s)), grid, color));
+    }
     if let Some(edges) = cache.outline(layer, res) {
         let project = |w: crate::persp::V3| cam.project(w).map(|p| xf.w2s(p));
         let sides = crate::extrude::sides(&edges, pl, &project, &to_eye, &|w| cam.to_cam(w)[2], light, SIDE_SHADE);
         painter.add(Shape::mesh(side_mesh(&sides, op)));
     }
-    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
-    let hc = if off == 0.0 { h } else { pl.homography_at(cam, off) };
-    let color = cap_tint(op, light.map_or(1.0, |l| l.shade(n)));
-    painter.add(face_mesh(tex, rect, size, |p| apply_h(&hc, p).map(|s| xf.w2s(s)), grid, color));
+    if !pl.engrave {
+        painter.add(face_mesh(tex, rect, size, |p| apply_h(&hc, p).map(|s| xf.w2s(s)), grid, color));
+    }
 }
 
 fn tint(op: f32) -> Color32 {

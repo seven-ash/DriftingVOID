@@ -546,8 +546,9 @@ impl Layer {
                 let h = pl.homography(cam);
                 let mut pts = crate::persp::project_poly(&h, &c)?;
                 // a thick layer reaches to its back face (masks and groups are
-                // put down over these bounds; the sides must not be cut)
-                if pl.thick > 0.0 {
+                // put down over these bounds; the sides must not be cut). An
+                // engraving shows only through its own shape on the plane.
+                if pl.thick > 0.0 && !pl.engrave {
                     let hb = pl.homography_at(cam, pl.thick);
                     pts.extend(crate::persp::project_poly(&hb, &c).unwrap_or_default());
                 }

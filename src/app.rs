@@ -1530,6 +1530,8 @@ impl App {
                                     pl.segs = n.clamp(1, 4);
                                 }
                                 pl.smooth = std::env::var_os("DV_SMOOTH").is_some();
+                                // DV_ENGRAVE=1: carved in (음각)
+                                pl.engrave = std::env::var_os("DV_ENGRAVE").is_some();
                             }
                         }
                     }
@@ -8079,7 +8081,7 @@ impl App {
                 _ => None,
             };
             let mx_width = others.iter().any(|o| width(o).is_some_and(|w| Some(w) != width(&before)));
-            (mx, mx_adj, mx_width, mixed_style(&before.kind, &others))
+            (mx, mx_adj, mx_width, mixed_style(&before, &others))
         };
         let mxc = |c: u16| mx & c != 0;
         // set on a mixed field: goes to every selected layer of the kind, even
@@ -8500,7 +8502,7 @@ impl App {
                     let mut th = pl.thick as f32;
                     if ui
                         .add(crate::dial::Dial::new(&mut th, 0.0..=5000.0).step(2.0).text("두께").default(0.0).key(km(ch::P_THICK), &mut kh[7]).nav(kn(ch::P_THICK), &mut kv[7]).mixed(mxc(ch::P_THICK)))
-                        .glass_tip("평면 뒤로 밀어낸 두께")
+                        .glass_tip(if pl.engrave { "표면 안으로 파낸 깊이" } else { "평면 뒤로 밀어낸 두께" })
                         .changed()
                     {
                         pl.thick = th as f64;
@@ -8514,6 +8516,14 @@ impl App {
                             changed = true;
                         }
                         changed |= ui.checkbox(&mut pl.smooth, "스무스 셰이딩").glass_tip("완만한 굽이의 옆면 명암을 부드럽게 · 날카로운 모서리는 유지").changed();
+                        if ui.add(egui::Checkbox::new(&mut pl.engrave, "음각").indeterminate(mxs.engrave)).glass_tip("두께만큼 표면 안으로 파냄").changed() {
+                            changed = true;
+                            if mxs.engrave {
+                                // from mixed, a click engraves them all
+                                pl.engrave = true;
+                                force.push(Force::Engrave(true));
+                            }
+                        }
                     }
                     let on_wall = pl.wall.is_some();
                     if !on_wall {
@@ -8546,7 +8556,7 @@ impl App {
             for lid in self.extra_sel.clone() {
                 if let Some(l) = self.doc.get_mut(lid).filter(|l| !l.locked) {
                     for f in &force {
-                        f.apply(&mut l.kind);
+                        f.apply(l);
                     }
                 }
             }
@@ -9428,7 +9438,7 @@ impl App {
         if let Some((id, f)) = force {
             for lid in ids(self, id) {
                 if let Some(l) = self.doc.get_mut(lid) {
-                    f.apply(&mut l.kind);
+                    f.apply(l);
                 }
             }
         }
@@ -11885,12 +11895,16 @@ struct MixedStyle {
     style: bool,
     blend: bool,
     align: bool,
+    engrave: bool,
 }
 
-fn mixed_style(first: &LayerKind, others: &[&Layer]) -> MixedStyle {
+fn mixed_style(first: &Layer, others: &[&Layer]) -> MixedStyle {
     let mut m = MixedStyle::default();
     for o in others {
-        match (first, &o.kind) {
+        if let (Some(a), Some(b)) = (&first.place, &o.place) {
+            m.engrave |= a.engrave != b.engrave;
+        }
+        match (&first.kind, &o.kind) {
             (LayerKind::Text(a), LayerKind::Text(b)) => {
                 m.color |= a.color != b.color;
                 m.bg_has |= a.bg.is_some() != b.bg.is_some();
@@ -11922,11 +11936,19 @@ enum Force {
     ShapeColor(Color32),
     ShapeFill(Option<Color32>),
     RasterBlend(Blend),
+    /// 음각, for every selected layer in a space.
+    Engrave(bool),
 }
 
 impl Force {
-    fn apply(&self, k: &mut LayerKind) {
-        match (self, k) {
+    fn apply(&self, l: &mut Layer) {
+        if let Force::Engrave(on) = self {
+            if let Some(p) = l.place.as_mut() {
+                p.engrave = *on;
+            }
+            return;
+        }
+        match (self, &mut l.kind) {
             (Force::TextColor(c), LayerKind::Text(t)) => t.color = *c,
             (Force::TextBg(c), LayerKind::Text(t)) => t.bg = *c,
             (Force::Font(f, s), LayerKind::Text(t)) => {
@@ -12001,6 +12023,9 @@ fn spread_to(before: &Layer, after: &Layer, l: &mut Layer) {
         }
         if a.smooth != b.smooth {
             p.smooth = a.smooth;
+        }
+        if a.engrave != b.engrave {
+            p.engrave = a.engrave;
         }
     }
     crate::anim::apply_key(l, &k);
@@ -12096,19 +12121,20 @@ mod tests {
             t.blend = Blend::Add;
             t.bg = Some(Color32::BLACK);
         }
-        let m = mixed_style(&a.kind, &[&b]);
+        let m = mixed_style(&a, &[&b]);
         assert!(m.blend && m.bg_has, "blend and the background box differ");
         assert!(!m.color && !m.family && !m.style && !m.align && !m.bg, "the rest is the same");
         // 보통 picked on the mixed 혼합: the first already has it, so nothing
         // changed there to spread; the forced value still reaches the other
-        Force::TextBlend(Blend::Normal).apply(&mut b.kind);
-        Force::TextBg(None).apply(&mut b.kind);
+        Force::TextBlend(Blend::Normal).apply(&mut b);
+        Force::TextBg(None).apply(&mut b);
         let LayerKind::Text(t) = &b.kind else { unreachable!() };
         assert_eq!((t.blend, t.bg), (Blend::Normal, None));
         // a shape is left alone by a text's value
-        let mut s = LayerKind::Shape(crate::doc::ShapeLayer { kind: ShapeKind::Rect, a: Pos2::ZERO, b: pos2(1.0, 1.0), color: Color32::RED, width: 2.0, fill: None, rotation: 0.0 });
+        let mut s = a.clone();
+        s.kind = LayerKind::Shape(crate::doc::ShapeLayer { kind: ShapeKind::Rect, a: Pos2::ZERO, b: pos2(1.0, 1.0), color: Color32::RED, width: 2.0, fill: None, rotation: 0.0 });
         Force::TextColor(Color32::BLUE).apply(&mut s);
-        let LayerKind::Shape(sh) = &s else { unreachable!() };
+        let LayerKind::Shape(sh) = &s.kind else { unreachable!() };
         assert_eq!(sh.color, Color32::RED);
     }
 

@@ -213,6 +213,21 @@ fn draw_projected(out: &mut Pixmap, p: &Projected, b: &Band) {
         return;
     }
     let to_eye = |w: crate::persp::V3| crate::persp::sub(cam.center, w);
+    // engraved: floor and inner walls drawn alone, then cut by the shape on
+    // the plane (the GPU's Node::Cut)
+    let mut cavity = match pl.engrave {
+        true => match Pixmap::new(out.width(), out.height()) {
+            Some(p) => Some(p),
+            None => return,
+        },
+        false => None,
+    };
+    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
+    let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
+    let cap_shade = light.map_or(1.0, |l| l.shade(n));
+    if let Some(cv) = cavity.as_mut() {
+        warp_onto(cv, src, rect, res, &hc, layer.opacity, clip, cap_shade);
+    }
     if let Some(edges) = &fl.3 {
         // the sides in full-image pixels, once per render
         let sides = {
@@ -224,11 +239,21 @@ fn draw_projected(out: &mut Pixmap, p: &Projected, b: &Band) {
                 })
                 .clone()
         };
-        fill_sides(out, &sides, layer.opacity, clip, 0.0, dy);
+        fill_sides(cavity.as_mut().unwrap_or(out), &sides, layer.opacity, clip, 0.0, dy);
     }
-    let (off, n) = crate::extrude::visible_cap(pl, &to_eye);
-    let hc = if off == 0.0 { h } else { crate::persp::mul_mm(&out_m, &pl.homography_at(cam, off)) };
-    warp_onto(out, src, rect, res, &hc, layer.opacity, clip, light.map_or(1.0, |l| l.shade(n)));
+    let Some(mut cv) = cavity else {
+        warp_onto(out, src, rect, res, &hc, layer.opacity, clip, cap_shade);
+        return;
+    };
+    let Some(mut hole) = Pixmap::new(out.width(), out.height()) else { return };
+    warp_onto(&mut hole, src, rect, res, &h, 1.0, clip, 1.0);
+    for (c, o) in cv.data_mut().chunks_exact_mut(4).zip(hole.data().chunks_exact(4)) {
+        let a = o[3] as u32;
+        for v in c.iter_mut() {
+            *v = ((*v as u32 * a + 127) / 255) as u8;
+        }
+    }
+    out.draw_pixmap(0, 0, cv.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
 }
 
 /// Flattened 3D layers (and their extrusion outlines), shared by an export's

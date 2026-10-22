@@ -268,16 +268,21 @@ pub fn to_world(pl: &Placement, p: Pos2, off: f64) -> V3 {
 }
 
 /// Which face of an extrusion shows: (offset of the cap, its outward normal).
-/// `to_eye(p)` is the direction from world point `p` towards the viewer.
+/// `to_eye(p)` is the direction from world point `p` towards the viewer. An
+/// engraving shows its floor, facing out of the cavity.
 pub fn visible_cap(pl: &Placement, to_eye: &impl Fn(V3) -> V3) -> (f64, V3) {
     let n = pl.normal();
+    if pl.engrave {
+        return (pl.thick, scale(n, -1.0));
+    }
     let (_, t) = pl.world_affine();
     // the front (offset 0) faces against the extrusion direction
     if dot(scale(n, -1.0), to_eye(t)) >= 0.0 { (0.0, scale(n, -1.0)) } else { (pl.thick, n) }
 }
 
 /// The sides facing the viewer, far to near, shaded by `light` (or a flat side
-/// shade without one).
+/// shade without one). Engraved: the inner walls of the cavity, the sides
+/// turned away seen from inside (their normal reversed).
 pub fn sides(
     edges: &[Edge],
     pl: &Placement,
@@ -288,6 +293,7 @@ pub fn sides(
     flat_shade: f32,
 ) -> Vec<Side> {
     let (m, _) = pl.world_affine();
+    let inward = if pl.engrave { -1.0 } else { 1.0 };
     let mut out = Vec::new();
     for e in edges {
         let wa = to_world(pl, e.a, 0.0);
@@ -298,6 +304,7 @@ pub fn sides(
         let wn = mul_mv(&m, [e.n[0] as f64, e.n[1] as f64, 0.0]);
         let dd = dot(d, d);
         let sn = if dd > 1e-18 { normalize(sub(wn, scale(d, dot(wn, d) / dd))) } else { normalize(wn) };
+        let sn = scale(sn, inward);
         let mid = scale(add(add(wa, wb), add(ba, bb)), 0.25);
         if dot(sn, to_eye(mid)) <= 0.0 {
             continue;
@@ -306,7 +313,7 @@ pub fn sides(
         // smooth: each end lit by its blended normal (in the plane, so it stays
         // square to the extrusion like the face itself)
         let shade_at = |n2: [f32; 2]| match light {
-            Some(l) if pl.smooth => l.shade(normalize(mul_mv(&m, [n2[0] as f64, n2[1] as f64, 0.0]))),
+            Some(l) if pl.smooth => l.shade(scale(normalize(mul_mv(&m, [n2[0] as f64, n2[1] as f64, 0.0])), inward)),
             Some(l) => l.shade(sn),
             None => flat_shade,
         };

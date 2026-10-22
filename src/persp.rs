@@ -1195,6 +1195,11 @@ pub struct Placement {
     /// Smooth shading of the sides: normals blend across gentle bends.
     #[serde(default)]
     pub smooth: bool,
+    /// Engraved (음각): the thickness is carved into the surface instead of
+    /// standing out: inner walls and a floor `thick` deep, seen only through
+    /// the layer's own shape on the plane.
+    #[serde(default)]
+    pub engrave: bool,
 }
 
 fn one_seg() -> u8 {
@@ -1224,6 +1229,7 @@ impl Placement {
             rest: false,
             segs: 1,
             smooth: false,
+            engrave: false,
         }
     }
 
@@ -1265,6 +1271,7 @@ impl Placement {
             rest: false,
             segs: 1,
             smooth: false,
+            engrave: false,
         }
     }
 
@@ -1308,6 +1315,7 @@ impl Placement {
             rest: false,
             segs: 1,
             smooth: false,
+            engrave: false,
         })
     }
 
@@ -1321,8 +1329,9 @@ impl Placement {
             [lin[2][0] * k, lin[2][1] * k, lin[2][2] * k],
         ];
         let mut t = add(self.base_t, scale(mul_mv(&self.base_r, self.pos), self.base_k));
-        if self.rest && self.thick > 0.0 {
-            // resting on its underside: the plane rises by the thickness
+        if self.rest && self.thick > 0.0 && !self.engrave {
+            // resting on its underside: the plane rises by the thickness (an
+            // engraving goes down into what it lies on)
             let n = normalize(cross([lin[0][0], lin[1][0], lin[2][0]], [lin[0][1], lin[1][1], lin[2][1]]));
             t = sub(t, scale(n, self.thick));
         }
@@ -1373,10 +1382,11 @@ impl Placement {
     }
 
     /// Moves the plane by a world-space offset (expressed back in `pos`).
-    /// The lowest world point of content box `b`, both caps included.
+    /// The lowest world point of content box `b`, both caps included (an
+    /// engraving's surface only: its floor is inside what it is carved into).
     pub fn lowest(&self, b: Rect) -> V3 {
         let (m, t) = self.world_affine();
-        let n = scale(self.normal(), self.thick);
+        let n = scale(self.normal(), if self.engrave { 0.0 } else { self.thick });
         let mut low = [0.0, 0.0, f64::MAX];
         for p in [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()] {
             let w = add(t, mul_mv(&m, [(p.x - self.anchor.x) as f64, (p.y - self.anchor.y) as f64, 0.0]));

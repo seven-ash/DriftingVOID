@@ -109,6 +109,25 @@ fn room_doc(anim: bool, t: f64) -> Document {
     doc
 }
 
+/// The room with its thick texts engraved (음각) `depth` deep, the opaque one
+/// turned so its inner walls show (`thick`: None leaves the depth as it is).
+fn engraved_doc(depth: Option<f64>) -> Document {
+    let mut doc = room_doc(false, 0.0);
+    for l in &mut doc.layers {
+        if let Some(pl) = l.place.as_mut().filter(|p| p.thick > 0.0) {
+            pl.engrave = true;
+            if let Some(d) = depth {
+                pl.thick = d;
+            }
+            if l.opacity >= 1.0 {
+                pl.rot[1] += 30.0;
+                pl.rot[0] -= 20.0;
+            }
+        }
+    }
+    doc
+}
+
 fn check(name: &str, pm: &Pixmap) {
     let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden")).join(format!("{name}.png"));
     let got = crate::export::to_rgba(pm);
@@ -222,7 +241,10 @@ fn gpu_parity() {
             pl.rot[0] -= 15.0;
             l.place = Some(pl);
         }
+        let eng = engraved_doc(Some(60.0));
         vec![
+            ("room_engrave", eng.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
+            ("room_engrave_ss2", eng, rr.center(), rr.size(), 0.0, 0.75, None, 2),
             ("room_photo3d", p3.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
             ("room_photo3d_small", p3, rr.center(), rr.size(), 0.0, 0.3, None, 1),
             ("room_small", room.clone(), rr.center(), rr.size(), 0.0, 0.2, None, 1),
@@ -262,6 +284,67 @@ fn gpu_parity() {
         }
     }
     assert!(fails.is_empty(), "GPU differs from the CPU reference: {fails:?}");
+}
+
+/// An engraving draws only inside its shape on the plane: outside it the
+/// picture is the room without the layer; inside, its cavity shows (the
+/// floor and the inner walls, unlike the flat layer).
+#[test]
+fn engraving_stays_inside_its_opening() {
+    let eng = engraved_doc(Some(80.0));
+    let id = eng.layers.iter().find(|l| l.place.as_ref().is_some_and(|p| p.engrave) && l.opacity >= 1.0).unwrap().id;
+    let mut none = eng.clone();
+    none.layers.retain(|l| l.id != id);
+    let mut flat = eng.clone();
+    flat.get_mut(id).unwrap().place.as_mut().unwrap().thick = 0.0;
+    let region = eng.content_bounds().unwrap();
+    let (e, n, f) = (render(&eng, region, 1.0, None).unwrap(), render(&none, region, 1.0, None).unwrap(), render(&flat, region, 1.0, None).unwrap());
+    let (w, h) = (e.width() as i32, e.height() as i32);
+    let px = |p: &Pixmap, x: i32, y: i32| -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        p.data()[i..i + 4].try_into().unwrap()
+    };
+    let near_shape = |x: i32, y: i32| (-2..=2).any(|dy| (-2..=2).any(|dx| {
+        let (xx, yy) = (x + dx, y + dy);
+        xx >= 0 && yy >= 0 && xx < w && yy < h && px(&f, xx, yy) != px(&n, xx, yy)
+    }));
+    let (mut outside_changed, mut inside_differs_from_flat) = (0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if near_shape(x, y) {
+                inside_differs_from_flat += (px(&e, x, y) != px(&f, x, y)) as u32;
+            } else if px(&e, x, y) != px(&n, x, y) {
+                outside_changed += 1;
+            }
+        }
+    }
+    assert_eq!(outside_changed, 0, "pixels changed outside the opening");
+    assert!(inside_differs_from_flat > 500, "the cavity shows ({inside_differs_from_flat} pixels differ from the flat text)");
+}
+
+/// Close-up of the turned text engraved and extruded side by side, 4× (for
+/// looking: `DV_ENGRAVE_PNG=path.png cargo test --release engrave_closeup
+/// -- --ignored`; `DV_ENGRAVE_DEPTH`, default 12).
+#[test]
+#[ignore]
+fn engrave_closeup() {
+    let depth: f64 = std::env::var("DV_ENGRAVE_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+    let eng = engraved_doc(Some(depth));
+    let mut ext = eng.clone();
+    for l in &mut ext.layers {
+        if let Some(p) = l.place.as_mut() {
+            p.engrave = false;
+        }
+    }
+    let l = eng.layers.iter().find(|l| l.place.as_ref().is_some_and(|p| p.engrave) && l.opacity >= 1.0).unwrap();
+    let region = l.shown_bounds(&crate::persp::cameras(&eng.spaces)).unwrap().expand(10.0);
+    let (a, b) = (render(&eng, region, 4.0, None).unwrap(), render(&ext, region, 4.0, None).unwrap());
+    let mut out = image::RgbaImage::new(a.width(), a.height() * 2 + 8);
+    image::imageops::replace(&mut out, &crate::export::to_rgba(&a), 0, 0);
+    image::imageops::replace(&mut out, &crate::export::to_rgba(&b), 0, (a.height() + 8) as i64);
+    if let Ok(p) = std::env::var("DV_ENGRAVE_PNG") {
+        out.save(p).unwrap();
+    }
 }
 
 /// A pen layer of `n` random strokes of 150 points over 1600×1000 (`seed`),
