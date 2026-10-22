@@ -450,16 +450,27 @@ fn parse_hex(s: &str) -> Option<Color32> {
 
 /// Swatch (opens the palette for this field) + editable hex + copy / paste.
 fn color_row(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut PalReq) -> bool {
+    color_row_mx(ui, c, target, req, false)
+}
+
+/// As `color_row`; `mixed`: the selected layers' colours differ (a blank
+/// swatch and "—"; a colour set here goes to all of them).
+fn color_row_mx(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut PalReq, mixed: bool) -> bool {
     let mut changed = false;
     let (r, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-    ui.painter().rect_filled(r, 5.0, *c);
+    if mixed {
+        ui.painter().rect_filled(r, 5.0, FILL_1());
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, crate::dial::MIXED, FontId::proportional(theme::TEXT_BODY), INK());
+    } else {
+        ui.painter().rect_filled(r, 5.0, *c);
+    }
     ui.painter().rect_stroke(r, 5.0, Stroke::new(1.0, if resp.hovered() { INK_2() } else { FILL_3() }), StrokeKind::Inside);
     if resp.glass_tip("팔레트 열기").clicked() {
         *req = Some((target, *c, r.right_top()));
     }
     let id = ui.id().with(("hex", format!("{target:?}")));
     let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| hex_of(*c));
-    let te = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(76.0).font(egui::TextStyle::Monospace)); // "#RRGGBBAA" fits
+    let te = ui.add(egui::TextEdit::singleline(&mut buf).hint_text(crate::dial::MIXED).desired_width(76.0).font(egui::TextStyle::Monospace)); // "#RRGGBBAA" fits
     if te.changed() {
         if let Some(nc) = parse_hex(&buf) {
             *c = nc;
@@ -467,10 +478,10 @@ fn color_row(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut Pa
         }
     }
     if !te.has_focus() {
-        buf = hex_of(*c);
+        buf = if mixed { String::new() } else { hex_of(*c) };
     }
     ui.data_mut(|d| d.insert_temp(id, buf));
-    if ui.small_button("복사").glass_tip("헥스 코드 복사").clicked() {
+    if ui.add_enabled(!mixed, egui::Button::new("복사").small()).glass_tip("헥스 코드 복사").clicked() {
         ui.ctx().copy_text(hex_of(*c));
     }
     if ui.small_button("붙여넣기").glass_tip("클립보드의 헥스 코드 적용").clicked() {
@@ -1312,6 +1323,15 @@ impl App {
                 let id = app.new_text_layer(pos2(-300.0, -150.0 + i as f32 * 120.0), format!("글자 {}", i + 1));
                 if let Some(LayerKind::Text(t)) = app.doc.get_mut(id).map(|l| &mut l.kind) {
                     t.rotation = f32::to_radians(deg);
+                    // "style": the second also differs in every style value (mixed "—")
+                    if i == 1 && std::env::var("DV_MULTI_DEMO").is_ok_and(|v| v == "style") {
+                        t.color = Color32::from_rgb(255, 120, 90);
+                        t.family = "Arial".into();
+                        t.style = "Bold".into();
+                        t.blend = Blend::Add;
+                        t.align = if t.align == crate::doc::TextAlign::Right { crate::doc::TextAlign::Left } else { crate::doc::TextAlign::Right };
+                        t.bg = Some(Color32::from_rgb(40, 40, 60));
+                    }
                 }
                 ids.push(id);
             }
@@ -7883,7 +7903,7 @@ impl App {
                     let s0 = crate::text::layout(t).size;
                     layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기")).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
-                    layer_changed |= align_row(ui, &mut t.align);
+                    layer_changed |= align_row(ui, &mut t.align, false);
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         let mut has = t.bg.is_some();
                         if ui.checkbox(&mut has, "배경 상자").changed() {
@@ -7910,7 +7930,7 @@ impl App {
                 } else {
                     ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).step(2.0).text("크기"));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
-                    align_row(ui, &mut s.text_align);
+                    align_row(ui, &mut s.text_align, false);
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.checkbox(&mut s.text_bg, "배경 상자");
                         color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
@@ -8027,7 +8047,7 @@ impl App {
             return;
         };
         if !self.extra_sel.is_empty() {
-            ui.label(egui::RichText::new(format!("{}개 선택 · 첫 항목 값 표시 · 모두에 적용", self.extra_sel.len() + 1)).color(INK_3()));
+            ui.label(egui::RichText::new(format!("{}개 선택 · 다른 값: — · 모두에 적용", self.extra_sel.len() + 1)).color(INK_3()));
         }
         if let Some(owner) = self.doc.get(id).and_then(|l| l.mask_of) {
             self.mask_props(ui, id, owner);
@@ -8037,7 +8057,7 @@ impl App {
         // the primary as it was, to pass the panel's edits on to the rest
         let before = self.doc.layers[idx].clone();
         // values that differ across the selection show as "—"
-        let (mx, mx_adj, mx_width) = {
+        let (mx, mx_adj, mx_width, mxs) = {
             let k0 = crate::anim::key_of(&before, 0.0);
             let others: Vec<&Layer> = self.extra_sel.iter().filter_map(|i| self.doc.get(*i)).collect();
             let mx = others.iter().fold(0u16, |m, o| m | crate::anim::diff_ch(&k0, &crate::anim::key_of(o, 0.0)));
@@ -8059,9 +8079,12 @@ impl App {
                 _ => None,
             };
             let mx_width = others.iter().any(|o| width(o).is_some_and(|w| Some(w) != width(&before)));
-            (mx, mx_adj, mx_width)
+            (mx, mx_adj, mx_width, mixed_style(&before.kind, &others))
         };
         let mxc = |c: u16| mx & c != 0;
+        // set on a mixed field: goes to every selected layer of the kind, even
+        // when it is what the first one already has (no change there to spread)
+        let mut force: Vec<Force> = Vec::new();
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
@@ -8285,40 +8308,53 @@ impl App {
                     changed |= r.changed();
                     if tool != Tool::Text {
                         changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text("크기").key(km(ch::SIZE), &mut kh[1]).nav(kn(ch::SIZE), &mut kv[1]).mixed(mxc(ch::SIZE))).changed();
-                        changed |= font_picker(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui);
-                        changed |= align_row(ui, &mut t.align);
+                        if font_picker_mx(ui, "prop_font", &mut t.family, &mut t.style, &mut self.font_ui, mxs.family, mxs.style) {
+                            changed = true;
+                            if mxs.family || mxs.style {
+                                force.push(Force::Font(t.family.clone(), t.style.clone()));
+                            }
+                        }
+                        if align_row(ui, &mut t.align, mxs.align) {
+                            changed = true;
+                            if mxs.align {
+                                force.push(Force::Align(t.align));
+                            }
+                        }
                         ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = t.bg.is_some();
-                            if ui.checkbox(&mut has, "배경 상자").changed() {
-                                t.bg = has.then_some(self.s.text_bg_color);
+                            if ui.add(egui::Checkbox::new(&mut has, "배경 상자").indeterminate(mxs.bg_has)).changed() {
+                                // from mixed, a click turns it on for all
+                                t.bg = (has || mxs.bg_has).then(|| t.bg.unwrap_or(self.s.text_bg_color));
                                 changed = true;
+                                if mxs.bg_has {
+                                    force.push(Force::TextBg(t.bg));
+                                }
                             }
                             if let Some(bg) = &mut t.bg {
-                                changed |= color_row(ui, bg, PalTarget::TextBg(id), &mut pal_req);
+                                if color_row_mx(ui, bg, PalTarget::TextBg(id), &mut pal_req, mxs.bg) {
+                                    changed = true;
+                                    if mxs.bg {
+                                        force.push(Force::TextBg(Some(*bg)));
+                                    }
+                                }
                             }
                         });
                     }
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.label("색");
-                        changed |= color_row(ui, &mut t.color, PalTarget::TextColor(id), &mut pal_req);
+                        if color_row_mx(ui, &mut t.color, PalTarget::TextColor(id), &mut pal_req, mxs.color) {
+                            changed = true;
+                            if mxs.color {
+                                force.push(Force::TextColor(t.color));
+                            }
+                        }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("혼합");
-                        egui::ComboBox::from_id_salt("text_blend").truncate()
-                            .selected_text(t.blend.label())
-                            .width(110.0)
-                            .popup_style(theme::glass_popup_style(false))
-                            .show_ui(ui, |ui| {
-                                theme::glass_popup(ui, |ui| {
-                                    for b in Blend::ALL {
-                                        if ui.selectable_label(t.blend == b, b.label()).clicked() {
-                                            t.blend = b;
-                                            changed = true;
-                                        }
-                                    }
-                                })
-                            });
-                    });
+                    if blend_row(ui, "text_blend", &mut t.blend, mxs.blend) {
+                        changed = true;
+                        if mxs.blend {
+                            force.push(Force::TextBlend(t.blend));
+                        }
+                    }
                     let mut deg = t.rotation.to_degrees();
                     if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text("회전 °").default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
                         t.rotation = deg.to_radians();
@@ -8341,7 +8377,12 @@ impl App {
                 LayerKind::Shape(s) => {
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         ui.label("색");
-                        changed |= color_row(ui, &mut s.color, PalTarget::ShapeColor(id), &mut pal_req);
+                        if color_row_mx(ui, &mut s.color, PalTarget::ShapeColor(id), &mut pal_req, mxs.color) {
+                            changed = true;
+                            if mxs.color {
+                                force.push(Force::ShapeColor(s.color));
+                            }
+                        }
                     });
                     ui.horizontal(|ui| {
                         if !shape_tool {
@@ -8358,12 +8399,21 @@ impl App {
                     if !shape_tool && matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
                         ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = s.fill.is_some();
-                            if ui.checkbox(&mut has, "채우기").changed() {
-                                s.fill = has.then_some(self.s.fill_color);
+                            if ui.add(egui::Checkbox::new(&mut has, "채우기").indeterminate(mxs.fill_has)).changed() {
+                                // from mixed, a click turns it on for all
+                                s.fill = (has || mxs.fill_has).then(|| s.fill.unwrap_or(self.s.fill_color));
                                 changed = true;
+                                if mxs.fill_has {
+                                    force.push(Force::ShapeFill(s.fill));
+                                }
                             }
                             if let Some(f) = &mut s.fill {
-                                changed |= color_row(ui, f, PalTarget::ShapeFill(id), &mut pal_req);
+                                if color_row_mx(ui, f, PalTarget::ShapeFill(id), &mut pal_req, mxs.fill) {
+                                    changed = true;
+                                    if mxs.fill {
+                                        force.push(Force::ShapeFill(Some(*f)));
+                                    }
+                                }
                             }
                         });
                     }
@@ -8377,24 +8427,11 @@ impl App {
                         r.tiles.clear();
                         changed = true;
                     }
-                    if !is_mask {
-                        ui.horizontal(|ui| {
-                            ui.label("혼합");
-                            egui::ComboBox::from_id_salt("raster_blend").truncate()
-                                .selected_text(r.blend.label())
-                                .width(110.0)
-                                .popup_style(theme::glass_popup_style(false))
-                                .show_ui(ui, |ui| {
-                                    theme::glass_popup(ui, |ui| {
-                                        for b in Blend::ALL {
-                                            if ui.selectable_label(r.blend == b, b.label()).clicked() {
-                                                r.blend = b;
-                                                changed = true;
-                                            }
-                                        }
-                                    })
-                                });
-                        });
+                    if !is_mask && blend_row(ui, "raster_blend", &mut r.blend, mxs.blend) {
+                        changed = true;
+                        if mxs.blend {
+                            force.push(Force::RasterBlend(r.blend));
+                        }
                     }
                 }
             }
@@ -8506,6 +8543,13 @@ impl App {
         }
         if changed {
             self.spread_edit(&before);
+            for lid in self.extra_sel.clone() {
+                if let Some(l) = self.doc.get_mut(lid).filter(|l| !l.locked) {
+                    for f in &force {
+                        f.apply(&mut l.kind);
+                    }
+                }
+            }
             self.mark();
         }
         let kc = kh.iter().enumerate().filter(|x| *x.1).fold(0u16, |a, (i, _)| a | (1 << i));
@@ -9342,42 +9386,49 @@ impl App {
     }
 
     fn apply_pal(&mut self, target: PalTarget, c: Color32) {
-        fn layer(doc: &mut Document, id: LayerId) -> Option<&mut LayerKind> {
-            doc.get_mut(id).map(|l| &mut l.kind)
-        }
-        match target {
+        // a field of a selected layer goes to every selected layer of its kind
+        // (as the panel's own edits do; locked ones keep theirs)
+        let ids = |app: &Self, id: LayerId| -> Vec<LayerId> {
+            if !app.is_selected(id) {
+                return vec![id];
+            }
+            app.selected_ids().into_iter().filter(|&i| i == id || app.doc.get(i).is_some_and(|l| !l.locked)).collect()
+        };
+        let force = match target {
             PalTarget::Main => {
                 self.s.color = c;
                 self.recolor_selected();
                 return;
             }
-            PalTarget::TextColor(id) => {
-                if let Some(LayerKind::Text(t)) = layer(&mut self.doc, id) {
-                    t.color = c;
-                }
-            }
+            PalTarget::TextColor(id) => Some((id, Force::TextColor(c))),
             PalTarget::TextBg(id) => {
-                if let Some(LayerKind::Text(t)) = layer(&mut self.doc, id) {
-                    t.bg = Some(c);
-                }
                 self.s.text_bg_color = c;
+                Some((id, Force::TextBg(Some(c))))
             }
-            PalTarget::ShapeColor(id) => {
-                if let Some(LayerKind::Shape(s)) = layer(&mut self.doc, id) {
-                    s.color = c;
-                }
-            }
+            PalTarget::ShapeColor(id) => Some((id, Force::ShapeColor(c))),
             PalTarget::ShapeFill(id) => {
-                if let Some(LayerKind::Shape(s)) = layer(&mut self.doc, id) {
-                    s.fill = Some(c);
-                }
                 self.s.fill_color = c;
+                Some((id, Force::ShapeFill(Some(c))))
             }
-            PalTarget::DefaultTextBg => self.s.text_bg_color = c,
-            PalTarget::DefaultFill => self.s.fill_color = c,
+            PalTarget::DefaultTextBg => {
+                self.s.text_bg_color = c;
+                None
+            }
+            PalTarget::DefaultFill => {
+                self.s.fill_color = c;
+                None
+            }
             PalTarget::ExportBg => {
                 if let Some(d) = self.export.as_mut() {
                     d.bg_color = c;
+                }
+                None
+            }
+        };
+        if let Some((id, f)) = force {
+            for lid in ids(self, id) {
+                if let Some(l) = self.doc.get_mut(lid) {
+                    f.apply(&mut l.kind);
                 }
             }
         }
@@ -10943,6 +10994,12 @@ fn installed_font_family(ctx: &egui::Context, family: &str, style: &str) -> Opti
 }
 
 fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut String, fui: &mut FontUi) -> bool {
+    font_picker_mx(ui, id, family, style, fui, false, false)
+}
+
+/// As `font_picker`; `mixed_family` / `mixed_style`: the selected layers'
+/// fonts / styles differ (shown as "—", nothing marked in the lists).
+fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut String, fui: &mut FontUi, mixed_family: bool, mixed_style: bool) -> bool {
     let filter = &mut fui.filter;
     let previews = &mut fui.previews;
     let mut changed = false;
@@ -10952,6 +11009,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
         ui.label("글꼴");
         // the closed box shows the chosen family in its own face
         let shown: egui::WidgetText = match installed_font_family(ui.ctx(), family, style) {
+            _ if mixed_family => crate::dial::MIXED.into(),
             Some(fam) => egui::RichText::new(shown).family(fam).size(theme::TEXT_BODY + 1.0).into(),
             None => shown.into(),
         };
@@ -10961,7 +11019,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
                 return;
             };
             ui.add(egui::TextEdit::singleline(filter).hint_text("검색").desired_width(160.0)).request_focus();
-            if ui.selectable_label(family.is_empty(), DEFAULT_FONT).clicked() {
+            if ui.selectable_label(!mixed_family && family.is_empty(), DEFAULT_FONT).clicked() {
                 family.clear();
                 *style = "Regular".into();
                 changed = true;
@@ -10977,7 +11035,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
                 if !ui.is_rect_visible(r) {
                     continue;
                 }
-                let selected = *family == fam.name;
+                let selected = !mixed_family && *family == fam.name;
                 if selected {
                     ui.painter().rect_filled(r, 6.0, FILL_2());
                 } else if resp.hovered() {
@@ -11026,9 +11084,11 @@ fn font_picker(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut Str
     if styles.len() > 1 {
         ui.horizontal(|ui| {
             ui.label("스타일");
-            egui::ComboBox::from_id_salt((id, "style")).truncate().selected_text(style.clone()).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
+            let mx = mixed_family || mixed_style;
+            let shown = if mx { crate::dial::MIXED.to_string() } else { style.clone() };
+            egui::ComboBox::from_id_salt((id, "style")).truncate().selected_text(shown).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
                 for s in styles {
-                    if ui.selectable_label(*style == s, &s).clicked() {
+                    if ui.selectable_label(!mx && *style == s, &s).clicked() {
                         *style = s;
                         changed = true;
                     }
@@ -11756,14 +11816,15 @@ fn vol_keys_hash(a: &crate::anim::Anim, h: &mut impl std::hash::Hasher) {
 }
 
 /// Left / centre / right buttons for text alignment, drawn as line icons.
-fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign) -> bool {
+/// The 정렬 buttons; `mixed`: the selected texts' alignments differ (none lit).
+fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let mut no = false;
         crate::dial::label_cell(ui, "정렬", None, &mut no);
         for al in crate::doc::TextAlign::ALL {
-            let on = *a == al;
+            let on = !mixed && *a == al;
             let (r, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
             let p = ui.painter();
             if on || resp.hovered() {
@@ -11785,6 +11846,101 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign) -> bool {
         }
     });
     changed
+}
+
+/// The 혼합 dropdown; `mixed`: the selected layers' blends differ ("—").
+fn blend_row(ui: &mut egui::Ui, id: &str, b: &mut Blend, mixed: bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("혼합");
+        egui::ComboBox::from_id_salt(id)
+            .truncate()
+            .selected_text(if mixed { crate::dial::MIXED } else { b.label() })
+            .width(110.0)
+            .popup_style(theme::glass_popup_style(false))
+            .show_ui(ui, |ui| {
+                theme::glass_popup(ui, |ui| {
+                    for x in Blend::ALL {
+                        if ui.selectable_label(!mixed && *b == x, x.label()).clicked() {
+                            *b = x;
+                            changed = true;
+                        }
+                    }
+                })
+            });
+    });
+    changed
+}
+
+/// Style values that differ across the selection (shown as "—"): the first
+/// layer against the other selected layers of its kind.
+#[derive(Default, Clone, Copy)]
+struct MixedStyle {
+    color: bool,
+    bg_has: bool,
+    bg: bool,
+    fill_has: bool,
+    fill: bool,
+    family: bool,
+    style: bool,
+    blend: bool,
+    align: bool,
+}
+
+fn mixed_style(first: &LayerKind, others: &[&Layer]) -> MixedStyle {
+    let mut m = MixedStyle::default();
+    for o in others {
+        match (first, &o.kind) {
+            (LayerKind::Text(a), LayerKind::Text(b)) => {
+                m.color |= a.color != b.color;
+                m.bg_has |= a.bg.is_some() != b.bg.is_some();
+                m.bg |= a.bg.is_some() && b.bg.is_some() && a.bg != b.bg;
+                m.family |= a.family != b.family;
+                m.style |= a.style != b.style;
+                m.blend |= a.blend != b.blend;
+                m.align |= a.align != b.align;
+            }
+            (LayerKind::Shape(a), LayerKind::Shape(b)) => {
+                m.color |= a.color != b.color;
+                m.fill_has |= a.fill.is_some() != b.fill.is_some();
+                m.fill |= a.fill.is_some() && b.fill.is_some() && a.fill != b.fill;
+            }
+            (LayerKind::Raster(a), LayerKind::Raster(b)) => m.blend |= a.blend != b.blend,
+            _ => {}
+        }
+    }
+    m
+}
+
+/// A style value set on a mixed field, for every selected layer of its kind.
+enum Force {
+    TextColor(Color32),
+    TextBg(Option<Color32>),
+    Font(String, String),
+    Align(crate::doc::TextAlign),
+    TextBlend(Blend),
+    ShapeColor(Color32),
+    ShapeFill(Option<Color32>),
+    RasterBlend(Blend),
+}
+
+impl Force {
+    fn apply(&self, k: &mut LayerKind) {
+        match (self, k) {
+            (Force::TextColor(c), LayerKind::Text(t)) => t.color = *c,
+            (Force::TextBg(c), LayerKind::Text(t)) => t.bg = *c,
+            (Force::Font(f, s), LayerKind::Text(t)) => {
+                t.family = f.clone();
+                t.style = s.clone();
+            }
+            (Force::Align(a), LayerKind::Text(t)) => t.align = *a,
+            (Force::TextBlend(b), LayerKind::Text(t)) => t.blend = *b,
+            (Force::ShapeColor(c), LayerKind::Shape(s)) => s.color = *c,
+            (Force::ShapeFill(c), LayerKind::Shape(s)) => s.fill = *c,
+            (Force::RasterBlend(b), LayerKind::Raster(r)) => r.blend = *b,
+            _ => {}
+        }
+    }
 }
 
 /// A number without trailing zeros (up to 3 decimals).
@@ -11930,6 +12086,30 @@ mod tests {
         assert_eq!(other.opacity, 0.5);
         assert_eq!(t.color, Color32::RED);
         assert_eq!(t.text, "ab", "text itself is not copied");
+    }
+
+    #[test]
+    fn mixed_styles_show_and_a_set_value_reaches_all() {
+        let a = text(0.0, 40.0);
+        let mut b = text(100.0, 60.0);
+        if let LayerKind::Text(t) = &mut b.kind {
+            t.blend = Blend::Add;
+            t.bg = Some(Color32::BLACK);
+        }
+        let m = mixed_style(&a.kind, &[&b]);
+        assert!(m.blend && m.bg_has, "blend and the background box differ");
+        assert!(!m.color && !m.family && !m.style && !m.align && !m.bg, "the rest is the same");
+        // 보통 picked on the mixed 혼합: the first already has it, so nothing
+        // changed there to spread; the forced value still reaches the other
+        Force::TextBlend(Blend::Normal).apply(&mut b.kind);
+        Force::TextBg(None).apply(&mut b.kind);
+        let LayerKind::Text(t) = &b.kind else { unreachable!() };
+        assert_eq!((t.blend, t.bg), (Blend::Normal, None));
+        // a shape is left alone by a text's value
+        let mut s = LayerKind::Shape(crate::doc::ShapeLayer { kind: ShapeKind::Rect, a: Pos2::ZERO, b: pos2(1.0, 1.0), color: Color32::RED, width: 2.0, fill: None, rotation: 0.0 });
+        Force::TextColor(Color32::BLUE).apply(&mut s);
+        let LayerKind::Shape(sh) = &s else { unreachable!() };
+        assert_eq!(sh.color, Color32::RED);
     }
 
     #[test]
