@@ -880,8 +880,9 @@ pub struct App {
     /// An image export running on a worker thread (its status line when done).
     img_job: Option<std::sync::mpsc::Receiver<String>>,
     nav3d: Option<crate::view3d::Nav>,
-    /// A pen or brush stroke got a pen sample this frame (else it catches up).
-    stroke_fed: bool,
+    /// When the current pen or brush stroke last got a pen sample (it catches
+    /// up once the pen has rested a little).
+    stroke_fed: f64,
     tab_t0: Option<f64>,
     peek: bool,
     /// Tab presses taken out of the raw input (pressed, shift) before egui could use
@@ -1042,6 +1043,10 @@ fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<
     (c.alpha() > 0).then(|| Color32::from_rgb(c.red(), c.green(), c.blue()))
 }
 
+/// Seconds without a pen sample before a stroke counts as resting and the
+/// brush catches up with the pen.
+const STROKE_REST: f64 = 0.035;
+
 /// Screen points between the points of a drawn curve (`vector::Curve`).
 const CURVE_STEP: f32 = 1.5;
 
@@ -1195,7 +1200,7 @@ impl App {
             light_drag: None,
             img_job: None,
             nav3d: None,
-            stroke_fed: false,
+            stroke_fed: 0.0,
             tab_t0: None,
             peek: false,
             tab_raw: Vec::new(),
@@ -5056,6 +5061,7 @@ impl App {
     }
 
     fn pointer_down(&mut self, sp: Pos2, pressure: f32, mods: Modifiers, space: bool) {
+        self.stroke_fed = self.now;
         let xf = self.xf();
         let w = xf.s2w(sp);
         if let Some(mid) = self.wand.filter(|_| !space) {
@@ -6576,7 +6582,7 @@ impl App {
             Drag::Raster { id, stroke, smooth, curve } => {
                 // smoothing happens in the curve (weighted by arc length, as Krita)
                 *smooth = (w, pressure);
-                self.stroke_fed = true;
+                self.stroke_fed = self.now;
                 let id = *id;
                 let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
@@ -6587,7 +6593,7 @@ impl App {
             }
             Drag::Vector { id, pts, smooth, base_r, pressure: use_p, curve, .. } => {
                 *smooth = (w, pressure);
-                self.stroke_fed = true;
+                self.stroke_fed = self.now;
                 let off = match self.doc.get(*id).map(|l| &l.kind) {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
@@ -6820,20 +6826,12 @@ impl App {
                     }
                 }
             }
-            Drag::Vector { id, mut pts, color, smooth, base_r, pressure, mut curve, .. } => {
-                let wsp = self.xf().s2w(sp);
+            Drag::Vector { id, mut pts, color, base_r, pressure, mut curve, .. } => {
                 let more = curve.finish(CURVE_STEP / self.zoom);
                 let zoom = self.zoom;
                 if let Some(LayerKind::Vector(v)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    // (it ends where the brush is, not at the pen: see `Curve::finish`)
                     Self::vector_points(&mut pts, &more, v.offset, base_r, pressure, zoom, self.rec_clock, &mut self.rec_times);
-                    let l = wsp - v.offset;
-                    let last = pts.last().copied().unwrap();
-                    if (pos2(last[0], last[1]) - l).length() > 0.5 {
-                        pts.push([l.x, l.y, radius_for(base_r, smooth.1, pressure)]);
-                        if let Some((c, _, _)) = self.rec_clock {
-                            self.rec_times.push(c.elapsed().as_secs_f32());
-                        }
-                    }
                     let mut recorded_end = None;
                     match self.rec_clock.take() {
                         Some((_, start, _)) => {
@@ -7174,12 +7172,19 @@ impl App {
             }
         }
 
-        // a pen or brush stroke whose pen rests this frame: the brush catches up
-        let fed = std::mem::take(&mut self.stroke_fed);
-        if !fed && matches!(self.drag, Some(Drag::Raster { .. } | Drag::Vector { .. })) {
-            let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.1);
-            if self.stroke_catch_up(dt) {
-                ctx.request_repaint();
+        // a pen or brush stroke whose pen has rested a moment: the brush catches
+        // up (not between the samples of a moving pen: that pulled the brush
+        // straight at the pen's newest point and left burrs at corners)
+        let resting = self.now - self.stroke_fed > STROKE_REST;
+        if matches!(self.drag, Some(Drag::Raster { .. } | Drag::Vector { .. })) {
+            if !resting {
+                // frames keep coming while the pen holds still
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(STROKE_REST));
+            } else {
+                let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.1);
+                if self.stroke_catch_up(dt) {
+                    ctx.request_repaint();
+                }
             }
         }
 

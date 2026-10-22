@@ -198,7 +198,7 @@ fn capsule(p0: Pos2, r0: f32, p1: Pos2, r1: f32, seg_scale: f32) -> Vec<Pos2> {
 ///    similarity). So a curve never overshoots or bends against itself.
 ///
 /// A piece is made once the sample after it has arrived, so the stroke
-/// trails the pen by one sample; `finish` draws on to where the pen left.
+/// trails the pen by one sample; `finish` draws the last piece.
 pub struct Curve {
     /// Raw samples and the arc length from each to the next one.
     raw: Vec<([f32; 3], f32)>,
@@ -208,15 +208,13 @@ pub struct Curve {
     /// Tangent at the oldest of `q` (None until the first piece).
     t_older: Option<Vec2>,
     last_raw: [f32; 3],
-    /// The pen's own samples (unsmoothed), for the tail.
-    trail: Vec<[f32; 3]>,
 }
 
 impl Curve {
     /// Starting at `p` (x, y, pressure), already drawn by the caller;
     /// `distance`: the smoothing distance (0: none), in the points' units.
     pub fn new(p: [f32; 3], distance: f32) -> Self {
-        Self { raw: vec![(p, 0.0)], sigma: distance / 3.0, q: vec![p], t_older: None, last_raw: p, trail: vec![p] }
+        Self { raw: vec![(p, 0.0)], sigma: distance / 3.0, q: vec![p], t_older: None, last_raw: p }
     }
 
     fn smoothed(&self) -> [f32; 3] {
@@ -250,7 +248,6 @@ impl Curve {
             return Vec::new();
         }
         self.last_raw = p;
-        self.trail.push(p);
         if let Some(last) = self.raw.last_mut() {
             last.1 = dist;
         }
@@ -305,48 +302,12 @@ impl Curve {
         (self.advance(n, step), true)
     }
 
-    /// The rest: from the smoothed point (which trails the pen) on along the
-    /// pen's own path to where it left, the trailing offset fading out on
-    /// the way, so the tail bends in with the stroke instead of cutting
-    /// across to the end; then the last piece.
+    /// The rest: the last piece, to where the brush is. A stroke ends where
+    /// the brush was when the pen left, not where the pen was (Ash, 10-22:
+    /// joining the two made the end jump when the smoothing left the brush
+    /// behind).
     pub fn finish(&mut self, step: f32) -> Vec<[f32; 3]> {
         let mut out = Vec::new();
-        let s = *self.q.last().unwrap();
-        let tr = &self.trail;
-        if tr.len() >= 2 {
-            // the nearest point to `s` on the pen's recent path
-            let xy = |p: [f32; 3]| vec2(p[0], p[1]);
-            let (mut best, mut at, mut near) = (f32::MAX, tr.len() - 1, s);
-            for i in tr.len().saturating_sub(40)..tr.len() - 1 {
-                let (a, b) = (xy(tr[i]), xy(tr[i + 1]));
-                let d = b - a;
-                let t = ((xy(s) - a).dot(d) / d.length_sq().max(1e-9)).clamp(0.0, 1.0);
-                let c = a + d * t;
-                let dist = (c - xy(s)).length();
-                if dist < best {
-                    best = dist;
-                    at = i + 1;
-                    near = [c.x, c.y, tr[i][2] + (tr[i + 1][2] - tr[i][2]) * t];
-                }
-            }
-            let mut path = vec![near];
-            path.extend_from_slice(&tr[at..]);
-            let lens: Vec<f32> = std::iter::once(0.0)
-                .chain(path.windows(2).scan(0.0, |acc, w| {
-                    *acc += (xy(w[1]) - xy(w[0])).length();
-                    Some(*acc)
-                }))
-                .collect();
-            let total = lens.last().copied().unwrap_or(0.0).max(1e-6);
-            let off = [s[0] - near[0], s[1] - near[1], s[2] - near[2]];
-            let pts: Vec<[f32; 3]> = path.iter().zip(&lens).skip(1).map(|(p, l)| {
-                let k = 1.0 - l / total;
-                [p[0] + off[0] * k, p[1] + off[1] * k, p[2] + off[2] * k]
-            }).collect();
-            for p in pts {
-                out.extend(self.advance(p, step));
-            }
-        }
         let xy = |p: [f32; 3]| vec2(p[0], p[1]);
         let n = self.q.len();
         if n >= 2 {
