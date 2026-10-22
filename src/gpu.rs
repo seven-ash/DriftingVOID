@@ -1539,8 +1539,8 @@ impl Gpu {
         out
     }
 
-    /// A brush (or mask) layer's tiles in one texture, updated tile by tile:
-    /// the texture and the canvas point of its top left.
+    /// A mask layer's tiles in one texture, updated tile by tile: the texture
+    /// and the canvas point of its top left.
     fn atlas_of(&mut self, layer: &Layer) -> Option<(Arc<wgpu::Texture>, Pos2)> {
         let crate::doc::LayerKind::Raster(r) = &layer.kind else { return None };
         use crate::raster::TILE;
@@ -1554,7 +1554,11 @@ impl Gpu {
         if tx1 < tx0 {
             return None;
         }
-        let limit = (self.max_side / TILE as u32) as i32;
+        // masks only now (brush layers use pages): at most 8192 px a side
+        // (256 MB); a bigger mask is cut on the CPU instead. A 0.72.4 crash
+        // was a whole-layer atlas near the 16384 limit running the GPU out of
+        // memory while a long stroke made it again and again.
+        let limit = (self.max_side.min(8192) / TILE as u32) as i32;
         let fits = |a: &Atlas| a.t0.0 <= tx0 && a.t0.1 <= ty0 && a.t0.0 + a.n.0 > tx1 && a.t0.1 + a.n.1 > ty1;
         let frame = self.frame;
         if !self.atlases.get(&layer.id).is_some_and(fits) {
