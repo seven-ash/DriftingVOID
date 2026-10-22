@@ -289,8 +289,11 @@ impl Widget for Dial<'_> {
                 // every keyable row, keyed or not, so their rings line up)
                 let nav_gap = if key_cell { NAV_GAP } else { 0.0 };
                 ui.add_space(nav_gap);
-                let value_w = 52.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
-                let pin_w = if default.is_some() { 16.0 } else { 0.0 };
+                // fixed slots, so every row's ring starts and ends at the same x:
+                // the number box never grows with its text, and rows without a
+                // default keep the pin's room empty
+                let value_w = 58.0 + if suffix.is_empty() { 0.0 } else { 14.0 };
+                let pin_w = 16.0;
                 let ring_w = (width - label_w - nav_gap - value_w - pin_w - 18.0).max(60.0);
 
                 // ---- the ring
@@ -386,11 +389,11 @@ impl Widget for Dial<'_> {
                     dv = dv.custom_formatter(|_, _| MIXED.into());
                 }
                 ui.spacing_mut().interact_size.x = value_w;
-                let vr = ui.add(dv);
+                let vr = ui.add_sized(vec2(value_w, ui.spacing().interact_size.y), dv);
 
                 // ---- reset pin
+                let (pr, presp) = ui.allocate_exact_size(vec2(pin_w, row_h), Sense::click());
                 if let Some(d) = default {
-                    let (pr, presp) = ui.allocate_exact_size(vec2(pin_w, row_h), Sense::click());
                     let off = (*value - d).abs() > (hi - lo).abs() * 1e-4;
                     if off {
                         let col = if presp.hovered() { INK() } else { INK_3() };
