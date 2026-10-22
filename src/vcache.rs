@@ -1,6 +1,7 @@
 //! Decoded video frames kept per clip (Ash, 10-21): a background decoder fills
 //! the part of each video the timeline shows, at preview size (long side 1920),
-//! as NV12, whatever is being filmed. Scrubbing and starting playback then take
+//! as NV12 (RGBA for transparent ones: GIFs), whatever is being filmed.
+//! Scrubbing and starting playback then take
 //! frames from memory instead of a fresh ffmpeg seek each (0.4–0.6 s for an FHD
 //! clip). Up to 30 % of physical memory; the playback cache's share shrinks by
 //! what this holds.
@@ -10,21 +11,63 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::doc::Nv12;
 
-/// What one video layer needs: its file, frame rate, preview size and the
-/// frames (first, last) its clip shows.
+/// What one video layer needs: its file, frame rate, preview size, the
+/// frames (first, last) its clip shows, and whether it is transparent.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Want {
     pub path: String,
     pub fps: f64,
     pub size: (u32, u32),
     pub range: (u64, u64),
+    pub alpha: bool,
+}
+
+/// A held frame: NV12, or RGBA (straight alpha) for a transparent video.
+#[derive(Clone)]
+pub enum Frame {
+    Nv12(Arc<Nv12>),
+    Rgba(Arc<image::RgbaImage>),
+}
+
+impl Frame {
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Frame::Nv12(f) => (f.w, f.h),
+            Frame::Rgba(i) => i.dimensions(),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Frame::Nv12(f) => f.data.len(),
+            Frame::Rgba(i) => i.as_raw().len(),
+        }
+    }
+
+    /// As RGBA (an NV12 frame converted on every core).
+    pub fn to_rgba(&self) -> image::RgbaImage {
+        match self {
+            Frame::Nv12(f) => to_rgba(f),
+            Frame::Rgba(i) => (**i).clone(),
+        }
+    }
+
+    /// The frame as an image source whose geometry is the video's `logical`
+    /// size (the GPU takes NV12 as it is).
+    pub fn source(&self, logical: [u32; 2]) -> crate::doc::ImageSource {
+        let (rgba, nv12) = match self {
+            Frame::Nv12(f) => (Arc::new(image::RgbaImage::new(0, 0)), Some(f.clone())),
+            Frame::Rgba(i) => (i.clone(), None),
+        };
+        crate::doc::ImageSource { id: crate::doc::next_rev(), rgba, encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some(logical), nv12 }
+    }
 }
 
 #[derive(Default)]
 struct Clip {
     fps: f64,
     size: (u32, u32),
-    frames: BTreeMap<u64, Arc<Nv12>>,
+    frames: BTreeMap<u64, Frame>,
 }
 
 #[derive(Default)]
@@ -74,7 +117,7 @@ pub fn want(list: Vec<Want>) {
         return;
     }
     s.clips.retain(|p, c| list.iter().any(|w| &w.path == p && w.size == c.size && w.fps == c.fps));
-    s.bytes = s.clips.values().flat_map(|c| c.frames.values()).map(|f| f.data.len()).sum();
+    s.bytes = s.clips.values().flat_map(|c| c.frames.values()).map(|f| f.bytes()).sum();
     s.wants = list;
     s.epoch += 1;
     if !s.started {
@@ -84,7 +127,7 @@ pub fn want(list: Vec<Want>) {
 }
 
 /// The frame at video time `t` of `path`, when it is held.
-pub fn get(path: &str, t: f64) -> Option<Arc<Nv12>> {
+pub fn get(path: &str, t: f64) -> Option<Frame> {
     let s = state().lock().unwrap();
     let c = s.clips.get(path)?;
     c.frames.get(&((t * c.fps).round().max(0.0) as u64)).cloned()
@@ -165,7 +208,8 @@ fn filler() {
             std::thread::sleep(std::time::Duration::from_millis(200));
             continue;
         };
-        let Ok(player) = crate::video::Player::start_nv12(std::path::Path::new(&w.path), first as f64 / w.fps, w.fps, w.size, hwaccel) else {
+        let start = if w.alpha { crate::video::Player::start_rgba } else { crate::video::Player::start_nv12 };
+        let Ok(player) = start(std::path::Path::new(&w.path), first as f64 / w.fps, w.fps, w.size, hwaccel) else {
             std::thread::sleep(std::time::Duration::from_millis(1000));
             continue;
         };
@@ -181,7 +225,14 @@ fn filler() {
             if c.frames.contains_key(&idx) {
                 break;
             }
-            c.frames.insert(idx, Arc::new(Nv12 { w: w.size.0, h: w.size.1, data }));
+            let f = match w.alpha {
+                true => match image::RgbaImage::from_raw(w.size.0, w.size.1, data) {
+                    Some(i) => Frame::Rgba(Arc::new(i)),
+                    None => break,
+                },
+                false => Frame::Nv12(Arc::new(Nv12 { w: w.size.0, h: w.size.1, data })),
+            };
+            c.frames.insert(idx, f);
             s.bytes += n;
             got += 1;
             idx += 1;

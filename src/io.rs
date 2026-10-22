@@ -379,7 +379,7 @@ mod video_tests {
 
     #[test]
     fn video_layer_round_trips() {
-        let info = crate::video::VideoInfo { width: 1920, height: 1080, fps: 30.0, duration: 8.0, audio: true, codec: "h264".into() };
+        let info = crate::video::VideoInfo { width: 1920, height: 1080, fps: 30.0, duration: 8.0, audio: true, codec: "h264".into(), alpha: false };
         // a preview-sized frame without file bytes, as video frames are
         let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(96, 54)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([1920, 1080]), nv12: None };
         let mut im = ImageLayer::new(src, pos2(10.0, 20.0));

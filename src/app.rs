@@ -2076,7 +2076,10 @@ impl App {
                 n += 1;
                 continue;
             }
-            if crate::video::VIDEO_EXTS.contains(&ext.as_str()) {
+            // an animated GIF is a video (a clip on the timeline, looping); a
+            // still one is a photo
+            let animated_gif = crate::video::is_gif(&p) && crate::video::probe(&p).is_ok_and(|i| i.duration > i.frame_len() * 1.5);
+            if crate::video::VIDEO_EXTS.contains(&ext.as_str()) || animated_gif {
                 match self.add_video(&p, pos) {
                     Ok(w) => {
                         pos += vec2(w * 0.5 + 40.0, 0.0);
@@ -2113,7 +2116,9 @@ impl App {
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("영상").to_string();
         let id = self.add_image(src, name, at);
         if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: false, mute: false, volume: 1.0, slot: next_rev() });
+            // GIFs loop, as everywhere they are shown
+            let looping = crate::video::is_gif(p);
+            im.video = Some(VideoRef { path: p.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping, mute: false, volume: 1.0, slot: next_rev() });
         }
         Ok(info.width as f32)
     }
@@ -2151,7 +2156,7 @@ impl App {
             self.scrub_gen.insert(id, g);
             self.scrub_shown.insert(id, g);
             self.scrub_want.remove(&id);
-            self.set_video_frame(id, t, crate::vcache::to_rgba(&f));
+            self.set_video_frame(id, t, f.to_rgba());
             return;
         }
         self.scrub_want.insert(id, t);
@@ -2255,7 +2260,8 @@ impl App {
             let fps = v.info.fps.max(1.0);
             let last = ((v.info.duration - v.info.frame_len()).max(0.0) * fps).floor() as u64;
             let mut range = (0, last);
-            if self.doc.timeline.on {
+            // (a looping clip comes round to every frame)
+            if self.doc.timeline.on && !v.looping {
                 if let Some((span, media)) = self.video_clip(l.id) {
                     let speed = v.speed.max(1e-3);
                     let a = ((span[0] - media[0]) * speed).clamp(0.0, v.info.duration);
@@ -2263,7 +2269,7 @@ impl App {
                     range = (((a * fps).floor() as u64).min(last), ((b * fps).ceil() as u64).min(last));
                 }
             }
-            let w = crate::vcache::Want { path: v.path.clone(), fps: v.info.fps, size: v.info.preview_size(crate::video::PREVIEW_SIDE), range };
+            let w = crate::vcache::Want { path: v.path.clone(), fps: v.info.fps, size: v.info.preview_size(crate::video::PREVIEW_SIDE), range, alpha: v.info.alpha };
             if !out.iter().any(|o| o.path == w.path) {
                 out.push(w);
             }
@@ -2320,7 +2326,7 @@ impl App {
                             if let Some(st) = self.play_stats.as_mut() {
                                 st.1 += 1;
                             }
-                            self.set_video_frame(id, idx as f64 / fps, crate::vcache::to_rgba(&f));
+                            self.set_video_frame(id, idx as f64 / fps, f.to_rgba());
                         }
                         None => {
                             let size = v.info.preview_size(crate::video::PREVIEW_SIDE);
@@ -2462,7 +2468,7 @@ impl App {
             .iter()
             .filter(|l| self.doc.alive(l))
             .filter_map(|l| match &l.kind {
-                LayerKind::Image(im) => im.video.as_ref().map(|v| (l.id, crate::anim::video_time(l.anim.as_ref(), v.speed, t))),
+                LayerKind::Image(im) => im.video.as_ref().map(|v| (l.id, crate::anim::clip_time(l.anim.as_ref(), v, t))),
                 _ => None,
             })
             .collect()
@@ -3573,8 +3579,10 @@ impl App {
                         }
                     }
                 }
+                // (after the end a looping clip starts over: no still there)
+                let looping = matches!(row, TlRow::Layer(id) if self.video_of(*id).is_some_and(|v| v.looping));
                 for (a, b) in [(s0, m0.min(e0)), (m1.max(s0), e0)] {
-                    if b <= a {
+                    if b <= a || (looping && a >= m1.max(s0)) {
                         continue;
                     }
                     let (xa, xb) = (x_of(a), x_of(b));

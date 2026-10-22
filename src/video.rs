@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 pub const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "mts", "m2ts", "3gp"];
 
+/// Animated GIFs come in as videos (a single-frame GIF stays a photo).
+pub fn is_gif(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+}
+
 /// Longest side of preview frames (playback and scrubbing).
 pub const PREVIEW_SIDE: u32 = 1920;
 
@@ -70,6 +75,10 @@ pub struct VideoInfo {
     pub duration: f64,
     pub audio: bool,
     pub codec: String,
+    /// The frames carry transparency (an animated GIF, a video with an alpha
+    /// channel): decoded as RGBA everywhere, never NV12.
+    #[serde(default)]
+    pub alpha: bool,
 }
 
 impl VideoInfo {
@@ -144,16 +153,20 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo, String> {
         duration,
         audio: streams.iter().any(|s| s["codec_type"] == "audio"),
         codec: vs["codec_name"].as_str().unwrap_or("?").to_string(),
+        alpha: {
+            let pf = vs["pix_fmt"].as_str().unwrap_or("");
+            vs["codec_name"] == "gif" || pf.starts_with("yuva") || pf.starts_with("ya") || ["rgba", "bgra", "argb", "abgr", "gbrap", "pal8"].iter().any(|a| pf.starts_with(a))
+        },
     })
 }
 
-fn decode_args(path: &Path, t: f64, size: (u32, u32)) -> Vec<std::ffi::OsString> {
-    decode_args_fmt(path, t, size, false, "auto")
+fn decode_args(path: &Path, t: f64, size: (u32, u32), fps: Option<f64>) -> Vec<std::ffi::OsString> {
+    decode_args_fmt(path, t, size, false, "auto", fps)
 }
 
 /// `nv12`: NV12 frames in BT.709 limited range, whatever the source's colours
 /// (the export's video frames; the GPU turns them into RGB).
-fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &str) -> Vec<std::ffi::OsString> {
+fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &str, fps: Option<f64>) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = Vec::new();
     // DV_DECODE_HW=0: software decoding; =name: that hwaccel
     let hw = std::env::var("DV_DECODE_HW").unwrap_or_else(|_| hwaccel.into());
@@ -169,10 +182,16 @@ fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &
     a.push("-i".into());
     a.push(path.into());
     a.push("-vf".into());
+    // a GIF's frames last as long as each says: made steady at its average
+    // rate, as the players count frames by it
+    let steady = match fps {
+        Some(f) if is_gif(path) => format!("fps={f:.6},"),
+        _ => String::new(),
+    };
     if nv12 {
-        a.push(format!("scale={}:{}:flags=bicubic:out_color_matrix=bt709:out_range=tv", size.0, size.1).into());
+        a.push(format!("{steady}scale={}:{}:flags=bicubic:out_color_matrix=bt709:out_range=tv", size.0, size.1).into());
     } else {
-        a.push(format!("scale={}:{}:flags=bicubic", size.0, size.1).into());
+        a.push(format!("{steady}scale={}:{}:flags=bicubic", size.0, size.1).into());
     }
     for s in ["-an", "-sn", "-f", "rawvideo", "-pix_fmt", if nv12 { "nv12" } else { "rgba" }, "pipe:1"] {
         a.push(s.into());
@@ -183,7 +202,7 @@ fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &
 /// One frame at `t` seconds, `size` pixels.
 pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImage, String> {
     let tl = tools().ok_or(MISSING)?;
-    let mut args = decode_args(path, t, size);
+    let mut args = decode_args(path, t, size, None);
     // a single frame: insert "-frames:v 1" before the output options
     let at = args.len() - 7;
     args.insert(at, "1".into());
@@ -243,7 +262,7 @@ pub struct Player<T = image::RgbaImage> {
 
 impl Player {
     pub fn start(path: &Path, t0: f64, fps: f64, size: (u32, u32)) -> Result<Self, String> {
-        Player::spawn(decode_args(path, t0, size), (size.0 * size.1 * 4) as usize, t0, fps, move |buf| image::RgbaImage::from_raw(size.0, size.1, buf))
+        Player::spawn(decode_args(path, t0, size, Some(fps)), (size.0 * size.1 * 4) as usize, t0, fps, move |buf| image::RgbaImage::from_raw(size.0, size.1, buf))
     }
 }
 
@@ -251,7 +270,13 @@ impl Player<Vec<u8>> {
     /// As `start`, with NV12 frames (BT.709 limited range; even sizes only),
     /// decoded with `hwaccel` (ffmpeg's name: "cuda" on NVIDIA, else "auto").
     pub fn start_nv12(path: &Path, t0: f64, fps: f64, size: (u32, u32), hwaccel: &str) -> Result<Self, String> {
-        Player::spawn(decode_args_fmt(path, t0, size, true, hwaccel), (size.0 * size.1 * 3 / 2) as usize, t0, fps, Some)
+        Player::spawn(decode_args_fmt(path, t0, size, true, hwaccel, Some(fps)), (size.0 * size.1 * 3 / 2) as usize, t0, fps, Some)
+    }
+
+    /// As `start`, RGBA frames as raw bytes (a transparent video for the
+    /// video cache), decoded with `hwaccel`.
+    pub fn start_rgba(path: &Path, t0: f64, fps: f64, size: (u32, u32), hwaccel: &str) -> Result<Self, String> {
+        Player::spawn(decode_args_fmt(path, t0, size, false, hwaccel, Some(fps)), (size.0 * size.1 * 4) as usize, t0, fps, Some)
     }
 }
 

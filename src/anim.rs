@@ -603,6 +603,14 @@ pub fn video_time(anim: Option<&Anim>, speed: f64, t: f64) -> f64 {
     }
 }
 
+/// `video_time` for a video layer: a looping one (GIFs, or 반복 ticked)
+/// starts over past its end instead of holding the last frame.
+pub fn clip_time(anim: Option<&Anim>, v: &crate::doc::VideoRef, t: f64) -> f64 {
+    let vt = video_time(anim, v.speed, t);
+    let d = v.info.duration;
+    if v.looping && d > 0.0 && vt >= d { vt.rem_euclid(d) } else { vt }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

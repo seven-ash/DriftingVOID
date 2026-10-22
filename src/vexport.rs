@@ -213,7 +213,8 @@ pub(crate) fn feeds_for(doc: &Document, gpu: bool) -> std::collections::HashMap<
     for l in &doc.layers {
         if let LayerKind::Image(im) = &l.kind {
             if let Some(v) = &im.video {
-                let use_nv12 = gpu && v.info.width % 2 == 0 && v.info.height % 2 == 0;
+                // (transparent ones stay RGBA: NV12 has no alpha)
+                let use_nv12 = gpu && !v.info.alpha && v.info.width % 2 == 0 && v.info.height % 2 == 0;
                 feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None });
             }
         }
@@ -253,11 +254,11 @@ pub(crate) fn fill_videos(d: &mut Document, t: f64, feeds: &mut std::collections
         let anim = l.anim.clone();
         if let LayerKind::Image(im) = &mut l.kind {
             if let (Some(v), Some(feed)) = (im.video.as_ref(), feeds.get_mut(&l.id)) {
-                let vt = crate::anim::video_time(anim.as_ref(), v.speed, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
+                let vt = crate::anim::clip_time(anim.as_ref(), v, t).clamp(0.0, (v.info.duration - v.info.frame_len()).max(0.0));
                 if let Some(k) = preview {
                     let shown = v.info.width.max(v.info.height) as f32 * im.scale * k;
-                    if let Some(f) = crate::vcache::get(&v.path, vt).filter(|f| f.w >= v.info.width || f.w.max(f.h) as f32 >= shown * 0.98) {
-                        im.src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(0, 0)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([v.info.width, v.info.height]), nv12: Some(f) };
+                    if let Some(f) = crate::vcache::get(&v.path, vt).filter(|f| f.size().0 >= v.info.width || f.size().0.max(f.size().1) as f32 >= shown * 0.98) {
+                        im.src = f.source([v.info.width, v.info.height]);
                         crate::vcache::SCRUBS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
@@ -689,6 +690,75 @@ mod tests {
         let f = image::open(dir.join("out_00003.png")).unwrap().to_rgba8();
         let px = f.get_pixel(32, 16);
         assert!(px[0] > 200 && px[1] < 60 && px[3] == 255, "{px:?}");
+    }
+
+    /// An animated GIF with transparency (Ash, 10-22): probed as a looping
+    /// video with alpha, its frames keep their transparency through the
+    /// export (GPU and CPU), and past its end it starts over (skipped
+    /// without ffmpeg).
+    #[test]
+    fn a_transparent_gif_loops_in_the_export() {
+        if crate::video::tools().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join("dv_vexport_gif");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 4 frames at 0.1 s: left half clear, right half red, green, blue, white
+        let gif = dir.join("a.gif");
+        {
+            let f = std::fs::File::create(&gif).unwrap();
+            let mut enc = image::codecs::gif::GifEncoder::new(f);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            for c in [[255u8, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]] {
+                let img = image::RgbaImage::from_fn(64, 32, |x, _| if x < 32 { image::Rgba([0, 0, 0, 0]) } else { image::Rgba([c[0], c[1], c[2], 255]) });
+                let frame = image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1));
+                enc.encode_frame(frame).unwrap();
+            }
+        }
+        let info = crate::video::probe(&gif).unwrap();
+        assert!(info.alpha, "a GIF is transparent");
+        assert!((info.fps - 10.0).abs() < 0.5 && (info.duration - 0.4).abs() < 0.05, "{info:?}");
+        for gpu in [true, false] {
+            let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(64, 32)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: Some([64, 32]), nv12: None };
+            let mut im = crate::doc::ImageLayer::new(src, egui::pos2(0.0, 0.0));
+            im.video = Some(crate::doc::VideoRef { path: gif.to_string_lossy().into(), info: info.clone(), time: 0.0, speed: 1.0, looping: true, mute: false, volume: 1.0, slot: 1 });
+            let mut doc = Document::default();
+            doc.insert("g".into(), LayerKind::Image(im), None);
+            let out = dir.join(if gpu { "gpu.png" } else { "cpu.png" });
+            let job = Job {
+                doc,
+                region: Region::Fixed(Rect::from_center_size(egui::pos2(0.0, 0.0), vec2(64.0, 32.0))),
+                size: (64, 32),
+                fps: 10.0,
+                t0: 0.0,
+                t1: 1.0,
+                codec: Codec::Png,
+                quality: 0,
+                mbps: None,
+                gpu,
+                bg: None,
+                audio: Vec::new(),
+                ss: 1,
+                out: out.clone(),
+            };
+            let p = start(job);
+            while p.result.lock().unwrap().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(p.result.lock().unwrap().take().unwrap().is_ok());
+            let stem = out.file_stem().unwrap().to_string_lossy().to_string();
+            // frame k (k-th 0.1 s, numbered from 1) shows GIF frame (k-1) % 4
+            let want = [[255u8, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+            for k in [1usize, 2, 4, 5, 7] {
+                let f = image::open(dir.join(format!("{stem}_{k:05}.png"))).unwrap().to_rgba8();
+                let (clear, solid) = (f.get_pixel(8, 16), f.get_pixel(56, 16));
+                assert!(clear[3] < 10, "gpu {gpu}, frame {k}: the clear half shows {clear:?}");
+                let c = want[(k - 1) % 4];
+                let d = (0..3).map(|i| (solid[i] as i32 - c[i] as i32).abs()).max().unwrap();
+                assert!(d < 40 && solid[3] > 245, "gpu {gpu}, frame {k}: {solid:?}, want {c:?}");
+            }
+        }
     }
 
     /// A camera following a keyed square (position and rotation): in every exported
