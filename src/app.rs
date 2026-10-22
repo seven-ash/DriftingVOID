@@ -880,6 +880,8 @@ pub struct App {
     /// An image export running on a worker thread (its status line when done).
     img_job: Option<std::sync::mpsc::Receiver<String>>,
     nav3d: Option<crate::view3d::Nav>,
+    /// A pen or brush stroke got a pen sample this frame (else it catches up).
+    stroke_fed: bool,
     tab_t0: Option<f64>,
     peek: bool,
     /// Tab presses taken out of the raw input (pressed, shift) before egui could use
@@ -1193,6 +1195,7 @@ impl App {
             light_drag: None,
             img_job: None,
             nav3d: None,
+            stroke_fed: false,
             tab_t0: None,
             peek: false,
             tab_raw: Vec::new(),
@@ -6573,6 +6576,7 @@ impl App {
             Drag::Raster { id, stroke, smooth, curve } => {
                 // smoothing happens in the curve (weighted by arc length, as Krita)
                 *smooth = (w, pressure);
+                self.stroke_fed = true;
                 let id = *id;
                 let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
@@ -6583,6 +6587,7 @@ impl App {
             }
             Drag::Vector { id, pts, smooth, base_r, pressure: use_p, curve, .. } => {
                 *smooth = (w, pressure);
+                self.stroke_fed = true;
                 let off = match self.doc.get(*id).map(|l| &l.kind) {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
@@ -6603,6 +6608,40 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Stroke catch-up for `dt` seconds of a resting pen (`vector::Curve::catch_up`):
+    /// the brush closes on the pen with a time constant that grows with
+    /// 손떨림 보정 (0.05 s at 0, 0.2 s at 1). True while it is still closing.
+    fn stroke_catch_up(&mut self, dt: f32) -> bool {
+        let tau = 0.05 + 0.15 * self.s.smoothing.clamp(0.0, 1.0);
+        let frac = 1.0 - (-dt / tau).exp();
+        let step = CURVE_STEP / self.zoom;
+        let zoom = self.zoom;
+        match &mut self.drag {
+            Some(Drag::Raster { id, stroke: Some(st), curve, .. }) => {
+                let (more, going) = curve.catch_up(frac, step);
+                let id = *id;
+                if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
+                }
+                if !more.is_empty() {
+                    self.changed = true;
+                    self.modified = true;
+                }
+                going
+            }
+            Some(Drag::Vector { id, pts, base_r, pressure, curve, .. }) => {
+                let (more, going) = curve.catch_up(frac, step);
+                let off = match self.doc.get(*id).map(|l| &l.kind) {
+                    Some(LayerKind::Vector(v)) => v.offset,
+                    _ => Vec2::ZERO,
+                };
+                Self::vector_points(pts, &more, off, *base_r, *pressure, zoom, self.rec_clock, &mut self.rec_times);
+                going
+            }
+            _ => false,
         }
     }
 
@@ -7132,6 +7171,15 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // a pen or brush stroke whose pen rests this frame: the brush catches up
+        let fed = std::mem::take(&mut self.stroke_fed);
+        if !fed && matches!(self.drag, Some(Drag::Raster { .. } | Drag::Vector { .. })) {
+            let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 0.1);
+            if self.stroke_catch_up(dt) {
+                ctx.request_repaint();
             }
         }
 

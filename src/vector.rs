@@ -285,6 +285,26 @@ impl Curve {
         bezier_piece(a, b, t_a, t_b, step)
     }
 
+    /// The pen rests (no sample this frame): the smoothed point moves `frac`
+    /// of the way on to it, as Photoshop's stroke catch-up does, so the brush
+    /// keeps following and settles under the pen instead of waiting at its
+    /// smoothing distance. False once it is there.
+    pub fn catch_up(&mut self, frac: f32, step: f32) -> (Vec<[f32; 3]>, bool) {
+        let s = self.raw.last().map_or(self.last_raw, |r| r.0);
+        let p = self.last_raw;
+        let gap = vec2(p[0] - s[0], p[1] - s[1]).length();
+        if gap < step * 0.3 {
+            return (Vec::new(), false);
+        }
+        let f = frac.clamp(0.0, 1.0);
+        let n = [s[0] + (p[0] - s[0]) * f, s[1] + (p[1] - s[1]) * f, s[2] + (p[2] - s[2]) * f];
+        if let Some(last) = self.raw.last_mut() {
+            last.1 = gap * f;
+        }
+        self.raw.push((n, 0.0));
+        (self.advance(n, step), true)
+    }
+
     /// The rest: from the smoothed point (which trails the pen) on along the
     /// pen's own path to where it left, the trailing offset fading out on
     /// the way, so the tail bends in with the stroke instead of cutting
@@ -426,6 +446,33 @@ mod tests {
         // and the curve always turns the same way (no bends against itself)
         let turns: Vec<f32> = pts.windows(3).map(|w| (w[1][0] - w[0][0]) * (w[2][1] - w[1][1]) - (w[1][1] - w[0][1]) * (w[2][0] - w[1][0])).collect();
         assert!(turns.iter().all(|&t| t >= -0.05), "turns back: {:?}", turns.iter().cloned().fold(0.0f32, f32::min));
+    }
+
+    /// The pen stops after a quick line with strong smoothing: the brush,
+    /// left behind by its smoothing distance, follows on to the pen frame by
+    /// frame and settles under it (Ash, 10-22: it waited at a distance).
+    #[test]
+    fn a_resting_pen_is_caught_up() {
+        let mut c = Curve::new([0.0, 0.0, 0.5], 90.0);
+        let mut pts = Vec::new();
+        for k in 1..=20 {
+            pts.extend(c.push([k as f32 * 15.0, 0.0, 0.5], 1.5));
+        }
+        let behind = 300.0 - pts.last().unwrap()[0];
+        assert!(behind > 20.0, "smoothing left it {behind} behind");
+        let mut frames = 0;
+        loop {
+            let (more, going) = c.catch_up(0.1, 1.5);
+            pts.extend(more);
+            frames += 1;
+            if !going || frames > 200 {
+                break;
+            }
+        }
+        let gap = 300.0 - pts.last().unwrap()[0];
+        assert!(gap < 1.0 && frames < 80, "{gap} short after {frames} frames");
+        // straight on, never back
+        assert!(pts.windows(2).all(|w| w[1][0] >= w[0][0] - 1e-3 && w[1][1].abs() < 1e-3));
     }
 
     /// Quick handwriting as a tablet reports it: samples 6–14 apart (uneven),
