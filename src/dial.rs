@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 
 use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Shape, Stroke, Ui, Widget, pos2, vec2};
 
-use crate::theme::{ACCENT, FILL_1, INK, INK_2, INK_3};
+use crate::theme::{GlassTip, ACCENT, FILL_1, INK, INK_2, INK_3};
 
 pub struct Dial<'a> {
     value: &'a mut f32,
@@ -101,7 +101,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
             ui.painter().circle_filled(kr.center(), 8.0, FILL_1());
         }
         draw_key(ui.painter(), kr.center(), mark, kresp.hovered());
-        if kresp.on_hover_text("키 기록").clicked() {
+        if kresp.glass_tip("키 기록").clicked() {
             *hit = true;
         }
         if let Some((kn, go)) = nav {
@@ -121,7 +121,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
                 let (dx, h) = (2.2 * dir as f32, 3.6);
                 ui.painter().add(Shape::line(vec![c + vec2(-dx, -h), c + vec2(dx, 0.0), c + vec2(-dx, h)], Stroke::new(1.4, col)));
                 let tip = if dir < 0 { "이전 키로" } else { "다음 키로" };
-                if on && resp.on_hover_text(tip).clicked() {
+                if on && resp.glass_tip(tip).clicked() {
                     *go = dir;
                 }
             }
@@ -136,7 +136,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
         ui.painter().circle_filled(r.center(), 8.0, FILL_1());
     }
     draw_key(ui.painter(), r.center(), mark, resp.hovered());
-    resp.on_hover_text("키 기록").clicked()
+    resp.glass_tip("키 기록").clicked()
 }
 
 impl<'a> Dial<'a> {
@@ -415,7 +415,7 @@ impl Widget for Dial<'_> {
                             ui.painter().circle_filled(pr.center(), 8.5, FILL_1());
                         }
                         reset_icon(ui.painter(), pr.center(), col);
-                        if presp.on_hover_text(format!("기본값으로 ({d})")).clicked() {
+                        if presp.glass_tip(format!("기본값으로 ({d})")).clicked() {
                             *value = d;
                         }
                     }
@@ -478,7 +478,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                         ui.painter().circle_filled(pr.center(), 7.0, FILL_1());
                     }
                     reset_icon(ui.painter(), pr.center(), if presp.hovered() { INK() } else { INK_3() });
-                    if presp.on_hover_text(format!("기본값 ({dv})")).clicked() {
+                    if presp.glass_tip(format!("기본값 ({dv})")).clicked() {
                         *value = dv;
                     }
                 }

@@ -125,14 +125,47 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     out
 }
 
+/// Tooltips on the glass, as menus and dropdowns (`on_hover_text` keeps egui's
+/// opaque frame).
+pub trait GlassTip {
+    fn glass_tip(self, text: impl Into<egui::WidgetText>) -> Self;
+}
+
+impl GlassTip for egui::Response {
+    fn glass_tip(self, text: impl Into<egui::WidgetText>) -> Self {
+        let text = text.into();
+        // DV_TIP=<text>: that tooltip stays open (window captures without hovering)
+        let shown = std::env::var("DV_TIP").is_ok_and(|t| !t.is_empty() && text.text().contains(t.as_str()));
+        let mut tip = if shown { egui::Tooltip::for_widget(&self) } else { egui::Tooltip::for_enabled(&self) };
+        tip.popup = tip.popup.style(glass_popup_style(false));
+        tip.show(|ui| {
+            // see egui's on_hover_text (keeps dynamic tips from shrinking)
+            ui.set_max_width(ui.spacing().tooltip_width);
+            if !crate::glass::available() {
+                ui.add(egui::Label::new(text));
+                return;
+            }
+            let idx = ui.painter().add(egui::Shape::Noop);
+            ui.add(egui::Label::new(text));
+            // the label's size (the tooltip frame hugs it), plus the frame's margin
+            let m = ui.spacing().menu_margin;
+            let r = ui.min_rect();
+            let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
+            let radius = ui.visuals().menu_corner_radius.nw;
+            ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(r, radius));
+        });
+        self
+    }
+}
+
 pub fn apply_visuals(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
     let v = &mut style.visuals;
     *v = if is_light() { egui::Visuals::light() } else { egui::Visuals::dark() };
     v.override_text_color = Some(INK());
     v.panel_fill = VOID();
-    // popups (menus, dropdowns, tooltips) can't host the GL glass, so they use the
-    // same tint nearly opaque, same radius, and follow the shadow setting
+    // popups without their own glass (egui's built-in ones, or glass off) use
+    // the same tint nearly opaque, same radius, and follow the shadow setting
     let [pr, pg, pb, _] = PAPER_2().to_array();
     v.window_fill = Color32::from_rgba_unmultiplied(pr, pg, pb, 245);
     v.window_stroke = Stroke::new(1.0, FILL_1());
