@@ -1043,6 +1043,10 @@ fn sample_region(cg: &mut Option<CanvasGpu>, doc: &Document, p: Pos2) -> Option<
 /// Screen points between the points of a drawn curve (`vector::Curve`).
 const CURVE_STEP: f32 = 1.5;
 
+/// Screen points of smoothing distance at 손떨림 보정 1 (the default 0.4:
+/// 40 px, σ 13; Krita's default distance is 50).
+const SMOOTH_PX: f32 = 100.0;
+
 const SLOT_CANVAS: u8 = 0;
 const SLOT_3D: u8 = 1;
 const SLOT_PEEK: u8 = 2;
@@ -5210,7 +5214,7 @@ impl App {
                         }
                         let mut st = RasterStroke::new(p);
                         st.add_point(r, w - r.offset, pressure);
-                        self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure), curve: crate::vector::Curve::new([w.x, w.y, pressure]) });
+                        self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure), curve: crate::vector::Curve::new([w.x, w.y, pressure], self.smooth_distance()) });
                         if !erase {
                             self.remember_color(self.s.color);
                         }
@@ -5247,7 +5251,7 @@ impl App {
                     base_r,
                     pressure: self.s.pen_pressure,
                     color: self.s.color,
-                    curve: crate::vector::Curve::new([w.x, w.y, pressure]),
+                    curve: crate::vector::Curve::new([w.x, w.y, pressure], self.smooth_distance()),
                 });
                 self.remember_color(self.s.color);
             }
@@ -6197,7 +6201,6 @@ impl App {
         let w = xf.s2w(sp);
         let delta_s = sp - self.last_screen;
         self.last_screen = sp;
-        let smoothing = self.s.smoothing.clamp(0.0, 0.95);
         let zoom = self.zoom;
         // Space held mid-drag: the view pans with the pointer while the dragged thing
         // stays under it; letting go of Space carries on from the same spot
@@ -6568,11 +6571,10 @@ impl App {
                 self.modified = true;
             }
             Drag::Raster { id, stroke, smooth, curve } => {
-                let np = smooth.0 + (w - smooth.0) * (1.0 - smoothing);
-                let npr = smooth.1 + (pressure - smooth.1) * (1.0 - smoothing * 0.5);
-                *smooth = (np, npr);
+                // smoothing happens in the curve (weighted by arc length, as Krita)
+                *smooth = (w, pressure);
                 let id = *id;
-                let more = curve.push([np.x, np.y, npr], CURVE_STEP / zoom);
+                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
                     Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                 }
@@ -6580,14 +6582,12 @@ impl App {
                 self.modified = true;
             }
             Drag::Vector { id, pts, smooth, base_r, pressure: use_p, curve, .. } => {
-                let np = smooth.0 + (w - smooth.0) * (1.0 - smoothing);
-                let npr = smooth.1 + (pressure - smooth.1) * (1.0 - smoothing * 0.5);
-                *smooth = (np, npr);
+                *smooth = (w, pressure);
                 let off = match self.doc.get(*id).map(|l| &l.kind) {
                     Some(LayerKind::Vector(v)) => v.offset,
                     _ => Vec2::ZERO,
                 };
-                let more = curve.push([np.x, np.y, npr], CURVE_STEP / zoom);
+                let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom);
                 Self::vector_points(pts, &more, off, *base_r, *use_p, zoom, self.rec_clock, &mut self.rec_times);
             }
             Drag::VErase { id, r } => {
@@ -6604,6 +6604,11 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The smoothing distance for a new stroke, in canvas units.
+    fn smooth_distance(&self) -> f32 {
+        self.s.smoothing.clamp(0.0, 0.95) * SMOOTH_PX / self.zoom
     }
 
     /// Curve points into a brush stroke (and its recording).
