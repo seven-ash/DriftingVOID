@@ -138,17 +138,36 @@ impl Default for Settings {
     }
 }
 
-/// Intelligent scissors in progress: the outline so far and the live wire from
-/// its last anchor.
+/// Intelligent scissors in progress: the outline so far, its anchors and the
+/// live wire from the last one.
 struct Scissor {
     mid: LayerId,
     on: bool,
     pts: Vec<Pos2>,
+    anchors: Vec<Pos2>,
     wire: Option<crate::segment::LiveWire>,
+    /// While tracing with a left drag: the live path last time and how many
+    /// updates each of its points has stayed (path cooling).
+    last: Vec<Pos2>,
+    age: Vec<u32>,
 }
+
+/// Scissors: the edge map around an anchor (cells), how near its border a new
+/// anchor may come before a new map is made, the click snap radius and the
+/// path cooling rules (screen px, updates), the growth budget per frame.
+const SCISSOR_MAP: f32 = 1536.0;
+const SCISSOR_MARGIN: f32 = 192.0;
+const SCISSOR_SNAP_PX: f32 = 10.0;
+const COOL_AGE: u32 = 6;
+const COOL_MIN_PX: f32 = 24.0;
+const COOL_BACK_PX: f32 = 16.0;
+const SCISSOR_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 enum Drag {
     Pan,
+    /// Tracing with the scissors (left drag): anchors come by path cooling;
+    /// `fresh` when the press started the outline.
+    Scissor { start: Pos2, moved: bool, fresh: bool, refine: bool },
     Move { id: LayerId, start: Pos2, orig: Layer },
     ScaleImage { id: LayerId, sign: Vec2, orig: ImageLayer },
     Rotate { id: LayerId, orig: ImageLayer },
@@ -1689,8 +1708,20 @@ impl App {
                         }
                         let t0 = std::time::Instant::now();
                         let o = pos2(c[0] - 640.0, c[1]);
-                        for d in [vec2(-200.0, -200.0), vec2(200.0, -200.0), vec2(200.0, 200.0), vec2(-200.0, 200.0)] {
-                            app.scissor_click(mid, o + d, true, false);
+                        let mut clicks: Vec<Pos2> = [vec2(-200.0, -200.0), vec2(200.0, -200.0), vec2(200.0, 200.0), vec2(-200.0, 200.0)].iter().map(|d| o + *d).collect();
+                        // DV_SCISSOR_PTS="x,y;x,y;…": the anchors clicked, in pixels of the first photo
+                        if let (Ok(v), Some(im)) = (std::env::var("DV_SCISSOR_PTS"), app.doc.layers.iter().find_map(|l| match &l.kind {
+                            LayerKind::Image(im) => Some(im.clone()),
+                            _ => None,
+                        })) {
+                            clicks = v.split(';').filter_map(|q| q.split_once(',').and_then(|(x, y)| Some(im.src_to_world(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))))).collect();
+                        }
+                        app.zoom = app.zoom.max(1e-3);
+                        for p in clicks {
+                            app.scissor_click(mid, p, true, false);
+                        }
+                        if let Some(sc) = &app.scissor {
+                            eprintln!("scissor anchors (snapped): {:?}", sc.anchors);
                         }
                         app.scissor_close(std::env::var_os("DV_SCISSOR_CUT").is_some());
                         eprintln!("scissor: {} in {:?}", app.status, t0.elapsed());
@@ -2836,55 +2867,137 @@ impl App {
         n
     }
 
-    /// A live wire seeded at `at` (a 768 px window of what lies under the masked layer).
-    fn scissor_wire(&mut self, mid: LayerId, at: Pos2) -> Option<crate::segment::LiveWire> {
+    /// The edge map of what lies under the masked layer around `at`: the one
+    /// the outline has when `at` is well inside it, else a new one.
+    fn scissor_map(&mut self, mid: LayerId, at: Pos2) -> Option<std::sync::Arc<crate::segment::EdgeMap>> {
+        let keep = self.scissor.as_ref().filter(|sc| sc.mid == mid).and_then(|sc| sc.wire.as_ref()).map(|wr| wr.map.clone());
+        if let Some(m) = keep.filter(|m| m.holds(at, SCISSOR_MARGIN)) {
+            return Some(m);
+        }
         let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
-        let reg = Rect::from_center_size(at, vec2(768.0, 768.0));
+        let cell = 1.0;
+        let reg = Rect::from_center_size(at, vec2(SCISSOR_MAP, SCISSOR_MAP) * cell);
         let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
         let mut d = self.doc.clone();
         d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
-        let pm = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)).ok()?;
+        let pm = render_region(&mut self.cgpu, &d, reg, 1.0 / cell, Some(Color32::BLACK)).ok()?;
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
-        let px = pm.data();
-        let lum: Vec<f32> = (0..pw * ph).map(|i| (0.299 * px[i * 4] as f32 + 0.587 * px[i * 4 + 1] as f32 + 0.114 * px[i * 4 + 2] as f32) / 255.0).collect();
-        let seed = ((at.x - reg.min.x) as usize, (at.y - reg.min.y) as usize);
-        Some(crate::segment::LiveWire::new(&lum, pw, ph, (reg.min.x as i32, reg.min.y as i32), seed))
+        Some(std::sync::Arc::new(crate::segment::EdgeMap::new(pm.data(), pw, ph, reg.min, cell)))
     }
 
-    /// The outline from the last anchor to `w`: along the live wire, or straight.
+    /// Where an anchor clicked at `w` goes (the strongest edge within a few
+    /// screen pixels), and the edge map it lies in.
+    fn scissor_anchor_at(&mut self, mid: LayerId, w: Pos2) -> (Pos2, Option<std::sync::Arc<crate::segment::EdgeMap>>) {
+        let map = self.scissor_map(mid, w);
+        let p = map.as_ref().map_or(w, |m| m.snap(w, SCISSOR_SNAP_PX / self.zoom / m.cell));
+        (p, map)
+    }
+
+    /// The outline from the last anchor to `w`: along the live wire (as far
+    /// as it has grown), or straight.
     fn scissor_path(sc: &Scissor, w: Pos2) -> Vec<Pos2> {
-        match sc.wire.as_ref().and_then(|wr| wr.path_to(w.x.floor() as i32, w.y.floor() as i32)) {
-            Some(p) => p.into_iter().map(|(x, y)| pos2(x as f32 + 0.5, y as f32 + 0.5)).collect(),
+        match sc.wire.as_ref().and_then(|wr| wr.path_to(w)) {
+            Some(p) => p,
             None => vec![w],
         }
     }
 
+    /// An anchor at `w` (snapped to the edge): the outline follows the live
+    /// wire to it; near the first anchor it closes. Starts an outline when
+    /// none is in progress.
     fn scissor_click(&mut self, mid: LayerId, w: Pos2, on: bool, refine: bool) {
-        let near_first = self.scissor.as_ref().is_some_and(|sc| sc.pts.len() > 2 && (sc.pts[0] - w).length() * self.zoom < 10.0);
+        let near_first = self.scissor.as_ref().is_some_and(|sc| sc.mid == mid && sc.pts.len() > 2 && (sc.pts[0] - w).length() * self.zoom < 10.0);
         if near_first {
             self.scissor_close(refine);
             return;
         }
+        let (p, map) = self.scissor_anchor_at(mid, w);
+        let wire = map.and_then(|m| crate::segment::LiveWire::new(m, p));
         match self.scissor.take() {
             Some(mut sc) if sc.mid == mid => {
-                let path = Self::scissor_path(&sc, w);
-                sc.pts.extend(path);
-                sc.wire = self.scissor_wire(mid, w);
+                if let Some(wr) = sc.wire.as_mut() {
+                    wr.grow(Some(p), std::time::Duration::from_millis(300));
+                }
+                let path = Self::scissor_path(&sc, p);
+                sc.pts.extend(path.into_iter().skip(1));
+                if sc.pts.last() != Some(&p) {
+                    sc.pts.push(p);
+                }
+                sc.anchors.push(p);
+                sc.wire = wire;
+                sc.last.clear();
+                sc.age.clear();
                 self.scissor = Some(sc);
             }
             _ => {
-                let wire = self.scissor_wire(mid, w);
-                self.scissor = Some(Scissor { mid, on, pts: vec![w], wire });
-                self.status = "가위 · 경계를 따라 클릭 · 첫 점/Enter: 닫기 · Esc: 취소".into();
+                self.scissor = Some(Scissor { mid, on, pts: vec![p], anchors: vec![p], wire, last: Vec::new(), age: Vec::new() });
+                self.status = "가위 · 끌기: 경계 따라 자동 · 우클릭: 앵커 · 첫 점/Enter: 닫기 · Esc: 취소".into();
             }
         }
+    }
+
+    /// Tracing with a left drag at `w`: the live wire grows to the pointer,
+    /// and a stretch of it that has stayed put while the pointer moved on is
+    /// fixed with an anchor at its end (path cooling).
+    fn scissor_trace(&mut self, w: Pos2) {
+        let zoom = self.zoom;
+        let cut = {
+            let Some(sc) = self.scissor.as_mut() else { return };
+            let Some(wr) = sc.wire.as_mut() else { return };
+            if !wr.grow(Some(w), std::time::Duration::from_millis(8)) {
+                return;
+            }
+            let Some(path) = wr.path_to(w) else { return };
+            // the start shared with the last path has stayed one update more
+            let common = sc.last.iter().zip(&path).take_while(|(a, b)| a == b).count();
+            sc.age.truncate(common);
+            for a in &mut sc.age {
+                *a += 1;
+            }
+            sc.age.resize(path.len(), 0);
+            let total: f32 = path.windows(2).map(|s| s[0].distance(s[1])).sum();
+            let mut along = 0.0;
+            let mut cut = None;
+            for i in 1..path.len() {
+                along += path[i - 1].distance(path[i]);
+                if sc.age[i] >= COOL_AGE && along * zoom >= COOL_MIN_PX && (total - along) * zoom >= COOL_BACK_PX {
+                    cut = Some(i);
+                }
+            }
+            sc.last = path.clone();
+            let Some(i) = cut else { return };
+            sc.pts.extend_from_slice(&path[1..=i]);
+            sc.anchors.push(path[i]);
+            sc.last.clear();
+            sc.age.clear();
+            (sc.mid, path[i])
+        };
+        let (mid, p) = cut;
+        let map = self.scissor_map(mid, p);
+        if let Some(sc) = self.scissor.as_mut() {
+            sc.wire = map.and_then(|m| crate::segment::LiveWire::new(m, p));
+        }
+    }
+
+    /// The mask the scissors draw into, when they are the tool in use.
+    fn scissor_target(&self) -> Option<LayerId> {
+        self.wand.filter(|_| self.wand_mode == 2).filter(|mid| self.doc.get(*mid).is_some_and(|l| l.mask_of.is_some()))
     }
 
     /// Closes the outline and fills it into the mask (anti-aliased).
     /// `refine`: the outline seeds GrabCut (deep inside: certain, a band along the
     /// outline: undecided, outside: background) instead of filling as drawn.
     fn scissor_close(&mut self, refine: bool) {
-        let Some(sc) = self.scissor.take() else { return };
+        let Some(mut sc) = self.scissor.take() else { return };
+        // the last stretch back to the first anchor along the edge
+        let first = sc.pts[0];
+        if let Some(wr) = sc.wire.as_mut() {
+            wr.grow(Some(first), std::time::Duration::from_millis(300));
+        }
+        let back = Self::scissor_path(&sc, first);
+        if back.len() > 1 {
+            sc.pts.extend(back.into_iter().skip(1));
+        }
         if sc.pts.len() < 3 {
             return;
         }
@@ -5098,7 +5211,13 @@ impl App {
         if let Some(mid) = self.wand.filter(|_| !space) {
             if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
                 if self.wand_mode == 2 {
-                    self.scissor_click(mid, w, !mods.alt, mods.shift);
+                    // a press starts the outline (or carries it on); dragging
+                    // traces, letting go (or a click) puts an anchor there
+                    let fresh = !self.scissor.as_ref().is_some_and(|sc| sc.mid == mid);
+                    if fresh {
+                        self.scissor_click(mid, w, !mods.alt, mods.shift);
+                    }
+                    self.drag = Some(Drag::Scissor { start: sp, moved: false, fresh, refine: mods.shift });
                 } else if self.wand_mode == 1 {
                     // GrabCut: drag a box (a temporary outline, run on release)
                     let s = ShapeLayer { kind: ShapeKind::Rect, a: w, b: w, color: ACCENT, width: 1.5 / self.zoom, fill: None, rotation: 0.0 };
@@ -6248,6 +6367,14 @@ impl App {
             self.pan += delta_s;
             return;
         }
+        if let Some(Drag::Scissor { start, moved, fresh, refine }) = self.drag {
+            let moved = moved || sp.distance(start) > 3.0;
+            self.drag = Some(Drag::Scissor { start, moved, fresh, refine });
+            if moved {
+                self.scissor_trace(w);
+            }
+            return;
+        }
         match self.drag {
             Some(Drag::Zoom { anchor }) => {
                 self.zoom_at(anchor, ((delta_s.x - delta_s.y) * 0.006).exp());
@@ -6285,7 +6412,7 @@ impl App {
         }
         let Some(drag) = self.drag.as_mut() else { return };
         match drag {
-            Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } | Drag::Lasso { .. } => {}
+            Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } | Drag::Lasso { .. } | Drag::Scissor { .. } => {}
             Drag::Group { rotate, center, start, origs, s: s_out, th: th_out, .. } => {
                 let c = *center;
                 let (mut s, mut th) = (1.0f32, 0.0f32);
@@ -6724,6 +6851,16 @@ impl App {
     fn finish_drag(&mut self, drag: Option<Drag>, sp: Pos2) {
         let Some(drag) = drag else { return };
         match drag {
+            Drag::Scissor { moved, fresh, refine, .. } => {
+                // the press already put the first anchor
+                if fresh && !moved {
+                    return;
+                }
+                if let Some((mid, on)) = self.scissor.as_ref().map(|sc| (sc.mid, sc.on)) {
+                    let w = self.xf().s2w(sp);
+                    self.scissor_click(mid, w, on, refine);
+                }
+            }
             Drag::Marquee { start, cur, full } => {
                 let r = Rect::from_two_pos(start, cur);
                 if r.width().max(r.height()) * self.zoom < 4.0 {
@@ -7118,6 +7255,21 @@ impl App {
                         }
                     }
                 },
+                // scissors: right-click puts an anchor (starts an outline, or
+                // closes it on the first anchor); also while tracing with a drag
+                egui::Event::PointerButton { pos, button: PointerButton::Secondary, pressed: true, modifiers }
+                    if over(*pos) && self.drag.as_ref().is_none_or(|d| matches!(d, Drag::Scissor { .. })) && self.scissor_target().is_some() =>
+                {
+                    if let Some(mid) = self.scissor_target() {
+                        let w = self.xf().s2w(*pos);
+                        let on = self.scissor.as_ref().filter(|sc| sc.mid == mid).map_or(!modifiers.alt, |sc| sc.on);
+                        self.scissor_click(mid, w, on, modifiers.shift);
+                        if let Some(Drag::Scissor { start, refine, .. }) = self.drag {
+                            // the drag carries on from this anchor
+                            self.drag = Some(Drag::Scissor { start, moved: true, fresh: false, refine });
+                        }
+                    }
+                }
                 egui::Event::PointerButton { pos, button: PointerButton::Middle, pressed, modifiers } => {
                     self.log_input(format!("mouse middle {}", if *pressed { "down" } else { "up" }));
                     if *pressed {
@@ -8714,7 +8866,7 @@ impl App {
         let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "경계를 따라 클릭 · 첫 점 클릭/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
+            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "끌기: 경계 따라 자동 · 클릭/우클릭: 앵커 · 첫 점/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
                 if ui.selectable_label(armed && self.wand_mode == m, label).glass_tip(tip).clicked() {
                     pick_mode = Some(m);
                 }
@@ -9866,8 +10018,12 @@ impl App {
             }
         }
         // scissors outline in progress
-        if let Some(sc) = &self.scissor {
+        if let Some(sc) = &mut self.scissor {
             let hover = ctx.input(|i| i.pointer.hover_pos()).map(|p| xf.s2w(p));
+            // the live wire grows towards the pointer a little every frame
+            if let (Some(hw), Some(wr)) = (hover, sc.wire.as_mut()) {
+                wr.grow(Some(hw), SCISSOR_BUDGET);
+            }
             let mut pts = sc.pts.clone();
             if let Some(hw) = hover {
                 pts.extend(Self::scissor_path(sc, hw));
@@ -9875,6 +10031,14 @@ impl App {
             let sp: Vec<Pos2> = pts.iter().map(|p| xf.w2s(*p)).collect();
             painter.add(Shape::line(sp, Stroke::new(1.6, ACCENT)));
             painter.circle_stroke(xf.w2s(sc.pts[0]), 5.0, Stroke::new(1.5, ACCENT));
+            for a in &sc.anchors[1..] {
+                painter.circle_filled(xf.w2s(*a), 2.5, ACCENT);
+            }
+            // where a click would land (snapped to the edge)
+            if let (Some(hw), Some(wr)) = (hover, sc.wire.as_ref()) {
+                let s = wr.map.snap(hw, SCISSOR_SNAP_PX / xf.zoom / wr.map.cell);
+                painter.circle_stroke(xf.w2s(s), 3.5, Stroke::new(1.2, INK()));
+            }
             ctx.request_repaint();
         }
         // the mask being edited shows as a red veil

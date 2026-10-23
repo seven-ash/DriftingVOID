@@ -322,93 +322,343 @@ mod tests {
         assert!(!fg(8, 8) && !fg(31, 20) && !fg(20, 32));
     }
 
+    /// A two-colour picture of `w`×`h` cells: `inside(x, y)` red, else
+    /// blue (about the same brightness, so only the colour tells them apart).
+    fn picture(w: usize, h: usize, inside: impl Fn(usize, usize) -> bool) -> Vec<u8> {
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let c = if inside(x, y) { [200, 60, 60, 255] } else { [60, 92, 185, 255] };
+                px[(y * w + x) * 4..][..4].copy_from_slice(&c);
+            }
+        }
+        px
+    }
+
     #[test]
     fn live_wire_follows_an_edge() {
-        // dark left half, bright right half: the edge is between x=19 and x=20
+        // left part red, right part blue: the edge is between cells 19 and 20
+        // (world x 120)
         let (w, h) = (40, 40);
-        let lum: Vec<f32> = (0..w * h).map(|i| if i % w < 20 { 0.1 } else { 0.9 }).collect();
-        let lw = LiveWire::new(&lum, w, h, (100, 200), (20, 2));
-        let path = lw.path_to(120, 237).unwrap();
-        assert_eq!(path.first(), Some(&(120, 202)));
-        assert_eq!(path.last(), Some(&(120, 237)));
-        // a straight line would also be x=20; check it never wanders off the edge
-        assert!(path.iter().all(|&(x, _)| (119..=120).contains(&x)), "{path:?}");
-        let diag = lw.path_to(119, 30 + 200).unwrap();
-        assert!(diag.iter().all(|&(x, _)| (119..=120).contains(&x)));
+        let map = std::sync::Arc::new(EdgeMap::new(&picture(w, h, |x, _| x < 20), w, h, egui::pos2(100.0, 200.0), 1.0));
+        let mut lw = LiveWire::new(map.clone(), egui::pos2(120.5, 202.5)).unwrap();
+        lw.grow_all();
+        let path = lw.path_to(egui::pos2(120.5, 237.5)).unwrap();
+        assert_eq!(path.first(), Some(&egui::pos2(120.5, 202.5)));
+        assert_eq!(path.last(), Some(&egui::pos2(120.5, 237.5)));
+        assert!(path.iter().all(|p| (119.0..121.0).contains(&p.x)), "{path:?}");
+        // a click a few cells off the edge snaps onto it
+        let s = map.snap(egui::pos2(124.5, 220.5), 6.0);
+        assert!((119.0..121.0).contains(&s.x), "{s:?}");
+    }
+
+    /// Times a full scissors map (1536², a noisy picture with a disc):
+    /// building the edge map, a near target, the whole map
+    /// (`cargo test --release scissor_speed -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn scissor_speed() {
+        let n = 1536;
+        let mut px = picture(n, n, |x, y| (x as f32 - 768.0).hypot(y as f32 - 768.0) < 500.0);
+        let mut r = 12345u32;
+        for v in px.iter_mut() {
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            *v = v.saturating_add((r % 24) as u8);
+        }
+        let t = std::time::Instant::now();
+        let map = std::sync::Arc::new(EdgeMap::new(&px, n, n, egui::Pos2::ZERO, 1.0));
+        eprintln!("edge map {n}x{n}: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        let mut lw = LiveWire::new(map, egui::pos2(1268.5, 768.5)).unwrap();
+        eprintln!("wire alloc: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        lw.grow(Some(egui::pos2(1121.5, 1121.5)), std::time::Duration::MAX);
+        eprintln!("to a point 1/8 round the rim: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        lw.grow_all();
+        eprintln!("whole map: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    #[test]
+    fn live_wire_grows_on_demand() {
+        let (w, h) = (200, 200);
+        let map = std::sync::Arc::new(EdgeMap::new(&picture(w, h, |x, y| (x as f32 + 0.5 - 100.0).hypot(y as f32 + 0.5 - 100.0) < 60.0), w, h, egui::Pos2::ZERO, 1.0));
+        let mut lw = LiveWire::new(map, egui::pos2(160.5, 100.5)).unwrap();
+        // a near target is reached long before the map is done
+        assert!(lw.grow(Some(egui::pos2(150.5, 130.5)), std::time::Duration::from_secs(5)));
+        assert!(lw.path_to(egui::pos2(150.5, 130.5)).is_some());
+        assert!(lw.path_to(egui::pos2(5.5, 5.5)).is_none(), "far cells are not reached yet");
+        // half way round the circle: the path keeps to the rim
+        lw.grow_all();
+        let path = lw.path_to(egui::pos2(40.5, 100.5)).unwrap();
+        for p in &path {
+            let r = (p.x - 100.0).hypot(p.y - 100.0);
+            assert!((r - 60.0).abs() < 2.0, "off the rim at {p:?} (r {r})");
+        }
     }
 }
 
-/// Intelligent scissors (Mortensen & Barrett 1995), gradient cost only: one
-/// Dijkstra from the seed over a window, so the path to any point is a lookup.
+/// Edge features of a picture for the scissors (Mortensen & Barrett 1995):
+/// Laplacian zero-crossings, gradient magnitude and direction, on a grid of
+/// `cell` world units from `origin` (the world point of cell (0,0)'s corner).
+/// Gradients are taken per colour channel and the strongest kept (as GIMP),
+/// after a light blur, so colour edges of equal brightness count too.
+pub struct EdgeMap {
+    pub origin: egui::Pos2,
+    pub cell: f32,
+    pub w: usize,
+    pub h: usize,
+    /// 0 on a zero-crossing of a real edge, 1 elsewhere.
+    fz: Vec<u8>,
+    /// 1 − G / max G.
+    fg: Vec<f32>,
+    /// Unit vector along the edge (the gradient turned a quarter), zero where
+    /// there is no gradient.
+    dir: Vec<[f32; 2]>,
+    grad: Vec<f32>,
+}
+
+/// `f(i)` for every i < n, on all cores (in order).
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(16);
+    let chunk = n.div_ceil(threads).max(4096);
+    let mut parts: Vec<Vec<T>> = Vec::new();
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..n).step_by(chunk).map(|s| {
+            let f = &f;
+            sc.spawn(move || (s..(s + chunk).min(n)).map(f).collect::<Vec<T>>())
+        }).collect();
+        parts = hs.into_iter().map(|h| h.join().unwrap()).collect();
+    });
+    parts.into_iter().flatten().collect()
+}
+
+/// Cost weights: zero-crossing, gradient direction, gradient magnitude (the
+/// paper's, also OpenCV's defaults).
+const W_Z: f32 = 0.43;
+const W_D: f32 = 0.43;
+const W_G: f32 = 0.14;
+/// Zero-crossings where the gradient is weaker than this share of the
+/// strongest are noise, not edges.
+const Z_MIN: f32 = 0.08;
+
+impl EdgeMap {
+    /// `rgba`: the picture over `w`×`h` cells (premultiplied over black is fine).
+    pub fn new(rgba: &[u8], w: usize, h: usize, origin: egui::Pos2, cell: f32) -> Self {
+        let n = w * h;
+        let at = |x: isize, y: isize| (y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize;
+        let xy = |i: usize| ((i % w) as isize, (i / w) as isize);
+        // light blur (GIMP's 3×3: centre 24, the rest 1, over 32)
+        let b: Vec<[f32; 3]> = par_map(n, |i| {
+            let (x, y) = xy(i);
+            let mut acc = [0f32; 3];
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let k = if dx == 0 && dy == 0 { 24.0 } else { 1.0 };
+                    let j = at(x + dx, y + dy) * 4;
+                    for c in 0..3 {
+                        acc[c] += rgba[j + c] as f32 * k;
+                    }
+                }
+            }
+            acc.map(|v| v / (32.0 * 255.0))
+        });
+        // Sobel per channel, the strongest kept: (gx, gy, magnitude, channel)
+        let sob: Vec<([f32; 2], f32, u8)> = par_map(n, |i| {
+            let (x, y) = xy(i);
+            let v = |dx: isize, dy: isize| b[at(x + dx, y + dy)];
+            let (mut best, mut bg, mut bc) = (-1.0f32, [0f32; 2], 0u8);
+            for c in 0..3 {
+                let gx = v(1, -1)[c] + 2.0 * v(1, 0)[c] + v(1, 1)[c] - v(-1, -1)[c] - 2.0 * v(-1, 0)[c] - v(-1, 1)[c];
+                let gy = v(-1, 1)[c] + 2.0 * v(0, 1)[c] + v(1, 1)[c] - v(-1, -1)[c] - 2.0 * v(0, -1)[c] - v(1, -1)[c];
+                let m = gx * gx + gy * gy;
+                if m > best {
+                    best = m;
+                    bg = [gx, gy];
+                    bc = c as u8;
+                }
+            }
+            (bg, best.sqrt(), bc)
+        });
+        let gmax = sob.iter().fold(1e-6f32, |m, s| m.max(s.1));
+        // Laplacian per channel; at each cell the channel with the strongest
+        // gradient decides (colour edges of equal brightness cross too), and
+        // a crossing goes to the side nearer zero
+        let lap: Vec<[f32; 3]> = par_map(n, |i| {
+            let (x, y) = xy(i);
+            let (l, r, u, d) = (b[at(x - 1, y)], b[at(x + 1, y)], b[at(x, y - 1)], b[at(x, y + 1)]);
+            [0, 1, 2].map(|c| l[c] + r[c] + u[c] + d[c] - 4.0 * b[i][c])
+        });
+        let fz: Vec<u8> = par_map(n, |i| {
+            if sob[i].1 < Z_MIN * gmax {
+                return 1;
+            }
+            let c = sob[i].2 as usize;
+            let (x, y) = xy(i);
+            let cross = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
+                let j = at(x + dx, y + dy);
+                lap[i][c] * lap[j][c] < 0.0 && lap[i][c].abs() <= lap[j][c].abs()
+            });
+            if cross { 0 } else { 1 }
+        });
+        let grad: Vec<f32> = sob.iter().map(|s| s.1).collect();
+        let fg = grad.iter().map(|g| 1.0 - g / gmax).collect();
+        let dir = sob
+            .iter()
+            .map(|&([gx, gy], m, _)| if m > 1e-4 { [gy / m, -gx / m] } else { [0.0; 2] })
+            .collect();
+        Self { origin, cell, w, h, fz, fg, dir, grad }
+    }
+
+    /// The cell under world point `p`.
+    pub fn cell_of(&self, p: egui::Pos2) -> Option<usize> {
+        let q = (p - self.origin) / self.cell;
+        let (x, y) = (q.x.floor() as isize, q.y.floor() as isize);
+        (x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h).then(|| y as usize * self.w + x as usize)
+    }
+
+    /// The world point at the middle of cell `i`.
+    pub fn centre(&self, i: usize) -> egui::Pos2 {
+        self.origin + egui::vec2((i % self.w) as f32 + 0.5, (i / self.w) as f32 + 0.5) * self.cell
+    }
+
+    /// `p` lies at least `margin` cells inside the map.
+    pub fn holds(&self, p: egui::Pos2, margin: f32) -> bool {
+        let q = (p - self.origin) / self.cell;
+        q.x >= margin && q.y >= margin && q.x <= self.w as f32 - margin && q.y <= self.h as f32 - margin
+    }
+
+    /// The strongest edge within `radius` cells of `p` (the nearest of equal
+    /// ones), or `p` when there is none there.
+    pub fn snap(&self, p: egui::Pos2, radius: f32) -> egui::Pos2 {
+        let Some(c) = self.cell_of(p) else { return p };
+        let (cx, cy) = ((c % self.w) as isize, (c / self.w) as isize);
+        let r = radius.max(0.0).ceil() as isize;
+        let (mut best, mut at) = (0.0f32, None);
+        for y in (cy - r).max(0)..=(cy + r).min(self.h as isize - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(self.w as isize - 1) {
+                let d2 = ((x - cx).pow(2) + (y - cy).pow(2)) as f32;
+                if d2 > radius * radius {
+                    continue;
+                }
+                let i = y as usize * self.w + x as usize;
+                // edges proper (zero-crossings) first, then the strength
+                let v = self.grad[i] * if self.fz[i] == 0 { 2.0 } else { 1.0 } - d2.sqrt() * 1e-4;
+                if v > best {
+                    best = v;
+                    at = Some(i);
+                }
+            }
+        }
+        at.map_or(p, |i| self.centre(i))
+    }
+
+    /// Cost of the link p -> q (neighbouring cells, `l` the unit step;
+    /// `diag` when diagonal).
+    fn link(&self, p: usize, q: usize, l: [f32; 2], diag: bool) -> f32 {
+        let (dp, dq) = (self.dir[p], self.dir[q]);
+        // the link taken along the edge direction at p
+        let s = if dp[0] * l[0] + dp[1] * l[1] >= 0.0 { 1.0 } else { -1.0 };
+        let l = [l[0] * s, l[1] * s];
+        let a = (dp[0] * l[0] + dp[1] * l[1]).clamp(-1.0, 1.0);
+        let b = (l[0] * dq[0] + l[1] * dq[1]).clamp(-1.0, 1.0);
+        let fd = (a.acos() + b.acos()) * (2.0 / (3.0 * std::f32::consts::PI));
+        // the gradient term is 1 for diagonal links, 1/√2 for straight ones
+        let g = if diag { 1.0 } else { std::f32::consts::FRAC_1_SQRT_2 };
+        W_Z * self.fz[q] as f32 + W_D * fd + W_G * self.fg[q] * g + 0.01
+    }
+}
+
+/// Intelligent scissors (Mortensen & Barrett 1995): Dijkstra from the seed
+/// over an edge map, grown on demand until the pointer's cell is reached (a
+/// time budget per call), so the path to any reached cell is a lookup.
 pub struct LiveWire {
-    /// World pixel of the window's (0,0).
-    pub origin: (i32, i32),
-    w: usize,
-    h: usize,
+    pub map: std::sync::Arc<EdgeMap>,
+    dist: Vec<f32>,
     pred: Vec<u32>,
+    done: Vec<bool>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, u32)>>,
 }
 
 impl LiveWire {
-    /// `lum`: luminance 0..1 of the window; `seed`: window pixel.
-    pub fn new(lum: &[f32], w: usize, h: usize, origin: (i32, i32), seed: (usize, usize)) -> Self {
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
-        let n = w * h;
-        // Sobel gradient magnitude -> cost (low on strong edges)
-        let at = |x: isize, y: isize| lum[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
-        let mut g = vec![0f32; n];
-        let mut gmax = 1e-6f32;
-        for y in 0..h as isize {
-            for x in 0..w as isize {
-                let gx = at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x - 1, y) - at(x - 1, y + 1);
-                let gy = at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1) - at(x - 1, y - 1) - 2.0 * at(x, y - 1) - at(x + 1, y - 1);
-                let m = (gx * gx + gy * gy).sqrt();
-                g[y as usize * w + x as usize] = m;
-                gmax = gmax.max(m);
-            }
-        }
-        let cost: Vec<f32> = g.iter().map(|m| 1.0 - m / gmax + 0.02).collect();
+    /// Seeded at world point `at` (None outside the map).
+    pub fn new(map: std::sync::Arc<EdgeMap>, at: egui::Pos2) -> Option<Self> {
+        let seed = map.cell_of(at)?;
+        let n = map.w * map.h;
         let mut dist = vec![f32::INFINITY; n];
-        let mut pred = vec![u32::MAX; n];
-        let s = seed.1.min(h - 1) * w + seed.0.min(w - 1);
-        dist[s] = 0.0;
-        let mut heap = BinaryHeap::new();
-        heap.push(Reverse(((0.0f32).to_bits(), s as u32)));
-        while let Some(Reverse((db, u))) = heap.pop() {
-            let u = u as usize;
-            let du = f32::from_bits(db);
-            if du > dist[u] {
-                continue;
-            }
-            let (ux, uy) = ((u % w) as isize, (u / w) as isize);
-            for (dx, dy, k) in [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (-1, -1, 1.414)] {
-                let (vx, vy) = (ux + dx, uy + dy);
-                if vx < 0 || vy < 0 || vx >= w as isize || vy >= h as isize {
-                    continue;
-                }
-                let v = vy as usize * w + vx as usize;
-                let nd = du + cost[v] * k as f32;
-                if nd < dist[v] {
-                    dist[v] = nd;
-                    pred[v] = u as u32;
-                    // non-negative f32 bits order like the values
-                    heap.push(Reverse((nd.to_bits(), v as u32)));
-                }
-            }
-        }
-        Self { origin, w, h, pred }
+        dist[seed] = 0.0;
+        let mut heap = std::collections::BinaryHeap::new();
+        heap.push(std::cmp::Reverse(((0.0f32).to_bits(), seed as u32)));
+        Some(Self { map, dist, pred: vec![u32::MAX; n], done: vec![false; n], heap })
     }
 
-    /// World pixels from the seed to (x, y), or None outside the window.
-    pub fn path_to(&self, x: i32, y: i32) -> Option<Vec<(i32, i32)>> {
-        let (lx, ly) = (x - self.origin.0, y - self.origin.1);
-        if lx < 0 || ly < 0 || lx >= self.w as i32 || ly >= self.h as i32 {
+    /// Settles cells, cheapest first, until `target`'s cell is settled, the
+    /// map is done or `budget` runs out. True when the target is reached.
+    pub fn grow(&mut self, target: Option<egui::Pos2>, budget: std::time::Duration) -> bool {
+        use std::cmp::Reverse;
+        let goal = target.and_then(|p| self.map.cell_of(p));
+        if goal.is_some_and(|g| self.done[g]) {
+            return true;
+        }
+        let t0 = std::time::Instant::now();
+        let (w, h) = (self.map.w as isize, self.map.h as isize);
+        let mut k = 0u32;
+        while let Some(Reverse((db, u))) = self.heap.pop() {
+            let u = u as usize;
+            if self.done[u] {
+                continue;
+            }
+            self.done[u] = true;
+            let du = f32::from_bits(db);
+            let (ux, uy) = ((u as isize) % w, (u as isize) / w);
+            for (dx, dy) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)] {
+                let (vx, vy) = (ux + dx, uy + dy);
+                if vx < 0 || vy < 0 || vx >= w || vy >= h {
+                    continue;
+                }
+                let v = (vy * w + vx) as usize;
+                if self.done[v] {
+                    continue;
+                }
+                let diag = dx != 0 && dy != 0;
+                let len = if diag { std::f32::consts::SQRT_2 } else { 1.0 };
+                let nd = du + self.map.link(u, v, [dx as f32 / len, dy as f32 / len], diag);
+                if nd < self.dist[v] {
+                    self.dist[v] = nd;
+                    self.pred[v] = u as u32;
+                    // non-negative f32 bits order like the values
+                    self.heap.push(Reverse((nd.to_bits(), v as u32)));
+                }
+            }
+            if Some(u) == goal {
+                return true;
+            }
+            k += 1;
+            if k % 1024 == 0 && t0.elapsed() >= budget {
+                return false;
+            }
+        }
+        goal.is_some_and(|g| self.done[g])
+    }
+
+    /// Grows over the whole map.
+    #[cfg(test)]
+    pub fn grow_all(&mut self) {
+        self.grow(None, std::time::Duration::MAX);
+    }
+
+    /// World points (cell middles) from the seed to the cell under `p`, or
+    /// None when that cell is outside the map or not reached yet.
+    pub fn path_to(&self, p: egui::Pos2) -> Option<Vec<egui::Pos2>> {
+        let mut v = self.map.cell_of(p)?;
+        if !self.done[v] {
             return None;
         }
-        let mut v = ly as usize * self.w + lx as usize;
         let mut out = vec![];
-        while v != u32::MAX as usize && out.len() <= self.w * self.h {
-            out.push(((v % self.w) as i32 + self.origin.0, (v / self.w) as i32 + self.origin.1));
+        while v != u32::MAX as usize && out.len() <= self.dist.len() {
+            out.push(self.map.centre(v));
             v = self.pred[v] as usize;
         }
         out.reverse();

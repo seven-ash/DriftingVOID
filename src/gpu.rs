@@ -2261,7 +2261,7 @@ impl Uniform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::{pos2, vec2};
+    use egui::pos2;
 
     /// The canvas's picture of `doc` (`world_min`, `s`) as RGBA, w×h.
     fn canvas(g: &mut Gpu, doc: &Document, world_min: Pos2, s: f32, w: u32, h: u32) -> Vec<u8> {
