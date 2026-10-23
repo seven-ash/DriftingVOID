@@ -12300,6 +12300,15 @@ impl eframe::App for App {
         crate::persp::follow_photos(&mut self.doc);
         crate::persp::sync_walls(&mut self.doc);
         sync_masks(&mut self.doc, self.drag.is_some() || self.tl_play.is_some());
+        // a mask's 자동 선택 / 그랩컷 / 가위 end when the mask is no longer the
+        // selected layer (another layer picked, the mask deleted): the select
+        // tools then work on layers again (Ash, 10-23)
+        if self.wand.is_some_and(|mid| self.sel != Some(mid) || self.doc.get(mid).is_none()) {
+            self.wand = None;
+        }
+        if self.scissor.as_ref().is_some_and(|sc| self.wand != Some(sc.mid)) {
+            self.scissor = None;
+        }
         crate::anim::apply_constraints(&mut self.doc);
         self.tick_audio();
         self.tick_timeline(&ctx);
