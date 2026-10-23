@@ -335,6 +335,48 @@ mod tests {
         px
     }
 
+    /// Φ, the standard normal distribution (Abramowitz–Stegun erf).
+    fn phi(x: f32) -> f32 {
+        let z = x / std::f32::consts::SQRT_2;
+        let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+        let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-z * z).exp();
+        0.5 * (1.0 + if z >= 0.0 { y } else { -y })
+    }
+
+    /// A red/blue edge along x = `x0` blurred by `sigma` (each pixel
+    /// integrated over its width), 48×40 cells.
+    fn blurred_edge(x0: f32, sigma: f32) -> Vec<u8> {
+        let (w, h) = (48, 40);
+        let s = (sigma * sigma + 1.0 / 12.0).sqrt();
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let a = phi((x as f32 + 0.5 - x0) / s);
+                let (c0, c1) = ([200.0, 60.0, 60.0], [60.0, 92.0, 185.0]);
+                for c in 0..3 {
+                    px[(y * w + x) * 4 + c] = (c0[c] * (1.0 - a) + c1[c] * a).round() as u8;
+                }
+                px[(y * w + x) * 4 + 3] = 255;
+            }
+        }
+        px
+    }
+
+    /// The edge's sub-pixel position and blur come back from the picture.
+    #[test]
+    fn edge_blur_is_measured() {
+        for (x0, sigma) in [(20.3f32, 0.0f32), (20.75, 0.0), (20.3, 1.0), (21.1, 2.0), (20.5, 3.0)] {
+            let map = EdgeMap::new(&blurred_edge(x0, sigma), 48, 40, egui::Pos2::ZERO, 1.0);
+            let path: Vec<egui::Pos2> = (8..32).map(|y| egui::pos2(x0.floor() + 0.5, y as f32 + 0.5)).collect();
+            let r = map.refine(&path);
+            let mx = r.iter().map(|p| p.0.x).sum::<f32>() / r.len() as f32;
+            let ms = r.iter().map(|p| p.1).sum::<f32>() / r.len() as f32;
+            eprintln!("edge at {x0} blur {sigma}: found {mx:.3}, blur {ms:.3}");
+            assert!((mx - x0).abs() < 0.12, "edge at {x0} (blur {sigma}) found at {mx}");
+            assert!((ms - sigma).abs() < 0.35, "blur {sigma} measured {ms}");
+        }
+    }
+
     #[test]
     fn live_wire_follows_an_edge() {
         // left part red, right part blue: the edge is between cells 19 and 20
@@ -418,6 +460,10 @@ pub struct EdgeMap {
     /// there is no gradient.
     dir: Vec<[f32; 2]>,
     grad: Vec<f32>,
+    /// The picture (unblurred) and, per cell, the channel with the strongest
+    /// gradient: for the edge's blur.
+    rgb: Vec<[u8; 3]>,
+    chan: Vec<u8>,
 }
 
 /// `f(i)` for every i < n, on all cores (in order).
@@ -443,6 +489,10 @@ const W_G: f32 = 0.14;
 /// Zero-crossings where the gradient is weaker than this share of the
 /// strongest are noise, not edges.
 const Z_MIN: f32 = 0.08;
+/// What sampling a perfectly sharp edge adds to the measured spread (cells²):
+/// the pixel's own width and the bilinear profile (measured on synthetic
+/// edges, `edge_blur_is_measured`).
+const SAMPLE_VAR: f32 = 0.375;
 
 impl EdgeMap {
     /// `rgba`: the picture over `w`×`h` cells (premultiplied over black is fine).
@@ -509,7 +559,9 @@ impl EdgeMap {
             .iter()
             .map(|&([gx, gy], m, _)| if m > 1e-4 { [gy / m, -gx / m] } else { [0.0; 2] })
             .collect();
-        Self { origin, cell, w, h, fz, fg, dir, grad }
+        let rgb = par_map(n, |i| [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]]);
+        let chan = sob.iter().map(|s| s.2).collect();
+        Self { origin, cell, w, h, fz, fg, dir, grad, rgb, chan }
     }
 
     /// The cell under world point `p`.
@@ -553,6 +605,99 @@ impl EdgeMap {
             }
         }
         at.map_or(p, |i| self.centre(i))
+    }
+
+    /// Field `f` (one value per cell, at its middle) at continuous cell
+    /// position `q`, bilinear.
+    fn sample(&self, q: egui::Vec2, f: impl Fn(usize) -> f32) -> f32 {
+        let x = (q.x - 0.5).clamp(0.0, (self.w - 1) as f32);
+        let y = (q.y - 0.5).clamp(0.0, (self.h - 1) as f32);
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let at = |x: usize, y: usize| f(y * self.w + x);
+        (at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy) + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy
+    }
+
+    /// Each point of a path (world, cell middles) moved across the edge to
+    /// where the gradient peaks, with the edge's blur there: (point, σ in
+    /// cells). The peak is a parabola through three gradient samples along
+    /// the gradient (Devernay's sub-pixel edges); the blur is the spread of
+    /// the brightness change across the edge (the strongest channel), less
+    /// what sampling adds. Offsets and blurs are smoothed along the path.
+    pub fn refine(&self, path: &[egui::Pos2]) -> Vec<(egui::Pos2, f32)> {
+        let n = path.len();
+        let mut off = vec![0f32; n];
+        let mut sig = vec![f32::NAN; n];
+        let mut nrm = vec![egui::Vec2::ZERO; n];
+        for (k, p) in path.iter().enumerate() {
+            let Some(i) = self.cell_of(*p) else { continue };
+            let d = self.dir[i];
+            if d == [0.0, 0.0] {
+                continue;
+            }
+            // the gradient's direction (across the edge)
+            let nv = egui::vec2(-d[1], d[0]);
+            let q = (*p - self.origin) / self.cell;
+            let g = |t: f32| self.sample(q + nv * t, |j| self.grad[j]);
+            // climb to the nearest peak (within 1.5 cells), then the parabola
+            let mut t0 = 0.0f32;
+            for _ in 0..3 {
+                if t0 < 1.5 && g(t0 + 0.5) > g(t0) {
+                    t0 += 0.5;
+                } else if t0 > -1.5 && g(t0 - 0.5) > g(t0) {
+                    t0 -= 0.5;
+                } else {
+                    break;
+                }
+            }
+            let (a, b, c) = (g(t0 - 1.0), g(t0), g(t0 + 1.0));
+            let den = a - 2.0 * b + c;
+            let t = if den < -1e-6 { t0 + 0.5 * (a - c) / den } else { t0 };
+            off[k] = t.clamp(-2.0, 2.0);
+            nrm[k] = nv;
+            // the brightness change across the edge: differences of the
+            // profile, the run around the largest one, its spread
+            let ch = self.chan[i] as usize;
+            let v = |t: f32| self.sample(q + nv * t, |j| self.rgb[j][ch] as f32);
+            const R: i32 = 8;
+            let prof: Vec<f32> = (-R..=R).map(|s| v(off[k] + s as f32)).collect();
+            let diff: Vec<f32> = prof.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+            let (top, &dmax) = diff.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap();
+            if dmax < 4.0 {
+                continue;
+            }
+            let (mut lo, mut hi) = (top, top);
+            while lo > 0 && diff[lo - 1] <= diff[lo] && diff[lo - 1] > dmax * 0.02 {
+                lo -= 1;
+            }
+            while hi + 1 < diff.len() && diff[hi + 1] <= diff[hi] && diff[hi + 1] > dmax * 0.02 {
+                hi += 1;
+            }
+            let run = &diff[lo..=hi];
+            let sum: f32 = run.iter().sum();
+            let mid = |j: usize| (lo + j) as f32;
+            let mean = run.iter().enumerate().map(|(j, d)| d * mid(j)).sum::<f32>() / sum;
+            let var = run.iter().enumerate().map(|(j, d)| d * (mid(j) - mean).powi(2)).sum::<f32>() / sum;
+            sig[k] = (var - SAMPLE_VAR).max(0.0).sqrt();
+        }
+        // smoothed along the path: offsets [1 2 1], blurs over 9 points
+        let off_s: Vec<f32> = (0..n)
+            .map(|k| {
+                if n < 3 || k == 0 || k + 1 == n {
+                    off[k]
+                } else {
+                    (off[k - 1] + 2.0 * off[k] + off[k + 1]) / 4.0
+                }
+            })
+            .collect();
+        (0..n)
+            .map(|k| {
+                let near: Vec<f32> = (k.saturating_sub(4)..(k + 5).min(n)).map(|j| sig[j]).filter(|s| s.is_finite()).collect();
+                let s = if near.is_empty() { 0.0 } else { near.iter().sum::<f32>() / near.len() as f32 };
+                (path[k] + nrm[k] * off_s[k] * self.cell, s)
+            })
+            .collect()
     }
 
     /// Cost of the link p -> q (neighbouring cells, `l` the unit step;

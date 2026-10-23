@@ -101,6 +101,9 @@ pub struct Settings {
     /// Mask edge: guided-filter radius (0 = hard edge) and grow (+) / shrink (-) in px.
     pub mask_refine: f32,
     pub mask_grow: f32,
+    /// The scissors' edge: the photo's own measured softness (true) or a
+    /// crisp anti-aliased cut on the sub-pixel line.
+    pub scissor_soft: bool,
 }
 
 impl Default for Settings {
@@ -134,6 +137,7 @@ impl Default for Settings {
             wand_tol: 24.0,
             mask_refine: 2.0,
             mask_grow: 1.0,
+            scissor_soft: false,
         }
     }
 }
@@ -143,7 +147,10 @@ impl Default for Settings {
 struct Scissor {
     mid: LayerId,
     on: bool,
+    /// The outline (sub-pixel, on the edges) and the edge's blur at each of
+    /// its points (σ, in the edge map's cells).
     pts: Vec<Pos2>,
+    sig: Vec<f32>,
     anchors: Vec<Pos2>,
     wire: Option<crate::segment::LiveWire>,
     /// While tracing with a left drag: the live path last time and how many
@@ -1723,14 +1730,30 @@ impl App {
                             clicks = v.split(';').filter_map(|q| q.split_once(',').and_then(|(x, y)| Some(im.src_to_world(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))))).collect();
                         }
                         app.zoom = app.zoom.max(1e-3);
+                        // DV_SCISSOR_SOFT=1: the edge softness measured in the photo
+                        app.s.scissor_soft = std::env::var_os("DV_SCISSOR_SOFT").is_some();
                         for p in clicks {
                             app.scissor_click(mid, p, true, false);
                         }
                         if let Some(sc) = &app.scissor {
                             eprintln!("scissor anchors (snapped): {:?}", sc.anchors);
+                            let fin: Vec<f32> = sc.sig.iter().copied().filter(|v| v.is_finite()).collect();
+                            eprintln!("outline: {} pts, {} sig, sig min {:.2} max {:.2} mean {:.2}", sc.pts.len(), sc.sig.len(), fin.iter().fold(f32::MAX, |a, b| a.min(*b)), fin.iter().fold(0.0f32, |a, b| a.max(*b)), fin.iter().sum::<f32>() / fin.len().max(1) as f32);
                         }
                         app.scissor_close(std::env::var_os("DV_SCISSOR_CUT").is_some());
                         eprintln!("scissor: {} in {:?}", app.status, t0.elapsed());
+                        // DV_SCISSOR_ROW="y,x0,x1" (photo pixels): the mask's coverage along that row
+                        if let (Ok(v), Some(im)) = (std::env::var("DV_SCISSOR_ROW"), app.doc.layers.iter().find_map(|l| match &l.kind {
+                            LayerKind::Image(im) => Some(im.clone()),
+                            _ => None,
+                        })) {
+                            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                            if let (3, Some(m)) = (n.len(), app.doc.get(mid)) {
+                                let map = crate::export::mask_map(&app.doc, m);
+                                let row: Vec<String> = (n[1] as i32..=n[2] as i32).map(|x| format!("{:.2}", crate::export::mask_hide(m, map, im.src_to_world(pos2(x as f32 + 0.5, n[0] + 0.5))))).collect();
+                                eprintln!("mask row y={}: {}", n[0], row.join(" "));
+                            }
+                        }
                     }
                 }
                 if std::env::var_os("DV_MASK_OWNER").is_some() {
@@ -2906,11 +2929,12 @@ impl App {
     }
 
     /// The outline from the last anchor to `w`: along the live wire (as far
-    /// as it has grown), or straight.
-    fn scissor_path(sc: &Scissor, w: Pos2) -> Vec<Pos2> {
-        match sc.wire.as_ref().and_then(|wr| wr.path_to(w)) {
+    /// as it has grown), moved onto the edges' sub-pixel line, with the edge's
+    /// blur at each point; or straight.
+    fn scissor_path(sc: &Scissor, w: Pos2) -> Vec<(Pos2, f32)> {
+        match sc.wire.as_ref().and_then(|wr| wr.path_to(w).map(|p| wr.map.refine(&p))) {
             Some(p) => p,
-            None => vec![w],
+            None => vec![(w, 0.0)],
         }
     }
 
@@ -2934,18 +2958,18 @@ impl App {
                     wr.grow(Some(p), std::time::Duration::from_millis(300));
                 }
                 let path = Self::scissor_path(&sc, p);
-                sc.pts.extend(path.into_iter().skip(1));
-                if sc.pts.last() != Some(&p) {
-                    sc.pts.push(p);
+                for (q, s) in path.into_iter().skip(1) {
+                    sc.pts.push(q);
+                    sc.sig.push(s);
                 }
-                sc.anchors.push(p);
+                sc.anchors.push(*sc.pts.last().unwrap_or(&p));
                 sc.wire = wire;
                 sc.last.clear();
                 sc.age.clear();
                 self.scissor = Some(sc);
             }
             _ => {
-                self.scissor = Some(Scissor { mid, on, pts: vec![p], anchors: vec![p], wire, last: Vec::new(), age: Vec::new() });
+                self.scissor = Some(Scissor { mid, on, pts: vec![p], sig: vec![0.0], anchors: vec![p], wire, last: Vec::new(), age: Vec::new() });
                 self.status = "가위 · 끌기: 경계 따라 자동 · 우클릭: 앵커 · 첫 점/Enter: 닫기 · Esc: 취소".into();
             }
         }
@@ -2981,8 +3005,11 @@ impl App {
             }
             sc.last = path.clone();
             let Some(i) = cut else { return };
-            sc.pts.extend_from_slice(&path[1..=i]);
-            sc.anchors.push(path[i]);
+            for (q, s) in wr.map.refine(&path[..=i]).into_iter().skip(1) {
+                sc.pts.push(q);
+                sc.sig.push(s);
+            }
+            sc.anchors.push(*sc.pts.last().unwrap_or(&path[i]));
             sc.last.clear();
             sc.age.clear();
             (sc.mid, path[i])
@@ -3095,9 +3122,20 @@ impl App {
         if let Some(wr) = sc.wire.as_mut() {
             wr.grow(Some(first), std::time::Duration::from_millis(300));
         }
-        let back = Self::scissor_path(&sc, first);
+        let mut back = Self::scissor_path(&sc, first);
         if back.len() > 1 {
-            sc.pts.extend(back.into_iter().skip(1));
+            // it ends on the first anchor, moved onto the edge with its blur:
+            // that becomes the first point (it was placed unrefined)
+            if let Some((q, s)) = back.pop() {
+                sc.pts[0] = q;
+                sc.sig[0] = s;
+            }
+            for (q, s) in back.into_iter().skip(1) {
+                sc.pts.push(q);
+                sc.sig.push(s);
+            }
+        } else if sc.sig.len() > 1 {
+            sc.sig[0] = sc.sig[1];
         }
         if sc.pts.len() < 3 {
             return;
@@ -3114,8 +3152,10 @@ impl App {
             Some(map) => sc.pts.iter().map(|p| map.inv(*p)).collect(),
             None => sc.pts.clone(),
         };
+        let soft = self.s.scissor_soft;
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(sc.mid).map(|l| &mut l.kind) else { return };
-        let n = fill_mask_poly(m, &pts, sc.on);
+        // the edge map's cells are the mask's pixels (a photo's, or the canvas's)
+        let n = if soft { soft_mask_poly(m, &pts, &sc.sig, sc.on) } else { fill_mask_poly(m, &pts, sc.on) };
         self.status = format!("가위 · {n} px {}", if sc.on { "가림" } else { "되살림" });
         self.mark();
     }
@@ -8997,6 +9037,13 @@ impl App {
             .glass_tip("경계를 그림에 맞춰 부드럽게 · 0: 딱 떨어지는 경계");
         ui.add(crate::dial::Dial::new(&mut self.s.mask_grow, -4.0..=4.0).step(1.0).integer().suffix(" px").text("경계 이동").default(1.0))
             .glass_tip("+: 가리는 영역 넓힘 (틈 메우기) · -: 좁힘");
+        if self.wand_mode == 2 {
+            ui.horizontal(|ui| {
+                ui.label("가위 경계");
+                ui.selectable_value(&mut self.s.scissor_soft, false, "선명").glass_tip("경계선에서 깔끔하게 자름 (서브픽셀)");
+                ui.selectable_value(&mut self.s.scissor_soft, true, "사진 흐림").glass_tip("사진 속 경계가 흐린 만큼 부드럽게");
+            });
+        }
         if toggle {
             self.wand = if armed { None } else { Some(id) };
         }
@@ -10139,7 +10186,7 @@ impl App {
             }
             let mut pts = sc.pts.clone();
             if let Some(hw) = hover {
-                pts.extend(Self::scissor_path(sc, hw));
+                pts.extend(Self::scissor_path(sc, hw).into_iter().map(|q| q.0));
             }
             let sp: Vec<Pos2> = pts.iter().map(|p| xf.w2s(*p)).collect();
             painter.add(Shape::line(sp, Stroke::new(1.6, ACCENT)));
@@ -11584,11 +11631,16 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
 /// Polygon `pts` filled anti-aliased into a pixmap over its bounds (a pixel
 /// of margin); with the bounds' integer top left.
 fn poly_pixmap(pts: &[Pos2]) -> Option<(tiny_skia::Pixmap, (i32, i32))> {
+    poly_pixmap_margin(pts, 1.0)
+}
+
+/// As `poly_pixmap`, with `margin` pixels round the bounds.
+fn poly_pixmap_margin(pts: &[Pos2], margin: f32) -> Option<(tiny_skia::Pixmap, (i32, i32))> {
     if pts.len() < 3 {
         return None;
     }
     let b = Rect::from_points(pts);
-    let b = Rect::from_min_max(b.min.floor() - vec2(1.0, 1.0), b.max.ceil() + vec2(1.0, 1.0));
+    let b = Rect::from_min_max(b.min.floor() - vec2(margin, margin), b.max.ceil() + vec2(margin, margin));
     let (w, h) = (b.width() as u32, b.height() as u32);
     if w == 0 || h == 0 || w > 16384 || h > 16384 {
         return None;
@@ -11629,6 +11681,83 @@ fn fill_mask_poly(m: &mut crate::raster::RasterLayer, pts: &[Pos2], on: bool) ->
         }
     }
     n
+}
+
+/// Φ, the standard normal distribution (Abramowitz–Stegun erf, |error| < 2e-7).
+fn phi(x: f32) -> f32 {
+    let z = x / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-z * z).exp();
+    0.5 * (1.0 + if z >= 0.0 { y } else { -y })
+}
+
+/// Polygon `pts` (the mask's own pixels) with the edge softness measured in
+/// the photo: near the outline a pixel takes Φ(−d/σ) of its signed distance
+/// d to it (σ: the edge's blur there, `sig`, with a pixel's own width
+/// added), elsewhere it is in or out. Hides (`on`) or shows again; the
+/// pixels touched.
+fn soft_mask_poly(m: &mut crate::raster::RasterLayer, pts: &[Pos2], sig: &[f32], on: bool) -> usize {
+    const BUCKET: f32 = 16.0;
+    let n = pts.len();
+    if n < 3 || sig.len() != n {
+        return fill_mask_poly(m, pts, on);
+    }
+    // σ of the alpha ramp: the edge's own blur plus a pixel's width (1/12)
+    let sa: Vec<f32> = sig.iter().map(|s| (s * s + 1.0 / 12.0).sqrt().min(8.0)).collect();
+    let reach = sa.iter().fold(0.0f32, |a, s| a.max(*s)) * 3.0 + 1.0;
+    let Some((cov, (x0, y0))) = poly_pixmap_margin(pts, reach.ceil()) else { return 0 };
+    let (w, h) = (cov.width() as i32, cov.height() as i32);
+    // segments by bucket (each where its ramp reaches)
+    let (bw, bh) = ((w as f32 / BUCKET).ceil() as usize, (h as f32 / BUCKET).ceil() as usize);
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); bw * bh];
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let r = 3.0 * sa[i].max(sa[(i + 1) % n]) + 1.0;
+        let bx0 = ((a.x.min(b.x) - r - x0 as f32) / BUCKET).floor().max(0.0) as usize;
+        let by0 = ((a.y.min(b.y) - r - y0 as f32) / BUCKET).floor().max(0.0) as usize;
+        let bx1 = (((a.x.max(b.x) + r - x0 as f32) / BUCKET).floor() as usize).min(bw - 1);
+        let by1 = (((a.y.max(b.y) + r - y0 as f32) / BUCKET).floor() as usize).min(bh - 1);
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                buckets[by * bw + bx].push(i);
+            }
+        }
+    }
+    let data = cov.data();
+    let mut count = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let c = data[((y * w + x) * 4 + 3) as usize] as f32 / 255.0;
+            let p = pos2((x0 + x) as f32 + 0.5, (y0 + y) as f32 + 0.5);
+            let bk = &buckets[(y as usize / BUCKET as usize) * bw + x as usize / BUCKET as usize];
+            // the nearest outline point and the ramp there
+            let mut best = (f32::MAX, 1.0f32);
+            for &i in bk {
+                let (a, b) = (pts[i], pts[(i + 1) % n]);
+                let ab = b - a;
+                let t = if ab.length_sq() > 1e-12 { ((p - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+                let d = p.distance(a + ab * t);
+                if d < best.0 {
+                    best = (d, sa[i] + (sa[(i + 1) % n] - sa[i]) * t);
+                }
+            }
+            let a = if best.0 < 3.0 * best.1 + 1.0 {
+                let s = if c >= 0.5 { -best.0 } else { best.0 };
+                phi(-s / best.1)
+            } else {
+                c
+            };
+            if a <= 1.0 / 510.0 {
+                continue;
+            }
+            let (px, py) = (x0 + x, y0 + y);
+            let old = m.alpha_at_world(p) as f32 / 255.0;
+            let nv = if on { old.max(a) } else { old * (1.0 - a) };
+            m.set_alpha_world(px, py, (nv * 255.0).round() as u8);
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Values on a grid of canvas pixels (`origin`, `bw`×`bh`) written into a
@@ -12490,6 +12619,24 @@ mod tests {
         assert_eq!(other.opacity, 0.5);
         assert_eq!(t.color, Color32::RED);
         assert_eq!(t.text, "ab", "text itself is not copied");
+    }
+
+    #[test]
+    fn soft_scissors_edge_follows_the_measured_blur() {
+        let pts = vec![pos2(10.0, 10.0), pos2(90.0, 10.0), pos2(90.0, 90.0), pos2(10.0, 90.0)];
+        // an edge blurred by 2: alpha Φ(d/σ) across it (σ with a pixel's width)
+        let mut m = crate::raster::RasterLayer::default();
+        soft_mask_poly(&mut m, &pts, &[2.0; 4], true);
+        let s = (4.0f32 + 1.0 / 12.0).sqrt();
+        for x in [5.5f32, 7.5, 9.5, 10.5, 12.5, 14.5] {
+            let a = m.alpha_at_world(pos2(x, 50.5)) as f32 / 255.0;
+            assert!((a - phi((x - 10.0) / s)).abs() < 0.01, "x {x}: {a} vs {}", phi((x - 10.0) / s));
+        }
+        // a sharp edge: crisp
+        let mut c = crate::raster::RasterLayer::default();
+        soft_mask_poly(&mut c, &pts, &[0.0; 4], true);
+        assert!(c.alpha_at_world(pos2(8.5, 50.5)) < 3 && c.alpha_at_world(pos2(11.5, 50.5)) > 252);
+        assert_eq!(c.alpha_at_world(pos2(50.5, 50.5)), 255);
     }
 
     #[test]
