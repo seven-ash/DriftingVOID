@@ -3109,7 +3109,13 @@ impl App {
 
     /// The mask the scissors draw into, when they are the tool in use.
     fn scissor_target(&self) -> Option<LayerId> {
-        self.wand.filter(|_| self.wand_mode == 2).filter(|mid| self.doc.get(*mid).is_some_and(|l| l.mask_of.is_some()))
+        self.wand.filter(|_| self.wand_mode == 2 && self.selecting()).filter(|mid| self.doc.get(*mid).is_some_and(|l| l.mask_of.is_some()))
+    }
+
+    /// The mask's selection modes (자동 선택, 그랩컷, 가위) act only with the
+    /// select tools (Ash, 10-23): brush and eraser keep painting the mask.
+    fn selecting(&self) -> bool {
+        matches!(self.tool, Tool::Select | Tool::Lasso)
     }
 
     /// Closes the outline and fills it into the mask (anti-aliased).
@@ -4838,6 +4844,55 @@ impl App {
         self.mark();
     }
 
+    /// Empties the selected brush and pen layers and masks (their pixels,
+    /// recordings, strokes), keeping the layers (Delete).
+    fn clear_selected(&mut self) {
+        let mut n = 0;
+        for id in self.selected_ids() {
+            if self.clear_layer(id) {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.mark();
+            self.status = format!("레이어 {n}개 비움 · 삭제: Backspace");
+        } else if self.sel.is_some() {
+            self.status = "비울 수 없는 레이어 · 삭제: Backspace".into();
+        }
+    }
+
+    /// Empties one brush or pen layer or mask; false for other kinds (or a
+    /// locked layer). A photo mask goes back to an ordinary one (the next
+    /// trace makes it a photo mask again, on whatever photo it is then).
+    fn clear_layer(&mut self, id: LayerId) -> bool {
+        let Some(l) = self.doc.get_mut(id).filter(|l| !l.locked) else { return false };
+        match &mut l.kind {
+            LayerKind::Raster(r) => {
+                r.tiles.clear();
+                r.recs.clear();
+                r.rec_base = None;
+            }
+            LayerKind::Vector(v) => v.strokes.clear(),
+            _ => return false,
+        }
+        if l.mask_res != 1.0 {
+            l.mask_res = 1.0;
+            l.mask_pose = None;
+            l.mask_anchor = l.mask_of.map(|o| (o, [0.0, 0.0]));
+        }
+        let owner = l.mask_of;
+        // an ordinary mask's anchor point starts where its layer is now
+        if let Some(o) = owner {
+            let c = self.doc.get(o).map(|ol| crate::anim::key_of(ol, 0.0).center);
+            if let (Some(c), Some(l)) = (c, self.doc.get_mut(id)) {
+                if l.mask_anchor.is_some_and(|a| a.0 == o) {
+                    l.mask_anchor = Some((o, c));
+                }
+            }
+        }
+        true
+    }
+
     fn duplicate_selected(&mut self) {
         let ids = self.selected_ids();
         let mut new_ids = Vec::new();
@@ -5330,7 +5385,7 @@ impl App {
         self.stroke_fed = self.now;
         let xf = self.xf();
         let w = xf.s2w(sp);
-        if let Some(mid) = self.wand.filter(|_| !space) {
+        if let Some(mid) = self.wand.filter(|_| !space && self.selecting()) {
             if self.doc.get(mid).is_some_and(|l| l.mask_of.is_some()) {
                 if self.wand_mode == 2 {
                     // a press starts the outline (or carries it on); dragging
@@ -7744,8 +7799,18 @@ impl App {
                 }
             }
         }
-        if k(Modifiers::NONE, Key::Delete) || k(Modifiers::NONE, Key::Backspace) {
+        // Backspace deletes layers, Delete empties them (Ash, 10-23); a part of
+        // a layer (strokes, pixels) selected goes with either
+        let has_part = !self.sub.strokes.is_empty() || !self.sub.pixels.is_empty();
+        if k(Modifiers::NONE, Key::Backspace) {
             self.delete_selected();
+        }
+        if k(Modifiers::NONE, Key::Delete) {
+            if has_part {
+                self.delete_selected();
+            } else {
+                self.clear_selected();
+            }
         }
         if k(Modifiers::NONE, Key::F12) {
             self.show_log = !self.show_log;
@@ -9017,7 +9082,7 @@ impl App {
         let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (m, label, tip) in [(0u8, "자동 선택", "클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "끌기: 경계 따라 자동 · 클릭/우클릭: 앵커 · 첫 점/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
+            for (m, label, tip) in [(0u8, "자동 선택", "선택(V)·올가미(Q) 도구에서 · 클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "선택(V)·올가미(Q) 도구에서 · 상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "선택(V)·올가미(Q) 도구에서 · 끌기: 경계 따라 자동 · 클릭/우클릭: 앵커 · 첫 점/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
                 if ui.selectable_label(armed && self.wand_mode == m, label).glass_tip(tip).clicked() {
                     pick_mode = Some(m);
                 }
@@ -9030,6 +9095,10 @@ impl App {
             } else {
                 self.wand_mode = m;
                 self.wand = Some(id);
+                // they act with the select tools only (other tools keep their own)
+                if !matches!(self.tool, Tool::Select | Tool::Lasso) {
+                    self.set_tool(Tool::Select);
+                }
             }
         }
         ui.add(crate::dial::Dial::new(&mut self.s.wand_tol, 0.0..=100.0).step(1.0).integer().text("허용 오차").default(24.0));
@@ -9058,9 +9127,7 @@ impl App {
             self.mark();
         }
         if clear {
-            if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                r.tiles.clear();
-            }
+            self.clear_layer(id);
             self.mark();
         }
     }
@@ -9463,8 +9530,11 @@ impl App {
             if ui.button("복제  Ctrl+D").clicked() {
                 self.duplicate_selected();
             }
-            if ui.button("삭제  Del").clicked() {
+            if ui.button("삭제  Backspace").clicked() {
                 self.delete_selected();
+            }
+            if ui.button("비우기  Del").clicked() {
+                self.clear_selected();
             }
         }));
         egui::containers::menu::MenuButton::new("보기").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| theme::glass_popup(ui, |ui| {
