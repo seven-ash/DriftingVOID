@@ -12259,6 +12259,20 @@ impl eframe::App for App {
             self.last_input = self.now;
         }
         self.drop_stale_ime(&ctx);
+        // DV_FULLSCREEN=1: full screen from the first frames (manual screenshots;
+        // the start-up option alone is not honoured on Windows)
+        if std::env::var("DV_FULLSCREEN").is_ok_and(|v| v == "1") {
+            if ctx.cumulative_pass_nr() < 3 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            }
+            // the document's view was made for the smaller window: fit it once grown
+            if (2.0..3.0).contains(&self.now) {
+                self.fit_view();
+            }
+            if self.now < 3.0 {
+                ctx.request_repaint();
+            }
+        }
 
         // swap in the nicer UI face once the system font scan lands
         if !self.fonts_applied && crate::fontdb::families().is_some() {

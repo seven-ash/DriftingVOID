@@ -17,8 +17,10 @@ it as the first argument.
 Requires a Rust toolchain with MSVC on Windows. Rendering uses wgpu (DX12 or
 Vulkan): one GPU renderer draws the canvas, the glass cards, playback and every
 export.
-Video needs ffmpeg/ffprobe (`%APPDATA%\DriftingVOID\ffmpeg`, next to the exe,
-or on PATH).
+Video needs ffmpeg/ffprobe (`%APPDATA%\DriftingVOID\ffmpeg`, next to the exe or
+in its `ffmpeg\bin`, or on PATH). The closed-beta package (`dist\package.ps1`)
+ships a setup that fetches ffmpeg from GitHub, and the user manual
+(`dist/manual/index.html`).
 
 Where development stands and what is open: `docs/STATE.md`.
 
@@ -53,7 +55,7 @@ when empty. Photos are placed under drawing layers.
 Drop a video (mp4, mov, mkv, webm, …) to bring it in as a layer showing a frame; play,
 scrub, step frames with `,` and `.`, and turn a frame into a photo layer from the
 properties panel. Needs ffmpeg (`winget install Gyan.FFmpeg`, or put it in
-`%APPDATA%\DriftingVOIDfmpeg`). See `docs/VIDEO.md` for the timeline and export plans.
+`%APPDATA%\DriftingVOID\ffmpeg`). See `docs/VIDEO.md` for the timeline and export plans.
 
 ## Timeline (Ctrl+T)
 

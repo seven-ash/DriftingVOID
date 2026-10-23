@@ -39,7 +39,7 @@ fn works(exe: &Path) -> bool {
 }
 
 /// ffmpeg and ffprobe, looked for once: %APPDATA%\DriftingVOID\ffmpeg(\bin), next to
-/// the exe, then PATH.
+/// the exe or in its ffmpeg\bin (where the beta's setup puts it), then PATH.
 pub fn tools() -> Option<&'static Tools> {
     static T: OnceLock<Option<Tools>> = OnceLock::new();
     T.get_or_init(|| {
@@ -50,6 +50,7 @@ pub fn tools() -> Option<&'static Tools> {
             dirs.push(base);
         }
         if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+            dirs.push(d.join("ffmpeg").join("bin"));
             dirs.push(d);
         }
         for d in dirs {
@@ -64,7 +65,7 @@ pub fn tools() -> Option<&'static Tools> {
     .as_ref()
 }
 
-pub const MISSING: &str = "ffmpeg 없음 · winget install Gyan.FFmpeg 또는 %APPDATA%\\DriftingVOID\\ffmpeg";
+pub const MISSING: &str = "ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
