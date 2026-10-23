@@ -242,7 +242,10 @@ fn gpu_parity() {
             l.place = Some(pl);
         }
         let eng = engraved_doc(Some(60.0));
+        let pm = photo_mask_doc().0;
+        let pr = pm.content_bounds().unwrap();
         vec![
+            ("room_photo_mask_small", pm, pr.center(), pr.size(), 0.0, 1.0, None, 1),
             ("room_engrave", eng.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
             ("room_engrave_ss2", eng, rr.center(), rr.size(), 0.0, 0.75, None, 2),
             ("room_photo3d", p3.clone(), rr.center(), rr.size(), 0.0, 1.0, None, 1),
@@ -345,6 +348,64 @@ fn engrave_closeup() {
     if let Ok(p) = std::env::var("DV_ENGRAVE_PNG") {
         out.save(p).unwrap();
     }
+}
+
+/// The room photo shown at 40 %, turned 0.2 rad, with a text over it whose
+/// mask is a photo mask (its pixels are the photo's): a rectangle of source
+/// pixels (300..520 × 180..420, the cube) hidden.
+fn photo_mask_doc() -> (Document, crate::doc::LayerId, crate::doc::LayerId) {
+    let mut doc = crate::io::load_project(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/room.void"))).expect("room.void");
+    let pid = doc.layers.iter().find(|l| matches!(l.kind, LayerKind::Image(_))).unwrap().id;
+    let (cc, centre) = {
+        let LayerKind::Image(im) = &mut doc.get_mut(pid).unwrap().kind else { unreachable!() };
+        im.scale = 0.4;
+        im.rotation = 0.2;
+        (im.crop.center(), im.center)
+    };
+    let tx = doc.insert("t".into(), LayerKind::Text(text(centre - vec2(220.0, 60.0), "MASKED", 90.0, Color32::from_rgb(255, 214, 90))), None);
+    let mut m = crate::raster::RasterLayer::default();
+    m.fill_rect(Rect::from_min_max(pos2(300.0, 180.0), pos2(520.0, 420.0)), true);
+    let mid = doc.insert("m".into(), LayerKind::Raster(m), None);
+    let ml = doc.get_mut(mid).unwrap();
+    ml.mask_of = Some(tx);
+    ml.mask_anchor = Some((pid, [cc.x, cc.y]));
+    ml.mask_pose = Some([0.0, 0.4]);
+    ml.mask_res = 1.0 / 0.4;
+    (doc, pid, mid)
+}
+
+/// A photo mask keeps to its photo's source pixels: the same source points
+/// are hidden before and after the photo is moved, turned and resized, and
+/// the mask's pixels are never touched.
+#[test]
+fn photo_mask_follows_its_photo_pixel_for_pixel() {
+    let (mut doc, pid, mid) = photo_mask_doc();
+    let hidden = |doc: &Document, s: egui::Pos2| {
+        let LayerKind::Image(im) = &doc.get(pid).unwrap().kind else { unreachable!() };
+        let m = doc.get(mid).unwrap();
+        crate::export::mask_hide(m, crate::export::mask_map(doc, m), im.src_to_world(s))
+    };
+    let inside = [pos2(301.0, 181.0), pos2(410.0, 300.0), pos2(519.0, 419.0)];
+    let outside = [pos2(299.0, 300.0), pos2(410.0, 421.0), pos2(600.0, 100.0)];
+    let tiles = match &doc.get(mid).unwrap().kind {
+        LayerKind::Raster(r) => r.tiles.len(),
+        _ => 0,
+    };
+    for step in 0..3 {
+        for s in inside {
+            assert_eq!(hidden(&doc, s), 1.0, "step {step}: {s:?} should be hidden");
+        }
+        for s in outside {
+            assert_eq!(hidden(&doc, s), 0.0, "step {step}: {s:?} should show");
+        }
+        let LayerKind::Image(im) = &mut doc.get_mut(pid).unwrap().kind else { unreachable!() };
+        im.scale *= [2.3, 0.37, 1.0][step];
+        im.rotation -= 0.55;
+        im.center += vec2(37.5, -12.25);
+        crate::app::sync_masks(&mut doc, false);
+    }
+    let LayerKind::Raster(r) = &doc.get(mid).unwrap().kind else { unreachable!() };
+    assert_eq!(r.tiles.len(), tiles, "the mask was not resampled");
 }
 
 /// A pen layer of `n` random strokes of 150 points over 1600×1000 (`seed`),

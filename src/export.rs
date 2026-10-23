@@ -48,7 +48,6 @@ pub struct MaskMap {
 
 impl MaskMap {
     /// Mask-space point -> where it shows.
-    #[cfg(test)]
     pub fn fwd(&self, p: Pos2) -> Pos2 {
         self.c + (crate::doc::rot_about(p, self.last, self.th) - self.last) * self.s
     }
@@ -62,8 +61,15 @@ impl MaskMap {
 /// The live transform of an anchored mask (None: not anchored or in step).
 pub fn mask_map(doc: &Document, mask: &Layer) -> Option<MaskMap> {
     let (aid, last) = mask.mask_anchor?;
-    let [pr, pe] = mask.mask_pose?;
     let a = doc.get(aid)?;
+    // a photo mask's pixels are its photo's source pixels, wherever the photo
+    // is, however turned, scaled or cropped
+    if mask.mask_res != 1.0 {
+        if let LayerKind::Image(im) = &a.kind {
+            return Some(MaskMap { last: im.crop.center(), c: im.center, th: im.rotation, s: im.scale.max(1e-6) });
+        }
+    }
+    let [pr, pe] = mask.mask_pose?;
     let k = crate::anim::key_of(a, 0.0);
     let c = egui::pos2(k.center[0], k.center[1]);
     let last = egui::pos2(last[0], last[1]);

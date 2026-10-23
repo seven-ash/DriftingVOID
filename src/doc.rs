@@ -530,6 +530,11 @@ pub struct Layer {
     pub mask_pose: Option<[f32; 2]>,
     /// A mask that shows only what is painted (hides the rest).
     pub mask_invert: bool,
+    /// A mask's pixels per world unit at its pose (1: canvas pixels). Other
+    /// than 1 for a mask made on a photo: its pixels are that photo's own
+    /// (the anchor is the photo), so they follow it through any move, turn
+    /// or resize without being resampled.
+    pub mask_res: f32,
 }
 
 impl Layer {
@@ -639,6 +644,8 @@ impl Layer {
                 s.b += d;
             }
             LayerKind::Vector(v) => v.offset += d,
+            // a photo mask stays on its photo's pixels (it moves with the photo)
+            LayerKind::Raster(_) if self.mask_res != 1.0 => {}
             LayerKind::Raster(r) => r.offset = (r.offset + d).round(),
             LayerKind::Audio(a) => a.pos += d,
         }
@@ -724,7 +731,7 @@ impl Document {
     /// Inserts above `above` (or at the top) and returns the new id.
     pub fn insert(&mut self, name: String, kind: LayerKind, above: Option<LayerId>) -> LayerId {
         let id = self.new_id();
-        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false };
+        let layer = Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false, mask_res: 1.0 };
         let idx = above.and_then(|a| self.index_of(a)).map(|i| i + 1).unwrap_or(self.layers.len());
         self.layers.insert(idx, layer);
         id

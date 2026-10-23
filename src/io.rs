@@ -82,6 +82,12 @@ struct FileLayer {
     mask_pose: Option<[f32; 2]>,
     #[serde(default)]
     mask_invert: bool,
+    #[serde(default = "unit_res")]
+    mask_res: f32,
+}
+
+fn unit_res() -> f32 {
+    1.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -258,7 +264,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                 }
                 LayerKind::Audio(a) => FileKind::Audio(a.clone()),
             };
-            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert });
+            layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert, mask_res: l.mask_res });
         }
         let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
@@ -347,7 +353,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
             FileKind::Audio(a) => LayerKind::Audio(a),
         };
         doc.next_id = doc.next_id.max(fl.id);
-        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert });
+        doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert, mask_res: fl.mask_res });
     }
     clips_to_layers(&mut doc, old_audio);
     crate::persp::to_eye_level(&mut doc);
@@ -369,7 +375,7 @@ fn clips_to_layers(doc: &mut Document, clips: Vec<crate::anim::AudioClip>) {
         anim.span = Some([c.start, c.start + c.len]);
         anim.video_start = c.offset;
         let id = doc.new_id();
-        doc.layers.push(Layer { id, name: c.name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: Some(anim), mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false });
+        doc.layers.push(Layer { id, name: c.name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: Some(anim), mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false, mask_res: 1.0 });
     }
 }
 

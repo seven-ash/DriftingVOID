@@ -1709,6 +1709,12 @@ impl App {
                         let t0 = std::time::Instant::now();
                         let o = pos2(c[0] - 640.0, c[1]);
                         let mut clicks: Vec<Pos2> = [vec2(-200.0, -200.0), vec2(200.0, -200.0), vec2(200.0, 200.0), vec2(-200.0, 200.0)].iter().map(|d| o + *d).collect();
+                        // DV_PHOTO_SCALE=k: the first photo shown at k first (photo masks keep its pixels)
+                        if let Some(k) = std::env::var("DV_PHOTO_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+                            if let Some(LayerKind::Image(im)) = app.doc.layers.iter_mut().map(|l| &mut l.kind).find(|k| matches!(k, LayerKind::Image(_))) {
+                                im.scale = k;
+                            }
+                        }
                         // DV_SCISSOR_PTS="x,y;x,y;…": the anchors clicked, in pixels of the first photo
                         if let (Ok(v), Some(im)) = (std::env::var("DV_SCISSOR_PTS"), app.doc.layers.iter().find_map(|l| match &l.kind {
                             LayerKind::Image(im) => Some(im.clone()),
@@ -2107,7 +2113,7 @@ impl App {
         let idx = self.doc.layers.iter().position(|l| is_paint_layer(&l.kind)).unwrap_or(self.doc.layers.len());
         let id = self.doc.new_id();
         let kind = LayerKind::Image(ImageLayer::new(src, at));
-        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false });
+        self.doc.layers.insert(idx, Layer { id, name, visible: true, locked: false, opacity: 1.0, kind, place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false, mask_res: 1.0 });
         self.sel = Some(id);
         self.mark();
         id
@@ -2749,7 +2755,10 @@ impl App {
     /// of similar colour, softens its edge with a guided filter (the picture as the
     /// guide) and hides it (or shows it again).
     fn wand_fill(&mut self, mid: LayerId, w: Pos2, on: bool) {
-        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        self.adopt_photo(mid, w);
+        if self.doc.get(mid).and_then(|l| l.mask_of).is_none() {
+            return;
+        }
         let xf = self.xf();
         let view = Rect::from_min_max(xf.s2w(self.canvas_rect.min), xf.s2w(self.canvas_rect.max));
         if !view.contains(w) {
@@ -2760,8 +2769,7 @@ impl App {
         let lim = Rect::from_center_size(w, vec2(SIDE, SIDE));
         let reg = view.expand(64.0).intersect(lim);
         let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
-        let mut d = self.doc.clone();
-        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Some(d) = self.trace_doc(mid) else { return Default::default() };
         let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as i32, pm.height() as i32);
         let px = pm.data();
@@ -2849,11 +2857,16 @@ impl App {
         let rad = self.s.mask_refine.round() as usize;
         let q = if rad == 0 { hard } else { guided_filter(gi, &hard, bw, bh, rad, 1e-3) };
         let sharpen = rad > 0;
+        let vals: Vec<f32> = q.iter().map(|v| if sharpen { ((v - 0.5) * 2.5 + 0.5).clamp(0.0, 1.0) } else { *v }).collect();
+        let space = self.mask_space(mid);
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) else { return 0 };
+        if let Some(map) = space {
+            return write_grid_mapped(m, map, origin, bw, bh, &vals, on);
+        }
         let mut n = 0usize;
         for y in 0..bh {
             for x in 0..bw {
-                let v = if sharpen { ((q[y * bw + x] - 0.5) * 2.5 + 0.5).clamp(0.0, 1.0) } else { q[y * bw + x] };
+                let v = vals[y * bw + x];
                 if v < 0.02 {
                     continue;
                 }
@@ -2874,12 +2887,11 @@ impl App {
         if let Some(m) = keep.filter(|m| m.holds(at, SCISSOR_MARGIN)) {
             return Some(m);
         }
-        let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
-        let cell = 1.0;
+        // a photo mask is searched on its photo's own pixels
+        let cell = self.mask_space(mid).map_or(1.0, |m| m.s);
         let reg = Rect::from_center_size(at, vec2(SCISSOR_MAP, SCISSOR_MAP) * cell);
         let reg = Rect::from_min_max(reg.min.floor(), reg.max.ceil());
-        let mut d = self.doc.clone();
-        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Some(d) = self.trace_doc(mid) else { return Default::default() };
         let pm = render_region(&mut self.cgpu, &d, reg, 1.0 / cell, Some(Color32::BLACK)).ok()?;
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         Some(std::sync::Arc::new(crate::segment::EdgeMap::new(pm.data(), pw, ph, reg.min, cell)))
@@ -2910,6 +2922,9 @@ impl App {
         if near_first {
             self.scissor_close(refine);
             return;
+        }
+        if !self.scissor.as_ref().is_some_and(|sc| sc.mid == mid) {
+            self.adopt_photo(mid, w);
         }
         let (p, map) = self.scissor_anchor_at(mid, w);
         let wire = map.and_then(|m| crate::segment::LiveWire::new(m, p));
@@ -2979,6 +2994,92 @@ impl App {
         }
     }
 
+    /// World -> pixel space of mask `mid` when it is a photo mask (None:
+    /// canvas pixels).
+    fn mask_space(&self, mid: LayerId) -> Option<crate::export::MaskMap> {
+        let l = self.doc.get(mid)?;
+        if l.mask_res == 1.0 {
+            return None;
+        }
+        crate::export::mask_map(&self.doc, l)
+    }
+
+    /// The picture the selection tools trace for mask `mid`: everything but
+    /// masks and the masked layer, or with it when that is a photo (cutting a
+    /// photo out traces the photo).
+    fn trace_doc(&self, mid: LayerId) -> Option<Document> {
+        let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
+        let keep_owner = self.doc.get(owner).is_some_and(|l| matches!(l.kind, LayerKind::Image(_)) && l.place.is_none());
+        let mut d = self.doc.clone();
+        d.layers.retain(|l| (l.id != owner || keep_owner) && l.mask_of.is_none());
+        Some(d)
+    }
+
+    /// The flat photo the selection tools see at `w` (topmost, visible, not in
+    /// a 3D space).
+    fn photo_at(&self, mid: LayerId, w: Pos2) -> Option<LayerId> {
+        let owner = self.doc.get(mid).and_then(|l| l.mask_of)?;
+        let keep_owner = self.doc.get(owner).is_some_and(|l| matches!(l.kind, LayerKind::Image(_)));
+        self.doc
+            .layers
+            .iter()
+            .rev()
+            .filter(|l| l.visible && l.place.is_none() && l.mask_of.is_none() && (l.id != owner || keep_owner))
+            .find(|l| matches!(&l.kind, LayerKind::Image(im) if im.contains(w)))
+            .map(|l| l.id)
+    }
+
+    /// An empty mask about to be traced at `w` on a photo becomes a photo
+    /// mask: its pixels are that photo's own and it follows the photo
+    /// (Ash, 10-23: masks at the photo's resolution, kept through resizes).
+    fn adopt_photo(&mut self, mid: LayerId, w: Pos2) {
+        let Some(pid) = self.photo_at(mid, w) else { return };
+        let Some(l) = self.doc.get(mid) else { return };
+        let empty = matches!(&l.kind, LayerKind::Raster(r) if r.tiles.is_empty());
+        if l.mask_res != 1.0 || !empty {
+            return;
+        }
+        let Some(LayerKind::Image(im)) = self.doc.get(pid).map(|p| &p.kind) else { return };
+        let (cc, sc) = (im.crop.center(), im.scale);
+        if let Some(l) = self.doc.get_mut(mid) {
+            l.mask_anchor = Some((pid, [cc.x, cc.y]));
+            l.mask_pose = Some([0.0, sc]);
+            l.mask_res = 1.0 / sc.max(1e-6);
+            if (l.mask_res - 1.0).abs() < 1e-6 {
+                // a photo at 100 %: still a photo mask (follows it, never resampled)
+                l.mask_res = 1.0 + 1e-6;
+            }
+        }
+    }
+
+    /// A photo mask turned back into an ordinary one: its pixels resampled
+    /// (bilinear) into canvas pixels where it shows now.
+    fn bake_photo_mask(&mut self, id: LayerId) {
+        let Some(map) = self.mask_space(id) else { return };
+        let Some(LayerKind::Raster(r)) = self.doc.get(id).map(|l| &l.kind) else { return };
+        let mut out = crate::raster::RasterLayer { blend: r.blend, ..Default::default() };
+        if let Some(b) = r.bounds() {
+            let q = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].map(|p| map.fwd(p));
+            let wb = Rect::from_points(&q);
+            let a = |p: Pos2| r.alpha_at_world(p) as f32;
+            for y in wb.min.y.floor() as i32..wb.max.y.ceil() as i32 {
+                for x in wb.min.x.floor() as i32..wb.max.x.ceil() as i32 {
+                    let m = map.inv(pos2(x as f32 + 0.5, y as f32 + 0.5)) - vec2(0.5, 0.5);
+                    let (fx, fy) = (m.x - m.x.floor(), m.y - m.y.floor());
+                    let o = pos2(m.x.floor() + 0.5, m.y.floor() + 0.5);
+                    let v = (a(o) * (1.0 - fx) + a(o + vec2(1.0, 0.0)) * fx) * (1.0 - fy) + (a(o + vec2(0.0, 1.0)) * (1.0 - fx) + a(o + vec2(1.0, 1.0)) * fx) * fy;
+                    if v >= 1.0 {
+                        out.set_alpha_world(x, y, v.round() as u8);
+                    }
+                }
+            }
+        }
+        if let Some(l) = self.doc.get_mut(id) {
+            l.kind = LayerKind::Raster(out);
+            l.mask_res = 1.0;
+        }
+    }
+
     /// The mask the scissors draw into, when they are the tool in use.
     fn scissor_target(&self) -> Option<LayerId> {
         self.wand.filter(|_| self.wand_mode == 2).filter(|mid| self.doc.get(*mid).is_some_and(|l| l.mask_of.is_some()))
@@ -3001,56 +3102,33 @@ impl App {
         if sc.pts.len() < 3 {
             return;
         }
-        let b = Rect::from_points(&sc.pts);
-        let b = Rect::from_min_max(b.min.floor() - vec2(1.0, 1.0), b.max.ceil() + vec2(1.0, 1.0));
-        let (w, h) = (b.width() as u32, b.height() as u32);
-        if w == 0 || h == 0 || w > 8192 || h > 8192 {
-            return;
-        }
-        let Some(mut pm) = tiny_skia::Pixmap::new(w, h) else { return };
-        let mut pb = tiny_skia::PathBuilder::new();
-        pb.move_to(sc.pts[0].x - b.min.x, sc.pts[0].y - b.min.y);
-        for p in &sc.pts[1..] {
-            pb.line_to(p.x - b.min.x, p.y - b.min.y);
-        }
-        pb.close();
-        let Some(path) = pb.finish() else { return };
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color_rgba8(255, 255, 255, 255);
-        paint.anti_alias = true;
-        pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
         if refine {
-            self.scissor_refine(sc.mid, b, &pm, sc.on);
+            let Some(pm) = poly_pixmap(&sc.pts) else { return };
+            let b = Rect::from_points(&sc.pts);
+            let b = Rect::from_min_max(b.min.floor() - vec2(1.0, 1.0), b.max.ceil() + vec2(1.0, 1.0));
+            self.scissor_refine(sc.mid, b, &pm.0, sc.on);
             return;
         }
+        // filled in the mask's own pixels (a photo mask's are its photo's)
+        let pts: Vec<Pos2> = match self.mask_space(sc.mid) {
+            Some(map) => sc.pts.iter().map(|p| map.inv(*p)).collect(),
+            None => sc.pts.clone(),
+        };
         let Some(LayerKind::Raster(m)) = self.doc.get_mut(sc.mid).map(|l| &mut l.kind) else { return };
-        let data = pm.data();
-        let mut n = 0;
-        for y in 0..h as i32 {
-            for x in 0..w as i32 {
-                let a = data[((y * w as i32 + x) * 4 + 3) as usize] as f32 / 255.0;
-                if a <= 0.0 {
-                    continue;
-                }
-                let (wx, wy) = (b.min.x as i32 + x, b.min.y as i32 + y);
-                let old = m.alpha_at_world(pos2(wx as f32 + 0.5, wy as f32 + 0.5)) as f32 / 255.0;
-                let nv = if sc.on { old.max(a) } else { old * (1.0 - a) };
-                m.set_alpha_world(wx, wy, (nv * 255.0).round() as u8);
-                n += 1;
-            }
-        }
+        let n = fill_mask_poly(m, &pts, sc.on);
         self.status = format!("가위 · {n} px {}", if sc.on { "가림" } else { "되살림" });
         self.mark();
     }
 
     fn scissor_refine(&mut self, mid: LayerId, b: Rect, poly: &tiny_skia::Pixmap, on: bool) {
         use crate::segment::{BG, FG, PR_BG, PR_FG};
-        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        if self.doc.get(mid).and_then(|l| l.mask_of).is_none() {
+            return;
+        }
         const PAD: i32 = 16;
         const BAND: usize = 6;
         let reg = Rect::from_min_max(b.min - vec2(PAD as f32, PAD as f32), b.max + vec2(PAD as f32, PAD as f32));
-        let mut d = self.doc.clone();
-        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Some(d) = self.trace_doc(mid) else { return Default::default() };
         let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         let px = pm.data();
@@ -3118,8 +3196,11 @@ impl App {
     /// surroundings (colour models + edges) is hidden (or shown again). Coverage
     /// already painted in the box counts as certain.
     fn grabcut_fill(&mut self, mid: LayerId, rect: Rect, on: bool) {
+        self.adopt_photo(mid, rect.center());
         use crate::segment::{BG, FG, PR_FG};
-        let Some(owner) = self.doc.get(mid).and_then(|l| l.mask_of) else { return };
+        if self.doc.get(mid).and_then(|l| l.mask_of).is_none() {
+            return;
+        }
         let rect = Rect::from_min_max(rect.min.floor(), rect.max.ceil());
         if rect.width() < 4.0 || rect.height() < 4.0 {
             return;
@@ -3130,8 +3211,7 @@ impl App {
             self.status = "영역이 너무 큼".into();
             return;
         }
-        let mut d = self.doc.clone();
-        d.layers.retain(|l| l.id != owner && l.mask_of.is_none());
+        let Some(d) = self.trace_doc(mid) else { return Default::default() };
         let Ok(pm) = render_region(&mut self.cgpu, &d, reg, 1.0, Some(Color32::BLACK)) else { return };
         let (pw, ph) = (pm.width() as usize, pm.height() as usize);
         let px = pm.data();
@@ -3142,6 +3222,7 @@ impl App {
             Some(LayerKind::Raster(m)) => Some(m.clone()),
             _ => None,
         };
+        let hint_space = self.mask_space(mid);
         let mut img = vec![[0f64; 3]; gw * gh];
         let mut labels = vec![BG; gw * gh];
         for gy in 0..gh {
@@ -3159,7 +3240,7 @@ impl App {
                 img[gy * gw + gx] = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt];
                 let wp = pos2(reg.min.x + ((gx * step) as f32 + step as f32 * 0.5), reg.min.y + ((gy * step) as f32 + step as f32 * 0.5));
                 if rect.contains(wp) {
-                    let painted = on && hint.as_ref().is_some_and(|m| m.alpha_at_world(wp) > 127);
+                    let painted = on && hint.as_ref().is_some_and(|m| m.alpha_at_world(hint_space.map_or(wp, |s| s.inv(wp))) > 127);
                     labels[gy * gw + gx] = if painted { FG } else { PR_FG };
                 }
             }
@@ -3203,6 +3284,7 @@ impl App {
             mask_anchor: Some((owner, c)),
             mask_pose: None,
             mask_invert: false,
+            mask_res: 1.0,
         };
         // just under its layer, so the list shows it beneath
         self.doc.layers.insert(i, layer);
@@ -5340,6 +5422,9 @@ impl App {
                     self.paint_target(false)
                 };
                 let (tl_on, tl_time) = (self.doc.timeline.on, self.doc.timeline.time);
+                // a photo mask is painted in its photo's pixels
+                let space = self.mask_space(id);
+                let to_px = |p: Pos2| space.map_or(p, |m| m.inv(p));
                 let layer = self.doc.get_mut(id).unwrap();
                 match &mut layer.kind {
                     LayerKind::Raster(r) => {
@@ -5351,7 +5436,7 @@ impl App {
                         let is_mask = layer.mask_of.is_some();
                         let p = BrushParams {
                             color: if is_mask { Color32::WHITE } else { self.s.color },
-                            radius: size * 0.5,
+                            radius: size * 0.5 / space.map_or(1.0, |m| m.s),
                             opacity: if erase { 1.0 } else { self.s.brush_opacity },
                             hardness: if erase { 0.9 } else { self.s.brush_hardness },
                             pressure_size: ps,
@@ -5366,13 +5451,13 @@ impl App {
                             if r.rec_base.is_none() {
                                 r.rec_base = Some(r.tiles.clone());
                             }
-                            let lp = w - r.offset;
+                            let lp = to_px(w) - r.offset;
                             self.rec_clock = Some((std::time::Instant::now(), tl_time, self.rec_on));
                             self.rec_pts = vec![[lp.x, lp.y, pressure]];
                             self.rec_times = vec![0.0];
                         }
                         let mut st = RasterStroke::new(p);
-                        st.add_point(r, w - r.offset, pressure);
+                        st.add_point(r, to_px(w) - r.offset, pressure);
                         self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure), curve: crate::vector::Curve::new([w.x, w.y, pressure], self.smooth_distance()) });
                         if !erase {
                             self.remember_color(self.s.color);
@@ -6410,6 +6495,11 @@ impl App {
             }
             _ => {}
         }
+        // a brush stroke on a photo mask goes into its photo's pixels
+        let raster_space = match &self.drag {
+            Some(Drag::Raster { id, .. }) => self.mask_space(*id),
+            _ => None,
+        };
         let Some(drag) = self.drag.as_mut() else { return };
         match drag {
             Drag::Zoom { .. } | Drag::Size { .. } | Drag::Marquee { .. } | Drag::Lasso { .. } | Drag::Scissor { .. } => {}
@@ -6744,7 +6834,7 @@ impl App {
                 let id = *id;
                 let more = curve.push([w.x, w.y, pressure], CURVE_STEP / zoom, self.now);
                 if let (Some(st), Some(LayerKind::Raster(r))) = (stroke.as_mut(), self.doc.get_mut(id).map(|l| &mut l.kind)) {
-                    Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
+                    Self::raster_points(st, r, raster_space, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                 }
                 self.changed = true;
                 self.modified = true;
@@ -6781,12 +6871,16 @@ impl App {
     fn stroke_follow(&mut self, dt: f32, rested: bool) -> bool {
         let step = CURVE_STEP / self.zoom;
         let zoom = self.zoom;
+        let space = match &self.drag {
+            Some(Drag::Raster { id, .. }) => self.mask_space(*id),
+            _ => None,
+        };
         match &mut self.drag {
             Some(Drag::Raster { id, stroke: Some(st), curve, .. }) => {
                 let (more, going) = curve.follow(dt, rested, step);
                 let id = *id;
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                    Self::raster_points(st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
+                    Self::raster_points(st, r, space, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                 }
                 if !more.is_empty() {
                     self.changed = true;
@@ -6812,10 +6906,13 @@ impl App {
         self.s.smoothing.clamp(0.0, 0.95) * SMOOTH_PX / self.zoom
     }
 
-    /// Curve points into a brush stroke (and its recording).
-    fn raster_points(st: &mut RasterStroke, r: &mut crate::raster::RasterLayer, more: &[[f32; 3]], rec: Option<(std::time::Instant, f64, bool)>, rec_pts: &mut Vec<[f32; 3]>, rec_times: &mut Vec<f32>) {
+    /// Curve points into a brush stroke (and its recording); `space`: a
+    /// photo mask's pixels.
+    #[allow(clippy::too_many_arguments)]
+    fn raster_points(st: &mut RasterStroke, r: &mut crate::raster::RasterLayer, space: Option<crate::export::MaskMap>, more: &[[f32; 3]], rec: Option<(std::time::Instant, f64, bool)>, rec_pts: &mut Vec<[f32; 3]>, rec_times: &mut Vec<f32>) {
         for p in more {
-            let lp = pos2(p[0], p[1]) - r.offset;
+            let w = pos2(p[0], p[1]);
+            let lp = space.map_or(w, |m| m.inv(w)) - r.offset;
             st.add_point(r, lp, p[2]);
             if let Some((c, _, live)) = rec {
                 rec_pts.push([lp.x, lp.y, p[2]]);
@@ -6979,8 +7076,9 @@ impl App {
             Drag::Raster { id, stroke: Some(mut st), mut curve, .. } => {
                 let params = st.p;
                 let more = curve.finish(CURVE_STEP / self.zoom);
+                let space = self.mask_space(id);
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                    Self::raster_points(&mut st, r, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
+                    Self::raster_points(&mut st, r, space, &more, self.rec_clock, &mut self.rec_pts, &mut self.rec_times);
                     st.finish(r);
                     if let Some((_, start, live)) = self.rec_clock.take() {
                         let rec = crate::raster::BrushRec { start, params, pts: std::mem::take(&mut self.rec_pts), times: std::mem::take(&mut self.rec_times) };
@@ -7027,8 +7125,21 @@ impl App {
                     if let Some(rect) = rect {
                         self.grabcut_fill(mid, rect, on);
                     }
-                } else if let (Some(rect), Some(LayerKind::Raster(m))) = (rect, self.doc.get_mut(mid).map(|l| &mut l.kind)) {
-                    m.fill_rect(rect, on);
+                } else if let Some(rect) = rect {
+                    match self.mask_space(mid) {
+                        // a photo mask: the rectangle in its pixels (turned with the photo)
+                        Some(map) => {
+                            let pts: Vec<Pos2> = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].iter().map(|p| map.inv(*p)).collect();
+                            if let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) {
+                                fill_mask_poly(m, &pts, on);
+                            }
+                        }
+                        None => {
+                            if let Some(LayerKind::Raster(m)) = self.doc.get_mut(mid).map(|l| &mut l.kind) {
+                                m.fill_rect(rect, on);
+                            }
+                        }
+                    }
                 }
                 self.sel = Some(mid);
                 self.changed = true;
@@ -8890,6 +9001,8 @@ impl App {
             self.wand = if armed { None } else { Some(id) };
         }
         if let Some(a) = pick {
+            // a photo mask given another anchor goes back to canvas pixels
+            self.bake_photo_mask(id);
             let c = a.and_then(|a| self.doc.get(a)).map(|l| crate::anim::key_of(l, 0.0).center);
             if let Some(l) = self.doc.get_mut(id) {
                 l.mask_anchor = a.zip(c);
@@ -10045,13 +10158,28 @@ impl App {
         if let Some(l) = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_some() && l.visible) {
             if let LayerKind::Raster(r) = &l.kind {
                 let view_w = Rect::from_min_max(xf.s2w(painter.clip_rect().min), xf.s2w(painter.clip_rect().max));
+                // a photo mask's tiles are in its photo's pixels
+                let map = if l.mask_res != 1.0 { crate::export::mask_map(&self.doc, l) } else { None };
+                let veil = Color32::from_rgba_unmultiplied(255, 60, 60, 110);
                 for (&key, t) in &r.tiles {
                     let tr = Rect::from_min_size(pos2((key.0 * crate::raster::TILE) as f32, (key.1 * crate::raster::TILE) as f32), vec2(crate::raster::TILE as f32, crate::raster::TILE as f32)).translate(r.offset);
-                    if !tr.intersects(view_w) {
-                        continue;
+                    match map {
+                        Some(m) => {
+                            let q = [tr.left_top(), tr.right_top(), tr.right_bottom(), tr.left_bottom()].map(|p| m.fwd(p));
+                            if !Rect::from_points(&q).intersects(view_w) {
+                                continue;
+                            }
+                            let tex = self.tex.tile(&ctx, l.id, key, t);
+                            painter.add(Shape::mesh(canvas::image_mesh(tex, q.map(|p| xf.w2s(p)), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), veil)));
+                        }
+                        None => {
+                            if !tr.intersects(view_w) {
+                                continue;
+                            }
+                            let tex = self.tex.tile(&ctx, l.id, key, t);
+                            painter.image(tex, xf.rect_w2s(tr), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), veil);
+                        }
                     }
-                    let tex = self.tex.tile(&ctx, l.id, key, t);
-                    painter.image(tex, xf.rect_w2s(tr), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::from_rgba_unmultiplied(255, 60, 60, 110));
                 }
             }
         }
@@ -11335,6 +11463,8 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
                 .collect();
         }
         LayerKind::Audio(a) => a.pos = map(a.pos),
+        // a photo mask stays on its photo's pixels (it turns and scales with the photo)
+        LayerKind::Raster(_) if o.mask_res != 1.0 => {}
         LayerKind::Raster(r) => {
             if let Some(n) = crate::raster::transformed(r, c, s, th) {
                 *r = n;
@@ -11451,7 +11581,88 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
 /// Masks move with their anchor layer: its centre live (whole pixels, the
 /// remainder carries over), its rotation and size once a drag ends (each turn or
 /// scale resamples the mask, so not on every frame of a drag).
-fn sync_masks(doc: &mut Document, dragging: bool) {
+/// Polygon `pts` filled anti-aliased into a pixmap over its bounds (a pixel
+/// of margin); with the bounds' integer top left.
+fn poly_pixmap(pts: &[Pos2]) -> Option<(tiny_skia::Pixmap, (i32, i32))> {
+    if pts.len() < 3 {
+        return None;
+    }
+    let b = Rect::from_points(pts);
+    let b = Rect::from_min_max(b.min.floor() - vec2(1.0, 1.0), b.max.ceil() + vec2(1.0, 1.0));
+    let (w, h) = (b.width() as u32, b.height() as u32);
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let mut pm = tiny_skia::Pixmap::new(w, h)?;
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(pts[0].x - b.min.x, pts[0].y - b.min.y);
+    for p in &pts[1..] {
+        pb.line_to(p.x - b.min.x, p.y - b.min.y);
+    }
+    pb.close();
+    let path = pb.finish()?;
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+    Some((pm, (b.min.x as i32, b.min.y as i32)))
+}
+
+/// Polygon `pts` (the mask's own pixels) hidden (`on`) or shown again in
+/// mask `m`, anti-aliased; the pixels touched.
+fn fill_mask_poly(m: &mut crate::raster::RasterLayer, pts: &[Pos2], on: bool) -> usize {
+    let Some((pm, (x0, y0))) = poly_pixmap(pts) else { return 0 };
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let data = pm.data();
+    let mut n = 0;
+    for y in 0..h {
+        for x in 0..w {
+            let a = data[((y * w + x) * 4 + 3) as usize] as f32 / 255.0;
+            if a <= 0.0 {
+                continue;
+            }
+            let (wx, wy) = (x0 + x, y0 + y);
+            let old = m.alpha_at_world(pos2(wx as f32 + 0.5, wy as f32 + 0.5)) as f32 / 255.0;
+            let nv = if on { old.max(a) } else { old * (1.0 - a) };
+            m.set_alpha_world(wx, wy, (nv * 255.0).round() as u8);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Values on a grid of canvas pixels (`origin`, `bw`×`bh`) written into a
+/// photo mask through its map: each of its pixels takes the grid's value
+/// where it lies (bilinear).
+fn write_grid_mapped(m: &mut crate::raster::RasterLayer, map: crate::export::MaskMap, origin: (i32, i32), bw: usize, bh: usize, vals: &[f32], on: bool) -> usize {
+    let (ox, oy) = (origin.0 as f32, origin.1 as f32);
+    let corners = [pos2(ox, oy), pos2(ox + bw as f32, oy), pos2(ox + bw as f32, oy + bh as f32), pos2(ox, oy + bh as f32)].map(|p| map.inv(p));
+    let b = Rect::from_points(&corners);
+    let at = |x: i32, y: i32| vals[(y.clamp(0, bh as i32 - 1) as usize) * bw + x.clamp(0, bw as i32 - 1) as usize];
+    let mut n = 0;
+    for my in b.min.y.floor() as i32..b.max.y.ceil() as i32 {
+        for mx in b.min.x.floor() as i32..b.max.x.ceil() as i32 {
+            let w = map.fwd(pos2(mx as f32 + 0.5, my as f32 + 0.5));
+            let (gx, gy) = (w.x - ox - 0.5, w.y - oy - 0.5);
+            if gx < -0.5 || gy < -0.5 || gx > bw as f32 - 0.5 || gy > bh as f32 - 0.5 {
+                continue;
+            }
+            let (x0, y0) = (gx.floor() as i32, gy.floor() as i32);
+            let (fx, fy) = (gx - x0 as f32, gy - y0 as f32);
+            let v = (at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx) * (1.0 - fy) + (at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+            if v < 0.02 {
+                continue;
+            }
+            let old = m.alpha_at_world(pos2(mx as f32 + 0.5, my as f32 + 0.5)) as f32 / 255.0;
+            let nv = if on { old.max(v) } else { old * (1.0 - v) };
+            m.set_alpha_world(mx, my, (nv * 255.0).round() as u8);
+            n += 1;
+        }
+    }
+    n
+}
+
+pub(crate) fn sync_masks(doc: &mut Document, dragging: bool) {
     let poses: Vec<(LayerId, Pos2, f32, f32)> = doc
         .layers
         .iter()
@@ -11461,6 +11672,10 @@ fn sync_masks(doc: &mut Document, dragging: bool) {
         .collect();
     for l in &mut doc.layers {
         let Some((aid, last)) = l.mask_anchor else { continue };
+        // a photo mask follows its photo through the mask map (never resampled)
+        if l.mask_res != 1.0 {
+            continue;
+        }
         let Some(&(_, c, rot, ext)) = poses.iter().find(|x| x.0 == aid) else { continue };
         let d = vec2((c.x - last[0]).round(), (c.y - last[1]).round());
         if d != Vec2::ZERO {
