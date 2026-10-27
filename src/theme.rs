@@ -37,6 +37,9 @@ token!(INK, Color32::from_rgb(236, 232, 225), Color32::from_rgb(28, 26, 33));
 // over a white photo, the worst case (Ash, 10-27: 3:1 is enough, not too
 // much contrast; INK_2 there was 2.6:1)
 token!(LABEL, Color32::from_rgb(204, 200, 210), Color32::from_rgb(84, 80, 92));
+// fold titles: a faint cool hue of the theme (not the accent), so they part
+// from the text they fold (Ash, 10-28); as legible as LABEL
+token!(FOLD, Color32::from_rgb(196, 200, 236), Color32::from_rgb(70, 72, 122));
 token!(INK_2, Color32::from_rgb(167, 162, 176), Color32::from_rgb(84, 80, 92));
 token!(INK_3, Color32::from_rgb(109, 104, 120), Color32::from_rgb(140, 136, 148));
 token!(FILL_1, Color32::from_rgba_premultiplied(14, 14, 14, 14), Color32::from_rgba_premultiplied(0, 0, 0, 14));

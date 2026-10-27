@@ -488,7 +488,17 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
             // ring
             let (full, resp) = ui.allocate_exact_size(vec2(w, ring_h), Sense::click_and_drag());
             let r = egui::Rect::from_center_size(full.center(), vec2(ring_w, ring_h));
+            // keep turning from the unrounded position (as the flat dial): integer
+            // dials would otherwise eat sub-step motion and stutter (Ash, 10-28)
+            let mem = resp.id.with("raw");
             let mut u = value.clamp(lo, hi);
+            if resp.dragged() {
+                if let Some((raw, wrote)) = ui.data(|d| d.get_temp::<(f32, f32)>(mem)) {
+                    if (wrote - *value).abs() <= dt * 1e-3 {
+                        u = raw;
+                    }
+                }
+            }
             let mut moved = false;
             if resp.dragged() && resp.drag_delta().y != 0.0 {
                 moved = true;
@@ -505,6 +515,9 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
             let nv = if integer { u.round().clamp(lo, hi) } else { u };
             if moved && (nv - *value).abs() > f32::EPSILON {
                 *value = nv;
+            }
+            if resp.dragged() {
+                ui.data_mut(|d| d.insert_temp(mem, (u, *value)));
             }
             let p = ui.painter().with_clip_rect(r.expand2(vec2(4.0, 0.0)));
             let radius = r.height() * 0.5;

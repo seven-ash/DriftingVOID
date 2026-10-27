@@ -7,7 +7,7 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::theme::{self, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, ROW_H, SPACE_SM, SPACE_XS};
+use crate::theme::{self, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, INK_3, ROW_H, SPACE_SM, SPACE_XS};
 
 /// Ink of a state glyph: unavailable, on, or off.
 pub fn state_ink(on: bool, enabled: bool) -> Color32 {
@@ -60,7 +60,10 @@ pub fn switch_mixed(ui: &mut Ui, on: &mut bool, text: &str, mixed: bool) -> Resp
     if on_look {
         p.rect_filled(tr, CornerRadius::same(rad as u8), if enabled { ACCENT } else { ACCENT.gamma_multiply(0.38) });
     } else {
-        if resp.hovered() && enabled {
+        if mixed {
+            // mixed: a grey track, so it never reads as off (Ash, 10-28)
+            p.rect_filled(tr, CornerRadius::same(rad as u8), INK_3().gamma_multiply(if enabled { 0.75 } else { 0.35 }));
+        } else if resp.hovered() && enabled {
             p.rect_filled(tr, CornerRadius::same(rad as u8), FILL_2());
         }
         p.rect_stroke(tr, CornerRadius::same(rad as u8), Stroke::new(1.3, ink), StrokeKind::Inside);
@@ -103,6 +106,9 @@ pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T,
     for (i, ((v, _, on), g)) in opts.iter().zip(galleys).enumerate() {
         let sr = Rect::from_min_size(pos2(x, r.top() + inset), vec2(widths[i], ROW_H - inset * 2.0));
         x += widths[i];
+        // one option unavailable (내보낼 영역 without a frame): sunk in a dark
+        // fill with faint text, so it reads as off limits at once (Ash, 10-28)
+        let blocked = enabled && !*on;
         let enabled = enabled && *on;
         let sresp = ui.interact(sr, resp.id.with(i), if enabled { Sense::click() } else { Sense::hover() });
         let chosen = *v == *value;
@@ -113,11 +119,16 @@ pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T,
         let p = ui.painter();
         let text_col = if chosen {
             if enabled { ACCENT_INK } else { ACCENT_INK.gamma_multiply(0.6) }
+        } else if blocked {
+            INK().gamma_multiply(0.3)
         } else if enabled {
             INK()
         } else {
             INK_2()
         };
+        if blocked {
+            p.rect_filled(sr, CornerRadius::same(inner as u8), Color32::from_black_alpha(if theme::is_light() { 30 } else { 80 }));
+        }
         if chosen {
             p.rect_filled(sr, CornerRadius::same(inner as u8), if enabled { ACCENT } else { ACCENT.gamma_multiply(0.38) });
         } else if sresp.is_pointer_button_down_on() && enabled {

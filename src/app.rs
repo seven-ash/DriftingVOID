@@ -4523,6 +4523,8 @@ impl App {
         }
         let voices = self.timeline_voices().len();
         egui::Window::new("영상 내보내기")
+            // dialogs stay above the fixed panels, whichever is clicked (Ash, 10-28)
+            .order(egui::Order::Foreground)
             .title_bar(false)
             .frame(egui::Frame::NONE)
             .collapsible(false)
@@ -7999,6 +8001,8 @@ impl App {
         let mut action: Option<u8> = None;
         let mut pal_req: PalReq = None;
         egui::Window::new("내보내기")
+            // dialogs stay above the fixed panels, whichever is clicked (Ash, 10-28)
+            .order(egui::Order::Foreground)
             .title_bar(false)
             .frame(egui::Frame::NONE)
             .collapsible(false)
@@ -8471,9 +8475,6 @@ impl App {
         if let Some((t, c, at)) = pal_req {
             self.open_palette_for(t, c, at);
         }
-        ui.separator();
-        crate::kit::switch(ui, &mut self.s.touch_draw, "손가락 터치로도 그리기")
-            .glass_tip("끄면 손가락 한 개는 화면 이동, 두 개는 확대/축소. 펜은 항상 그려.");
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
@@ -9355,7 +9356,8 @@ impl App {
             }
             theme::eye_icon(&p, eye_r.center(), l.visible, INK());
             if l.locked {
-                theme::lock_icon(&p, lock_r.center(), INK());
+                // locked is "on": the accent (Ash, 10-28)
+                theme::lock_icon(&p, lock_r.center(), ACCENT);
             } else if lock.hovered() || resp.hovered() {
                 theme::lock_icon(&p, lock_r.center(), FILL_3());
             }
@@ -9629,7 +9631,7 @@ impl App {
     fn menus(&mut self, ui: &mut egui::Ui) {
         egui::containers::menu::MenuButton::new("파일").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| self.file_menu_body(ui)));
         egui::containers::menu::MenuButton::new("편집").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true))).ui(ui, |ui| theme::glass_popup(ui, |ui| self.edit_menu_body(ui)));
-        egui::containers::menu::MenuButton::new("보기").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| theme::glass_popup(ui, |ui| {
+        egui::containers::menu::MenuButton::new("설정").config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| theme::glass_popup(ui, |ui| {
             self.view_menu_body(ui);
         }));
     }
@@ -9674,6 +9676,13 @@ impl App {
                     crate::glass::set_shadow(sh);
                     crate::glass::save_settings();
                     theme::apply_visuals(ui.ctx());
+                }
+                // moved here from the tool card (Ash, 10-28)
+                if crate::kit::switch(ui, &mut self.s.touch_draw, "손가락으로 그리기")
+                    .glass_tip("끄면 손가락 한 개는 화면 이동, 두 개는 확대/축소. 펜은 항상 그려.")
+                    .changed()
+                {
+                    self.save_prefs();
                 }
             });
             ui.separator();
@@ -9781,7 +9790,7 @@ impl App {
     /// A section title that folds its section; true while open.
     fn fold_section(ui: &mut egui::Ui, title: &str, folded: &mut bool) -> bool {
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
-        let col = INK();
+        let col = theme::FOLD();
         let c = pos2(r.left() + 4.0, r.center().y);
         let tri = if *folded {
             vec![c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.0, 4.0)]

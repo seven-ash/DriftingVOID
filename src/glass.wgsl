@@ -69,6 +69,31 @@ fn sd(p: vec2f) -> f32 {
     return c + min(max(q.x, q.y), 0.0) - re;
 }
 
+// A quarter-size blur sampled with a cubic B-spline (four bilinear taps)
+// instead of plain bilinear, which shows the low resolution as blocks and
+// diamonds when stretched 4x (Ash, 10-28: "too pixelly").
+fn bspline(t: texture_2d<f32>, uv: vec2f) -> vec4f {
+    let size = vec2f(textureDimensions(t));
+    let st = uv * size - 0.5;
+    let i = floor(st);
+    let f = st - i;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+    let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+    let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+    let w3 = f3 / 6.0;
+    let g0 = w0 + w1;
+    let g1 = w2 + w3;
+    let h0 = (i - 0.5 + w1 / g0) / size;
+    let h1 = (i + 1.5 + w3 / g1) / size;
+    let a = textureSampleLevel(t, smp, vec2f(h0.x, h0.y), 0.0);
+    let b = textureSampleLevel(t, smp, vec2f(h1.x, h0.y), 0.0);
+    let c = textureSampleLevel(t, smp, vec2f(h0.x, h1.y), 0.0);
+    let d = textureSampleLevel(t, smp, vec2f(h1.x, h1.y), 0.0);
+    return g0.y * (g0.x * a + g1.x * b) + g1.y * (g0.x * c + g1.x * d);
+}
+
 fn suv(p: vec2f) -> vec2f {
     return (p - u.map.xy) / u.map.zw;
 }
@@ -109,13 +134,13 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
         gg.g + textureSampleLevel(ta, smp, suv(base), 0.0).g * (1.0 - gg.a),
         gb.b + textureSampleLevel(ta, smp, suv(base - cap), 0.0).b * (1.0 - gb.a),
     );
-    let er = textureSampleLevel(te, smp, (base + cap) / fb, 0.0);
-    let eg = textureSampleLevel(te, smp, base / fb, 0.0);
-    let eb = textureSampleLevel(te, smp, (base - cap) / fb, 0.0);
+    let er = bspline(te, (base + cap) / fb);
+    let eg = bspline(te, base / fb);
+    let eb = bspline(te, (base - cap) / fb);
     let blur = vec3f(
-        er.r + textureSampleLevel(tb, smp, suv(base + cap), 0.0).r * (1.0 - er.a),
-        eg.g + textureSampleLevel(tb, smp, suv(base), 0.0).g * (1.0 - eg.a),
-        eb.b + textureSampleLevel(tb, smp, suv(base - cap), 0.0).b * (1.0 - eb.a),
+        er.r + bspline(tb, suv(base + cap)).r * (1.0 - er.a),
+        eg.g + bspline(tb, suv(base)).g * (1.0 - eg.a),
+        eb.b + bspline(tb, suv(base - cap)).b * (1.0 - eb.a),
     );
     var col = mix(blur, sharp, edge * 0.45);
     col = mix(col, u.tint.rgb, u.tint.a * (1.0 - edge * 0.35));
@@ -124,7 +149,7 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
     // the overlay, lightly blurred: not tinted, refracted or split, and only
     // where no lower card covers it (a lower card shows it in its own glass)
     let cover = textureSampleLevel(td, smp, frag / fb, 0.0).a;
-    let ov = textureSampleLevel(tc, smp, frag / fb, 0.0) * (1.0 - cover);
+    let ov = bspline(tc, frag / fb) * (1.0 - cover);
     col = col * (1.0 - ov.a) + ov.rgb;
     let a = clamp(0.5 - d, 0.0, 1.0);
     if u.q.w > 0.5 {
