@@ -17,6 +17,8 @@ pub struct Dial<'a> {
     default: Option<f32>,
     integer: bool,
     vertical: bool,
+    /// Upright dials: the whole height, the ring taking what the rest leaves.
+    height: Option<f32>,
     key: Option<(KeyMark, &'a mut bool)>,
     nav: Option<(KeyNav, &'a mut i8)>,
     mixed: bool,
@@ -143,7 +145,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
 
 impl<'a> Dial<'a> {
     pub fn new(value: &'a mut f32, range: RangeInclusive<f32>) -> Self {
-        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, key: None, nav: None, mixed: false }
+        Self { value, range, step: None, text: String::new(), suffix: String::new(), default: None, integer: false, vertical: false, height: None, key: None, nav: None, mixed: false }
     }
 
     /// Value per tick. Every tick is worth the same amount so the ring reads like a
@@ -172,6 +174,13 @@ impl<'a> Dial<'a> {
     /// A narrow upright dial: the ring rolls vertically, value and label below.
     pub fn vertical(mut self) -> Self {
         self.vertical = true;
+        self
+    }
+
+    /// An upright dial this tall in all, its ring stretched to fill it, so a
+    /// row of dials matches its neighbours' height (Ash, 10-28).
+    pub fn height(mut self, h: f32) -> Self {
+        self.height = Some(h);
         self
     }
 
@@ -442,7 +451,7 @@ pub fn dial_u8(ui: &mut Ui, v: &mut u8, range: RangeInclusive<u8>, text: &str) -
 
 /// Upright variant: pin, ring (dragging up raises the value), number, label.
 fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
-    let Dial { value, range, step, text, suffix, default, integer, .. } = d;
+    let Dial { value, range, step, text, suffix, default, integer, height, .. } = d;
     let (lo, hi) = (*range.start(), *range.end());
     let span = (hi - lo).max(1e-6);
     let dt = step.unwrap_or_else(|| {
@@ -465,7 +474,8 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
     let before = *value;
     let w = 40.0;
     let ring_w = 24.0;
-    let ring_h = 92.0;
+    // pin 14, number 18, label 13 and three 2 px gaps around the ring
+    let ring_h = height.map_or(92.0, |h| (h - 14.0 - 18.0 - 13.0 - 3.0 * crate::theme::SPACE_2XS).max(60.0));
     let mut out = ui
         .vertical(|ui| {
             ui.spacing_mut().item_spacing.y = crate::theme::SPACE_2XS;

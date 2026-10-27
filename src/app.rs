@@ -9649,7 +9649,7 @@ impl App {
     fn view_menu_body(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_SM;
-            ui.vertical(|ui| {
+            let col_h = ui.vertical(|ui| {
                 // a fixed column: menu rows and the separator fill it, keys at its right
                 ui.set_width(168.0);
                 ui.spacing_mut().item_spacing.y = SPACE_XS;
@@ -9684,7 +9684,7 @@ impl App {
                 {
                     self.save_prefs();
                 }
-            });
+            }).response.rect.height();
             ui.separator();
             if theme_switch(ui, &mut self.s.theme) {
                 self.save_prefs();
@@ -9692,7 +9692,7 @@ impl App {
             ui.separator();
             ui.add_enabled_ui(crate::glass::enabled(), |ui| {
                 let mut k = crate::glass::strength();
-                let r = ui.add(crate::dial::Dial::new(&mut k, 0.0..=4.0).vertical().text("가장자리").default(2.75)).glass_tip("유리 가장자리: 굴절 + 색 번짐 강도 · 0: 평평한 반투명");
+                let r = ui.add(crate::dial::Dial::new(&mut k, 0.0..=4.0).vertical().height(col_h).text("가장자리").default(2.75)).glass_tip("유리 가장자리: 굴절 + 색 번짐 강도 · 0: 평평한 반투명");
                 if r.changed() {
                     crate::glass::set_strength(k);
                 }
@@ -9700,7 +9700,7 @@ impl App {
                     crate::glass::save_settings();
                 }
                 let mut bw = crate::glass::band();
-                let r = ui.add(crate::dial::Dial::new(&mut bw, 1.0..=24.0).vertical().suffix(" pt").text("테두리").default(7.0)).glass_tip("굴절 테두리 폭");
+                let r = ui.add(crate::dial::Dial::new(&mut bw, 1.0..=24.0).vertical().height(col_h).suffix(" pt").text("테두리").default(7.0)).glass_tip("굴절 테두리 폭");
                 if r.changed() {
                     crate::glass::set_band(bw);
                 }
@@ -9708,14 +9708,14 @@ impl App {
                     crate::glass::save_settings();
                 }
             });
-            ui.add(crate::dial::Dial::new(&mut self.s.peek_delay, 0.05..=1.0).vertical().step(0.05).suffix(" s").text("미리보기").default(0.2))
+            ui.add(crate::dial::Dial::new(&mut self.s.peek_delay, 0.05..=1.0).vertical().height(col_h).step(0.05).suffix(" s").text("미리보기").default(0.2))
                 .glass_tip("Tab을 이만큼 누르고 있으면 반대쪽 작업 공간 미리보기");
-            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_radius, theme::RADIUS_RANGE.0..=theme::RADIUS_RANGE.1).vertical().step(1.0).integer().suffix(" pt").text("모서리").default(theme::RADIUS_DEFAULT))
+            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_radius, theme::RADIUS_RANGE.0..=theme::RADIUS_RANGE.1).vertical().height(col_h).step(1.0).integer().suffix(" pt").text("모서리").default(theme::RADIUS_DEFAULT))
                 .glass_tip("패널 모서리 반지름");
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
                 self.save_prefs();
             }
-            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_smooth, 0.0..=1.0).vertical().step(0.05).text("스무딩").default(theme::SMOOTH_DEFAULT))
+            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_smooth, 0.0..=1.0).vertical().height(col_h).step(0.05).text("스무딩").default(theme::SMOOTH_DEFAULT))
                 .glass_tip("모서리가 직선으로 이어지는 부드러움 · 0: 원호");
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
                 self.save_prefs();
@@ -9724,7 +9724,7 @@ impl App {
             // menu under the pointer
             let id = egui::Id::new("ui_scale_drag");
             let mut pct = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(self.s.ui_scale * 100.0);
-            let r = ui.add(crate::dial::Dial::new(&mut pct, UI_SCALE.0 * 100.0..=UI_SCALE.1 * 100.0).vertical().step(5.0).integer().suffix("%").text("UI 크기").default(100.0))
+            let r = ui.add(crate::dial::Dial::new(&mut pct, UI_SCALE.0 * 100.0..=UI_SCALE.1 * 100.0).vertical().height(col_h).step(5.0).integer().suffix("%").text("UI 크기").default(100.0))
                 .glass_tip("화면 글자와 패널 크기 · Ctrl+Alt +/−/0");
             if r.dragged() {
                 ui.data_mut(|d| d.insert_temp(id, pct));
