@@ -50,6 +50,28 @@ const TOOLS: &[(Tool, &str, &str, Key)] = &[
     (Tool::Picker, "스포이드", "I", Key::I),
 ];
 
+/// How to use a tool, shown in its rail tooltip one action per line (Ash,
+/// 10-27: the hints left the tool card, which starts with the settings).
+fn tool_hint(t: Tool) -> &'static str {
+    match t {
+        Tool::Brush => "Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기",
+        Tool::Pen => "획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기",
+        Tool::Eraser => "브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기",
+        Tool::Text => "빈 곳 클릭: 새 글 · 글 클릭: 수정 · Esc: 끝내기",
+        Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => "Shift: 수평·수직·45° / 정사각·정원 · Ctrl+드래그: 굵기 (선택한 도형에도 적용)",
+        Tool::Crop => "사진 선택 → 테두리 손잡이로 자르기 · 안쪽 끌기: 위치 이동 · Enter/Esc: 끝",
+        Tool::Frame => "끌어서 영역 지정 · 손잡이로 조절 · Ctrl+E: 내보내기",
+        Tool::Select => "클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전",
+        Tool::Lasso => "자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽을 끌면 이동",
+        Tool::Hand => "휠: 확대/축소 · 가운데 버튼(펜 버튼)/Space+끌기: 이동 · Shift+가운데 끌기: 확대/축소 · F12: 입력 기록",
+        Tool::Picker => "캔버스에서 색 집기",
+        Tool::Space => "끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점 끌기 · Delete: 선 지우기",
+    }
+}
+
+/// The UI scale's range (Ash, 10-27: 90–150 %).
+const UI_SCALE: (f32, f32) = (0.9, 1.5);
+
 const PALETTE: &[Color32] = &[
     Color32::from_rgb(20, 20, 20),
     Color32::from_rgb(255, 255, 255),
@@ -104,6 +126,8 @@ pub struct Settings {
     /// The scissors' edge: the photo's own measured softness (true) or a
     /// crisp anti-aliased cut on the sub-pixel line.
     pub scissor_soft: bool,
+    /// Size of the whole UI, 0.9–1.5 (Ash, 10-27; 보기 · Ctrl+Alt +/−/0).
+    pub ui_scale: f32,
 }
 
 impl Default for Settings {
@@ -138,6 +162,7 @@ impl Default for Settings {
             mask_refine: 2.0,
             mask_grow: 1.0,
             scissor_soft: false,
+            ui_scale: 1.0,
         }
     }
 }
@@ -1171,6 +1196,9 @@ impl App {
         crate::glass::load_settings();
         cc.egui_ctx.set_fonts(theme::font_defs());
         theme::apply_visuals(&cc.egui_ctx);
+        // the UI scale is the app's own setting (saved, Ctrl+Alt keys); egui's
+        // Ctrl +/−/0 would clash with Ctrl+0 (전체 보기) and not be kept
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let scrub_ch = std::sync::mpsc::channel();
         let audio_ch = std::sync::mpsc::channel();
         let mut app = Self {
@@ -7777,6 +7805,17 @@ impl App {
         if k(cmd, Key::D) {
             self.duplicate_selected();
         }
+        // UI scale: before Ctrl+0, which also matches while Alt is held
+        let ca = Modifiers::COMMAND | Modifiers::ALT;
+        if k(ca, Key::Plus) || k(ca, Key::Equals) {
+            self.set_ui_scale(self.s.ui_scale + 0.1);
+        }
+        if k(ca, Key::Minus) {
+            self.set_ui_scale(self.s.ui_scale - 0.1);
+        }
+        if k(ca, Key::Num0) {
+            self.set_ui_scale(1.0);
+        }
         if k(cmd, Key::Num0) {
             self.fit_view();
         }
@@ -8138,7 +8177,9 @@ impl App {
         };
         theme::tool_icon(p, t, Rect::from_center_size(r.center(), theme::ICON), col);
         let (name, key) = TOOLS.iter().find(|x| x.0 == t).map(|x| (x.1, x.2)).unwrap_or(("", ""));
-        if resp.glass_tip(format!("{name}  ·  {key}")).clicked() {
+        if resp.glass_tip(format!("{name}  ·  {key}
+{}", tool_hint(t).replace(" · ", "
+"))).clicked() {
             self.set_tool(t);
         }
     }
@@ -8252,20 +8293,17 @@ impl App {
                 ui.checkbox(&mut s.brush_pressure_size, "필압 → 크기");
                 ui.checkbox(&mut s.brush_pressure_opacity, "필압 → 농도");
                 ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정").default(d_sm));
-                ui.small("Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기");
             }
             Tool::Pen => {
                 ui.strong("펜 (벡터)");
                 ui.add(crate::dial::Dial::new(&mut s.pen_size, 0.5..=100.0).step(0.5).text("굵기"));
                 ui.checkbox(&mut s.pen_pressure, "필압 → 굵기");
                 ui.add(crate::dial::Dial::new(&mut s.smoothing, 0.0..=0.9).text("손떨림 보정"));
-                ui.small("획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기");
             }
             Tool::Eraser => {
                 ui.strong("지우개");
                 ui.add(crate::dial::Dial::new(&mut s.eraser_size, 2.0..=400.0).step(2.0).text("크기"));
                 ui.checkbox(&mut s.eraser_pressure, "필압 → 크기");
-                ui.small("브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기");
             }
             Tool::Text => {
                 ui.strong("글자");
@@ -8306,7 +8344,6 @@ impl App {
                         color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
                     });
                 }
-                ui.small("빈 곳 클릭: 새 글 · 글 클릭: 수정 · Esc: 끝내기");
             }
             Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => {
                 ui.strong("도형");
@@ -8338,15 +8375,12 @@ impl App {
                         });
                     }
                 }
-                ui.small("Shift: 수평·수직·45° / 정사각·정원 · Ctrl+드래그: 굵기 (선택한 도형에도 적용)");
             }
             Tool::Crop => {
                 ui.strong("사진 자르기");
-                ui.small("사진 선택 → 테두리 손잡이로 자르기 · 안쪽 끌기: 위치 이동 · Enter/Esc: 끝");
             }
             Tool::Frame => {
                 ui.strong("내보낼 영역");
-                ui.small("끌어서 영역 지정 · 손잡이로 조절 · Ctrl+E: 내보내기");
                 if let Some(mut r) = self.doc.export_frame {
                     if rect_fields(ui, &mut r, "frame", None, &mut false) {
                         self.doc.export_frame = Some(r);
@@ -8375,19 +8409,15 @@ impl App {
             Tool::Space => self.space_panel(ui),
             Tool::Select => {
                 ui.strong("선택");
-                ui.small("클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전");
             }
             Tool::Lasso => {
                 ui.strong("올가미 선택");
-                ui.small("자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽을 끌면 이동");
             }
             Tool::Hand => {
                 ui.strong("화면 이동");
-                ui.small("휠: 확대/축소 · 가운데 버튼(펜 버튼)/Space+끌기: 이동 · Shift+가운데 끌기: 확대/축소 · F12: 입력 기록");
             }
             Tool::Picker => {
                 ui.strong("스포이드");
-                ui.small("캔버스에서 색 집기");
             }
         }
         if layer_changed {
@@ -9542,6 +9572,16 @@ impl App {
         }));
     }
 
+    /// Sets the UI scale (clamped, in 5 % steps) and keeps it.
+    fn set_ui_scale(&mut self, v: f32) {
+        let v = ((v * 20.0).round() / 20.0).clamp(UI_SCALE.0, UI_SCALE.1);
+        if (v - self.s.ui_scale).abs() > 1e-3 {
+            self.s.ui_scale = v;
+            self.save_prefs();
+        }
+        self.status = format!("UI 크기 {:.0}% · Ctrl+Alt+0: 100%", v * 100.0);
+    }
+
     fn view_menu_body(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_SM;
@@ -9598,6 +9638,20 @@ impl App {
             });
             ui.add(crate::dial::Dial::new(&mut self.s.peek_delay, 0.05..=1.0).vertical().step(0.05).suffix(" s").text("미리보기").default(0.2))
                 .glass_tip("Tab을 이만큼 누르고 있으면 반대쪽 작업 공간 미리보기");
+            // applied when the drag ends: scaling while dragging would move the
+            // menu under the pointer
+            let id = egui::Id::new("ui_scale_drag");
+            let mut pct = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(self.s.ui_scale * 100.0);
+            let r = ui.add(crate::dial::Dial::new(&mut pct, UI_SCALE.0 * 100.0..=UI_SCALE.1 * 100.0).vertical().step(5.0).integer().suffix("%").text("UI 크기").default(100.0))
+                .glass_tip("화면 글자와 패널 크기 · Ctrl+Alt +/−/0");
+            if r.dragged() {
+                ui.data_mut(|d| d.insert_temp(id, pct));
+            } else {
+                ui.data_mut(|d| d.remove::<f32>(id));
+                if r.changed() || r.drag_stopped() {
+                    self.set_ui_scale(pct / 100.0);
+                }
+            }
         });
     }
 
@@ -9673,7 +9727,7 @@ impl App {
     }
 
     /// Right side, from the edge inwards: layers, the tool's main properties (with
-    /// the selection), and a secondary column only where a tool needs one (cameras).
+    /// the selection; the region tool's cameras fold in under it).
     fn inspector(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let gap = 10.0;
@@ -9706,7 +9760,8 @@ impl App {
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
             .show(ctx, |ui| {
-                let all_folded = self.s.folded[0] && self.s.folded[1];
+                let cams = self.tool == Tool::Frame;
+                let all_folded = self.s.folded[0] && self.s.folded[1] && (!cams || self.s.folded[2]);
                 // the top stays at the folded spacing, so the title never moves
                 let m = egui::Margin { top: (pad * 0.5) as i8, bottom: if all_folded { (pad * 0.5) as i8 } else { pad as i8 }, ..egui::Margin::same(pad as i8) };
                 theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
@@ -9722,30 +9777,18 @@ impl App {
                             if Self::fold_section(ui, "선택한 항목", &mut self.s.folded[1]) {
                                 self.properties(ui);
                             }
+                            // the region tool's cameras fold in here, so the
+                            // number of columns never changes (Ash, 10-27)
+                            if cams {
+                                ui.add_space(SPACE_MD);
+                                self.cameras_panel(ui);
+                            }
                         });
                     });
                     self.col_h[0] = out.content_size.y;
                 });
             });
         x += card(main_w) + gap;
-        if self.tool == Tool::Frame {
-            let side_w = crate::dial::ROW_W;
-            egui::Area::new(egui::Id::new("inspector2"))
-                .order(egui::Order::Middle)
-                .anchor(Align2::RIGHT_TOP, vec2(-x, SPACE_LG))
-                .show(ctx, |ui| {
-                    let m = egui::Margin { top: (pad * 0.5) as i8, bottom: if self.s.folded[2] { (pad * 0.5) as i8 } else { pad as i8 }, ..egui::Margin::same(pad as i8) };
-                    theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
-                        ui.set_width(side_w);
-                        let want = self.col_h[1].min(max_h);
-                        let out = egui::ScrollArea::vertical().id_salt("props2").max_height(max_h).min_scrolled_height(want).show(ui, |ui| {
-                            fixed_width(ui, |ui| self.cameras_panel(ui));
-                        });
-                        self.col_h[1] = out.content_size.y;
-                    });
-                });
-            x += card(side_w) + gap;
-        }
         self.right_reserve = x;
     }
 
@@ -10435,7 +10478,6 @@ impl App {
     fn space_panel(&mut self, ui: &mut egui::Ui) {
         use crate::persp::{AXIS_COLORS, AXIS_NAMES};
         ui.strong("3D 공간");
-        ui.small("끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점 끌기 · Delete: 선 지우기");
         let mut pick = None;
         let mut new = false;
         ui.horizontal_wrapped(|ui| {
@@ -12272,6 +12314,16 @@ impl eframe::App for App {
             if self.now < 3.0 {
                 ctx.request_repaint();
             }
+        }
+        // DV_UI_SCALE=1.25: start at that UI scale (captures; not saved)
+        if ctx.cumulative_pass_nr() == 0 {
+            if let Some(v) = std::env::var("DV_UI_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+                self.s.ui_scale = v;
+            }
+        }
+        let z = self.s.ui_scale.clamp(UI_SCALE.0, UI_SCALE.1);
+        if (ctx.zoom_factor() - z).abs() > 1e-3 {
+            ctx.set_zoom_factor(z);
         }
         if std::env::var("DV_KIT").is_ok_and(|v| v == "1") {
             crate::kit::demo(&ctx);

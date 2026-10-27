@@ -41,6 +41,7 @@ Where development stands and what is open: `docs/STATE.md`.
 | Dials | Drag the tick ring (Shift: fine, wheel: one step); ↺ resets to the default |
 | Tab | Tap: switch 2D ↔ 3D workspace (needs a solvable 3D space). Hold: peek at the other one |
 | Ctrl+H | Hide/show the UI |
+| Ctrl+Alt +/−/0 | UI scale (90–150 %, also in 보기) |
 | F12 | Input log (pen flags, mouse/touch events) |
 
 Tools: V select, Q lasso, H pan, B brush (raster), P pen (vector), E eraser, T text,
