@@ -58,17 +58,19 @@ pub const SPACE_LG: f32 = 16.0;
 pub const ROW_H: f32 = 26.0;
 /// Width of a property column and of its rows.
 pub const COL_W: f32 = 280.0;
-// Corner radii (Ash, 10-27: strict concentric shapes). The card radius is the
-// one number: what sits in a card takes the card radius minus the padding
-// between them (`inner`). Free-standing glass (menus, tooltips, the status
-// pill) takes the card radius too. DV_RADIUS=a|b tries the two options being
-// compared: A cards 20 (controls 8 inside 12 of padding), B cards 25 with
-// capsule controls; without it, the radii as before (14, 8).
+// Corner radii (Ash, 10-27): every glass surface (cards, menus, tooltips,
+// the status pill) has the card radius, 20; controls are capsules, like the
+// sliders. Shapes nested in a card's corner region take the card radius minus
+// the padding between them (`inner`): rail buttons and the tool fill, menu
+// rows. A capsule is rounder than that, which only widens the gap at a
+// corner. DV_RADIUS=old|a|b shows the earlier options (14/8; 20/8; 25 with
+// capsules) for comparison.
 fn radius_option() -> u8 {
     static O: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *O.get_or_init(|| match std::env::var("DV_RADIUS").as_deref() {
-        Ok("a") => 1,
-        Ok("b") => 2,
+        Ok("old") => 1,
+        Ok("a") => 2,
+        Ok("b") => 3,
         _ => 0,
     })
 }
@@ -76,19 +78,17 @@ fn radius_option() -> u8 {
 /// The outer radius of every glass surface.
 pub fn radius_card() -> u8 {
     match radius_option() {
-        1 => 20,
-        2 => 25,
-        _ => 14,
+        1 => 14,
+        3 => 25,
+        _ => 20,
     }
 }
 
-/// A control's radius inside a card (12 of padding): concentric with it.
+/// A control's radius: a capsule (half the row).
 pub fn radius_ctrl() -> u8 {
     match radius_option() {
-        0 => 8,
-        // B: capsules, half the row
-        2 => (ROW_H * 0.5) as u8,
-        _ => inner(radius_card(), SPACE_MD),
+        1 | 2 => 8,
+        _ => (ROW_H * 0.5) as u8,
     }
 }
 
