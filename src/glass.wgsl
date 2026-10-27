@@ -82,19 +82,19 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
     let frag = in.pos.xy;
     let ppp = u.q.z;
     let p = frag - u.panel.xy;
-    let d = sd(p);
-    var o: vec4f;
-    if d > 0.0 {
-        if u.q.y < 0.5 {
-            return vec4f(0.0);
-        }
-        // the shadow falls a little below the card
+    let g = vec2f(sd(p + vec2f(1.0, 0.0)) - sd(p - vec2f(1.0, 0.0)), sd(p + vec2f(0.0, 1.0)) - sd(p - vec2f(0.0, 1.0)));
+    // in pixels across the edge: the smoothed corner is no exact distance
+    let d = sd(p) / max(length(g) * 0.5, 0.25);
+    // the shadow falls a little below the card, under its antialiased edge
+    var sh = 0.0;
+    if u.q.y > 0.5 {
         let ds = sd(p - vec2f(0.0, 6.0 * ppp));
         let t = clamp(1.0 - ds / u.q.x, 0.0, 1.0);
-        let a = 0.38 * t * t * clamp(d + 0.5, 0.0, 1.0);
-        return vec4f(0.0, 0.0, 0.0, a);
+        sh = 0.38 * t * t * clamp(d + 0.5, 0.0, 1.0);
     }
-    let g = vec2f(sd(p + vec2f(1.0, 0.0)) - sd(p - vec2f(1.0, 0.0)), sd(p + vec2f(0.0, 1.0)) - sd(p - vec2f(0.0, 1.0)));
+    if d >= 0.5 {
+        return vec4f(0.0, 0.0, 0.0, sh);
+    }
     let n = g / max(length(g), 1e-4);
     let edge = clamp(1.0 + d / u.p.y, 0.0, 1.0);
     let base = frag - n * edge * edge * u.p.z;
@@ -130,5 +130,5 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
     if u.q.w > 0.5 {
         col = to_lin(col);
     }
-    return vec4f(col * a, a);
+    return vec4f(col * a, a + sh * (1.0 - a));
 }

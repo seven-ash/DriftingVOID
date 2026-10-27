@@ -77,6 +77,11 @@ fn radius_option() -> u8 {
 
 /// The outer radius of every glass surface.
 pub fn radius_card() -> u8 {
+    // DV_RADIUS=n tries a card radius (with capsule controls)
+    static N: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
+    if let Some(n) = *N.get_or_init(|| std::env::var("DV_RADIUS").ok().and_then(|v| v.parse::<u8>().ok())) {
+        return n.clamp(4, 40);
+    }
     match radius_option() {
         1 => 14,
         3 => 25,
