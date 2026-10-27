@@ -521,7 +521,7 @@ impl CallbackTrait for Card {
             p: [self.look.radius * ppp, crate::glass::band() * ppp, self.look.refract * ppp * k, self.look.dispersion * ppp * k],
             q: [SHADOW * ppp, if crate::glass::shadow() && !res.in_grab { 1.0 } else { 0.0 }, ppp, if res.srgb { 1.0 } else { 0.0 }],
             map,
-            dir: [sd.size_in_pixels[0] as f32, sd.size_in_pixels[1] as f32, 0.0, 0.0],
+            dir: [sd.size_in_pixels[0] as f32, sd.size_in_pixels[1] as f32, crate::theme::corner_smoothing(), 0.0],
         };
         let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
         let qv = quarter.create_view(&Default::default());

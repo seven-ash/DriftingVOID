@@ -84,6 +84,14 @@ pub fn radius_card() -> u8 {
     }
 }
 
+/// Corner smoothing of the glass (0 = circular arcs, 0.6 = the iOS squircle),
+/// glass only: egui's own fills stay circular. DV_CORNER_SMOOTH=x compares;
+/// Ash decides from captures.
+pub fn corner_smoothing() -> f32 {
+    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("DV_CORNER_SMOOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0f32).clamp(0.0, 1.0))
+}
+
 /// A control's radius: a capsule (half the row).
 pub fn radius_ctrl() -> u8 {
     match radius_option() {

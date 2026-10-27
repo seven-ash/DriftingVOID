@@ -11,7 +11,7 @@ struct U {
     p: vec4f,     // radius, rim band, refraction, dispersion (pixels)
     q: vec4f,     // shadow reach, shadow on, pixels per point, sRGB target
     map: vec4f,   // backdrop texture origin x, y (framebuffer px), its size w, h
-    dir: vec4f,   // blur: direction (texels); card: framebuffer size
+    dir: vec4f,   // blur: direction (texels); card: framebuffer size, corner smoothing
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -57,8 +57,16 @@ fn sd(p: vec2f) -> f32 {
     let b = u.panel.zw;
     // a radius past half the short side is a capsule
     let r = min(u.p.x, min(b.x, b.y));
-    let q = abs(p) - b + r;
-    return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    // corner smoothing (Figma's, roughly): the corner starts further along
+    // the side, as a superellipse that eases into the straight edge; room
+    // past half the short side is not there, so a capsule stays round
+    let re = min(r * (1.0 + u.dir.z), min(b.x, b.y));
+    let s = select(0.0, re / r - 1.0, r > 0.0);
+    let k = 2.0 + 2.5 * s;
+    let q = abs(p) - b + re;
+    let m = max(q, vec2f(1e-6)) / max(re, 1e-3);
+    let c = select(length(m), pow(pow(m.x, k) + pow(m.y, k), 1.0 / k), s > 0.001) * max(re, 1e-3);
+    return c + min(max(q.x, q.y), 0.0) - re;
 }
 
 fn suv(p: vec2f) -> vec2f {
