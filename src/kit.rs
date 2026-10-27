@@ -175,7 +175,7 @@ pub fn menu_row(ui: &mut Ui, text: &str, key: &str) -> Response {
     let ink = if enabled { INK() } else { INK_2() };
     p.text(pos2(r.left() + SPACE_SM, r.center().y), Align2::LEFT_CENTER, text, font, ink);
     if !key.is_empty() {
-        p.text(pos2(r.right() - SPACE_SM, r.center().y), Align2::RIGHT_CENTER, key, FontId::proportional(theme::TEXT_SMALL), INK_2());
+        p.text(pos2(r.right() - SPACE_SM, r.center().y), Align2::RIGHT_CENTER, key, FontId::proportional(theme::TEXT_SMALL), theme::LABEL());
     }
     focus_ring(ui, &resp, r, theme::RADIUS_CTRL as f32);
     resp
@@ -211,7 +211,7 @@ pub fn demo(ctx: &egui::Context) {
             ui.set_width(theme::COL_W);
             let head = |ui: &mut Ui, t: &str| {
                 ui.add_space(SPACE_SM);
-                ui.label(egui::RichText::new(t).font(FontId::new(theme::TEXT_LABEL, theme::ui_bold())).color(INK_2()));
+                ui.label(theme::section_title(t));
             };
             head(ui, "스위치");
             switch(ui, &mut s.sw[0], "꺼짐");

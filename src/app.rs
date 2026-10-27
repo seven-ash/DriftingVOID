@@ -3624,7 +3624,7 @@ impl App {
             }
             let tl = &self.doc.timeline;
             ui.label(egui::RichText::new(format!("{} / {}", crate::video::timecode(tl.time), crate::video::timecode(tl.duration))).monospace());
-            ui.label(egui::RichText::new(format!("{}f", (tl.time * tl.fps).round() as i64)).monospace().color(INK_3()));
+            ui.label(egui::RichText::new(format!("{}f", (tl.time * tl.fps).round() as i64)).monospace().color(theme::LABEL()));
             ui.separator();
             let tl = &mut self.doc.timeline;
             ui.label("fps");
@@ -3632,7 +3632,7 @@ impl App {
             ui.label("길이");
             changed |= ui.add(crate::calc::drag(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
             changed |= ui.checkbox(&mut tl.autokey, "자동 키").glass_tip("선택 레이어 변경 시 자동으로 키").changed();
-            let rec_label = egui::RichText::new("● 녹화").color(if self.rec_on { Color32::from_rgb(255, 90, 90) } else { INK_3() });
+            let rec_label = egui::RichText::new("● 녹화").color(if self.rec_on { Color32::from_rgb(255, 90, 90) } else { theme::LABEL() });
             if ui
                 .selectable_label(self.rec_on, rec_label)
                 .glass_tip("재생 헤드부터 그리는 과정 기록 · 끝나면 재생 헤드가 획 끝으로")
@@ -3665,7 +3665,7 @@ impl App {
                     ui.horizontal(|ui| {
                         let n = self.tl_sel.len().max(1);
                         let what = if n > 1 { format!("선택한 키 {n}개") } else { format!("선택한 키 {}", crate::video::timecode(kt)) };
-                        ui.label(egui::RichText::new(what).color(INK_2()));
+                        ui.label(egui::RichText::new(what).color(theme::LABEL()));
                         ui.label("다음 키까지");
                         for o in crate::anim::Ease::ALL {
                             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
@@ -3755,7 +3755,7 @@ impl App {
             let x = x_of(t);
             p.line_segment([pos2(x, rect.top() + 12.0), pos2(x, rect.top() + ruler_h)], Stroke::new(1.0, INK_3()));
             let label = if step < 1.0 { format!("{t:.1}") } else { format!("{}", t.round() as i64) };
-            p.text(pos2(x + 3.0, rect.top() + 1.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), INK_3());
+            p.text(pos2(x + 3.0, rect.top() + 1.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), theme::LABEL());
             t += step;
         }
         // rows
@@ -3789,7 +3789,7 @@ impl App {
             } else if video.is_some() {
                 VIDEO_COLOR
             } else {
-                INK_2()
+                theme::LABEL()
             };
             let g = p.layout_job(elided(name.to_string(), FontId::proportional(theme::TEXT_SMALL + 0.5), col, label_w - 14.0));
             p.galley(pos2(rr.left() + 6.0, rr.center().y - g.size().y * 0.5), g, col);
@@ -3811,7 +3811,7 @@ impl App {
                         x += 2.0;
                     }
                 } else if !a.path.is_empty() {
-                    p.text(bar.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "불러오는 중…", FontId::proportional(10.0), INK_3());
+                    p.text(bar.left_center() + vec2(4.0, 0.0), Align2::LEFT_CENTER, "불러오는 중…", FontId::proportional(10.0), theme::LABEL());
                 }
                 if selected {
                     p.rect_stroke(bar, 3.0, Stroke::new(1.2, AUDIO_COLOR), StrokeKind::Inside);
@@ -3914,7 +3914,7 @@ impl App {
             }
         }
         if rows.len() > shown {
-            p.text(pos2(rect.left() + 6.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("+{}개 더", rows.len() - shown), FontId::proportional(10.0), INK_3());
+            p.text(pos2(rect.left() + 6.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("+{}개 더", rows.len() - shown), FontId::proportional(10.0), theme::LABEL());
         }
         // playhead
         let px = x_of(tl.time);
@@ -4504,7 +4504,7 @@ impl App {
                         return;
                     }
                     ui.add_space(SPACE_SM);
-                    ui.label("영역");
+                    ui.label(theme::group_label("영역"));
                     ui.horizontal_wrapped(|ui| {
                         for c in &self.doc.cameras {
                             ui.radio_value(&mut d.region, ExportRegion::Camera(c.id), egui::RichText::new(&c.name).color(CAM_COLOR));
@@ -4546,7 +4546,7 @@ impl App {
                         Some((_, r)) => crate::vexport::size_for(r.width() / r.height().max(1.0), d.by_width, d.n, d.codec.even()),
                         None => (0, 0),
                     };
-                    ui.label(egui::RichText::new(if w > 0 { format!("→ {w} × {h} px (영역 비율)") } else { "영역 없음".into() }).color(INK_2()));
+                    ui.label(egui::RichText::new(if w > 0 { format!("→ {w} × {h} px (영역 비율)") } else { "영역 없음".into() }).color(theme::LABEL()));
                     ui.horizontal(|ui| {
                         ui.label("fps");
                         ui.add(crate::calc::drag(&mut d.fps).range(1.0..=240.0).speed(0.1).max_decimals(3));
@@ -6278,7 +6278,7 @@ impl App {
             crate::view3d::draw(&clip, ctx, &self.doc, &view, &proj, &cam, &mut self.tex, self.sel, false, &mut gpu);
         }
         p.rect_stroke(pr, 12.0, Stroke::new(1.5, INK_3()), StrokeKind::Outside);
-        p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), INK_2());
+        p.text(pr.left_top() + vec2(16.0, 14.0), Align2::LEFT_TOP, if self.ws3d { "2D 미리보기" } else { "3D 미리보기" }, FontId::proportional(13.0), theme::LABEL());
         ctx.request_repaint();
     }
 
@@ -7986,7 +7986,7 @@ impl App {
                 });
             });
             ui.add_space(SPACE_SM);
-            ui.label("영역");
+            ui.label(theme::group_label("영역"));
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(self.doc.export_frame.is_some(), |ui| {
                     ui.radio_value(&mut d.region, ExportRegion::Frame, "내보낼 영역 (F)");
@@ -8417,7 +8417,7 @@ impl App {
             return;
         };
         if !self.extra_sel.is_empty() {
-            ui.label(egui::RichText::new(format!("{}개 선택 · 다른 값: — · 모두에 적용", self.extra_sel.len() + 1)).color(INK_3()));
+            ui.label(egui::RichText::new(format!("{}개 선택 · 다른 값: — · 모두에 적용", self.extra_sel.len() + 1)).color(theme::LABEL()));
         }
         if let Some(owner) = self.doc.get(id).and_then(|l| l.mask_of) {
             self.mask_props(ui, id, owner);
@@ -8513,11 +8513,11 @@ impl App {
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_XS;
                     crate::dial::label_cell_nav(ui, "위치", km(ch::POS), &mut kh[0], Some((kn(ch::POS), &mut kv[0])));
-                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
+                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(theme::LABEL())));
                     ui.spacing_mut().interact_size.x = 56.0;
                     let m = mxc(ch::POS);
                     mv |= ui.add(pos_box(&mut x, m)).changed();
-                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("Y").color(INK_3())));
+                    ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("Y").color(theme::LABEL())));
                     mv |= ui.add(pos_box(&mut y, m)).changed();
                 });
                 if mv {
@@ -8532,12 +8532,12 @@ impl App {
                     changed |= ui.add(crate::dial::Dial::new(&mut a.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).nav(kn(ch::VOL), &mut kv[9]).mixed(mxc(ch::VOL))).changed();
                     changed |= ui.checkbox(&mut a.mute, "소리 끔").changed();
                     if let Some([s0, e0]) = span {
-                        ui.small(egui::RichText::new(format!("{} ~ {} · 원본 {}", crate::video::timecode(s0), crate::video::timecode(e0), crate::video::timecode(a.len))).monospace().color(INK_3()));
+                        ui.small(egui::RichText::new(format!("{} ~ {} · 원본 {}", crate::video::timecode(s0), crate::video::timecode(e0), crate::video::timecode(a.len))).monospace().color(theme::LABEL()));
                     }
                     let file = std::path::Path::new(&a.path).file_name().map_or(a.path.clone(), |f| f.to_string_lossy().to_string());
                     let w = ui.available_width();
                     ui.label(elide(ui, file, w)).glass_tip(&a.path);
-                    ui.small(egui::RichText::new("타임라인: 막대 끌기로 이동 · 양 끝으로 자르기").color(INK_3()));
+                    ui.small(egui::RichText::new("타임라인: 막대 끌기로 이동 · 양 끝으로 자르기").color(theme::LABEL()));
                 }
                 LayerKind::Image(im) => {
                     if let Some(v) = &mut im.video {
@@ -8596,7 +8596,7 @@ impl App {
                         }
                         ui.separator();
                     }
-                    ui.label(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height()));
+                    ui.label(theme::info(format!("원본 {}×{} px · 잘린 크기 {:.0}×{:.0}", im.src.size().x, im.src.size().y, im.crop.width(), im.crop.height())));
                     let mut pct = im.scale * 100.0;
                     if ui.add(crate::dial::Dial::new(&mut pct, 1.0..=400.0).step(2.0).text("크기 %").default(100.0).key(km(ch::SIZE), &mut kh[1]).nav(kn(ch::SIZE), &mut kv[1]).mixed(mxc(ch::SIZE))).changed() {
                         im.scale = pct / 100.0;
@@ -8629,7 +8629,7 @@ impl App {
                             changed = true;
                         }
                     });
-                    ui.label("보정");
+                    ui.label(theme::group_label("보정"));
                     let a = &mut im.adjust;
                     changed |= ui.add(crate::dial::Dial::new(&mut a.brightness, -1.0..=1.0).text("밝기").default(0.0).mixed(mx_adj[0])).changed();
                     changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text("대비").default(0.0).mixed(mx_adj[1])).changed();
@@ -9040,7 +9040,7 @@ impl App {
     fn mask_props(&mut self, ui: &mut egui::Ui, id: LayerId, owner: LayerId) {
         let names: Vec<(LayerId, String)> = self.doc.layers.iter().rev().filter(|l| l.mask_of.is_none()).map(|l| (l.id, l.display_name())).collect();
         let owner_name = names.iter().find(|n| n.0 == owner).map_or(String::new(), |n| n.1.clone());
-        ui.label(egui::RichText::new(format!("마스크 · {owner_name}")).color(INK_2()));
+        ui.label(theme::group_label(format!("마스크 · {owner_name}")));
         let inv = self.doc.get(id).is_some_and(|l| l.mask_invert);
         ui.small(if inv { "칠한 곳만 보임 · 지우개: 가리기" } else { "칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)" });
         // strength (the mask layer's opacity, keyable) and invert
@@ -9150,7 +9150,7 @@ impl App {
         });
         ui.add_space(SPACE_SM);
         if self.doc.layers.is_empty() {
-            ui.label(egui::RichText::new("비어 있음").color(INK_3()));
+            ui.label(egui::RichText::new("비어 있음").color(theme::LABEL()));
             return;
         }
         let mut changed = false;
@@ -9344,7 +9344,7 @@ impl App {
                 }
             } else {
                 let clip = p.with_clip_rect(name_r.intersect(ui.clip_rect()));
-                let col = (if selected { INK() } else { INK_2() }).gamma_multiply(dim);
+                let col = (if selected { INK() } else { theme::LABEL() }).gamma_multiply(dim);
                 let g = clip.layout_job(elided(l.display_name(), FontId::proportional(theme::TEXT_BODY), col, name_r.width()));
                 clip.galley(pos2(name_r.left(), r.center().y - g.size().y * 0.5), g, col);
             }
@@ -9627,7 +9627,7 @@ impl App {
                         }
                         if let Some(w) = self.cursor_world {
                             ui.add_space(SPACE_SM);
-                            ui.label(egui::RichText::new(format!("{:.0}, {:.0}", w.x, w.y)).monospace().color(INK_3()));
+                            ui.label(egui::RichText::new(format!("{:.0}, {:.0}", w.x, w.y)).monospace().color(theme::LABEL()));
                         }
                         let pen = crate::penhook::state();
                         if pen.in_range && (pen.barrel || pen.eraser) {
@@ -9638,7 +9638,7 @@ impl App {
                         }
                         if !self.status.is_empty() {
                             ui.add_space(SPACE_SM);
-                            ui.label(egui::RichText::new(&self.status).color(INK_2()));
+                            ui.label(egui::RichText::new(&self.status).color(theme::LABEL()));
                         }
                     });
                 });
@@ -9647,21 +9647,21 @@ impl App {
 
     fn section(ui: &mut egui::Ui, title: &str) {
         ui.add_space(SPACE_SM);
-        ui.label(egui::RichText::new(title).font(FontId::new(theme::TEXT_LABEL, theme::ui_bold())).color(INK_3()));
+        ui.label(theme::section_title(title));
         ui.add_space(SPACE_XS);
     }
 
     /// A section title that folds its section; true while open.
     fn fold_section(ui: &mut egui::Ui, title: &str, folded: &mut bool) -> bool {
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::click());
-        let col = if resp.hovered() { INK_2() } else { INK_3() };
+        let col = INK();
         let c = pos2(r.left() + 4.0, r.center().y);
         let tri = if *folded {
             vec![c + vec2(-2.0, -4.0), c + vec2(3.0, 0.0), c + vec2(-2.0, 4.0)]
         } else {
             vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)]
         };
-        ui.painter().add(Shape::convex_polygon(tri, col, Stroke::NONE));
+        ui.painter().add(Shape::convex_polygon(tri, if resp.hovered() { ACCENT } else { col }, Stroke::NONE));
         ui.painter().text(pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, title, FontId::new(theme::TEXT_LABEL, theme::ui_bold()), col);
         if resp.clicked() {
             *folded = !*folded;
@@ -9933,10 +9933,10 @@ impl App {
                         swatch(ui, cur, 22.0, true);
                         let [r, g, b, _] = cur.to_array();
                         ui.add_space(SPACE_SM);
-                        ui.label(egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).monospace().color(INK_2()));
+                        ui.label(egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).monospace().color(theme::LABEL()));
                     });
                     let mut near = show_near;
-                    if ui.checkbox(&mut near, egui::RichText::new("비슷한 색 지도").size(theme::TEXT_SMALL).color(INK_2())).changed() {
+                    if ui.checkbox(&mut near, egui::RichText::new("비슷한 색 지도").size(theme::TEXT_SMALL).color(theme::LABEL())).changed() {
                         crate::glass::set_palette_near(near);
                         crate::glass::save_settings();
                     }
@@ -9965,7 +9965,7 @@ impl App {
                 }
                 for (title, view, which, tip) in maps {
                     theme::glass(ui, egui::Margin::same(10), theme::RADIUS_CARD, |ui| ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(INK_3())).glass_tip(tip);
+                        ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(theme::LABEL())).glass_tip(tip);
                         let side = SQ + 30.0;
                         let (r, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
                         ui.painter().image(view.tex.id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
@@ -10399,7 +10399,7 @@ impl App {
                 Align2::CENTER_CENTER,
                 "사진을 끌어다 놓거나 Ctrl+V로 붙여넣기",
                 FontId::new(18.0, theme::ui_bold()),
-                INK_3(),
+                INK_2(),
             );
         }
         let _ = resp;
@@ -10535,7 +10535,7 @@ impl App {
                         }
                     }
                     Some(None) => {
-                        ui.small(egui::RichText::new("기준선이 지평선 위: 측정 불가").color(INK_3()));
+                        ui.small(egui::RichText::new("기준선이 지평선 위: 측정 불가").color(theme::LABEL()));
                     }
                     None => {}
                 }
@@ -10551,7 +10551,7 @@ impl App {
                     if tape.is_some() {
                         match tape_m {
                             Some(m) => ui.label(format!("{m:.2} m")),
-                            None => ui.label(egui::RichText::new("기준 길이 필요").color(INK_3())),
+                            None => ui.label(egui::RichText::new("기준 길이 필요").color(theme::LABEL())),
                         };
                         if ui.small_button("지우기").clicked() {
                             tape_clear = true;
@@ -10572,7 +10572,7 @@ impl App {
                 }
             }
             Err(e) => {
-                ui.small(egui::RichText::new(e).color(INK_2()));
+                ui.small(egui::RichText::new(e).color(theme::LABEL()));
             }
         }
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
@@ -11623,9 +11623,9 @@ fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width
     } else {
         theme::tool_icon(p, Tool::Space, ir, INK_2());
     }
-    p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_BODY), INK_2());
+    p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_BODY), theme::LABEL());
     let info = if solved { format!("{count}") } else { "선 부족".to_string() };
-    p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, info, FontId::proportional(theme::TEXT_SMALL), INK_3());
+    p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, info, FontId::proportional(theme::TEXT_SMALL), theme::LABEL());
     resp.glass_tip(if wall { "벽 폴더 · 레이어를 놓으면 벽에 붙음" } else { "공간 폴더 · 레이어를 놓으면 공간에 넣음" })
 }
 
@@ -12360,7 +12360,7 @@ impl eframe::App for App {
                 .show(&ctx, |ui| {
                     theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::RADIUS_CARD, |ui| {
                         ui.set_width(330.0);
-                        ui.label(egui::RichText::new("입력 기록 · F12로 닫기").font(FontId::new(theme::TEXT_LABEL, theme::ui_bold())).color(INK_3()));
+                        ui.label(theme::section_title("입력 기록 · F12로 닫기"));
                         let pen = crate::penhook::state();
                         ui.label(
                             egui::RichText::new(format!(
@@ -12368,10 +12368,10 @@ impl eframe::App for App {
                                 pen.in_range, pen.barrel, pen.eraser, pen.raw_pen, pen.raw_pointer
                             ))
                             .monospace()
-                            .color(INK_2()),
+                            .color(theme::LABEL()),
                         );
                         for line in &self.input_log {
-                            ui.label(egui::RichText::new(line).monospace().color(INK_2()));
+                            ui.label(egui::RichText::new(line).monospace().color(theme::LABEL()));
                         }
                     });
                 });

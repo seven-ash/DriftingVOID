@@ -99,7 +99,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
     let keyed = mark.is_some_and(|m| m != KeyMark::None);
     let nav = nav.filter(|_| keyed);
     let text_r = egui::Rect::from_min_max(lr.min, egui::pos2((lr.right() - SLOT_W).max(lr.left()), lr.bottom()));
-    ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
+    ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, crate::theme::field_font(), crate::theme::LABEL());
     if let Some(mark) = mark {
         let kr = egui::Rect::from_center_size(egui::pos2(lr.right() - NAV_W - KEY_W * 0.5, lr.center().y), vec2(KEY_W, lr.height()));
         let kresp = ui.interact(kr, lresp.id.with("key"), Sense::click());
@@ -549,7 +549,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
             }
             let vr = ui.add_sized(vec2(w, 18.0), dv);
             let (lr, _) = ui.allocate_exact_size(vec2(w, 13.0), Sense::hover());
-            ui.painter().with_clip_rect(lr.expand2(vec2(6.0, 0.0))).text(lr.center(), Align2::CENTER_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL - 0.5), INK_2());
+            ui.painter().with_clip_rect(lr.expand2(vec2(6.0, 0.0))).text(lr.center(), Align2::CENTER_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL - 0.5), crate::theme::LABEL());
             resp.union(vr)
         })
         .inner;

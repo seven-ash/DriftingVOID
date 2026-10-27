@@ -32,6 +32,10 @@ token!(VOID, Color32::from_rgb(13, 12, 19), Color32::from_rgb(236, 234, 229));
 token!(PAPER_2, Color32::from_rgb(24, 23, 32), Color32::from_rgb(250, 249, 246));
 token!(PAPER_4, Color32::from_rgb(46, 44, 58), Color32::from_rgb(220, 216, 210));
 token!(INK, Color32::from_rgb(236, 232, 225), Color32::from_rgb(28, 26, 33));
+// labels, info lines and hints: softer than INK, but 3:1 under the dark glass
+// over a white photo, the worst case (Ash, 10-27: 3:1 is enough, not too
+// much contrast; INK_2 there was 2.6:1)
+token!(LABEL, Color32::from_rgb(204, 200, 210), Color32::from_rgb(84, 80, 92));
 token!(INK_2, Color32::from_rgb(167, 162, 176), Color32::from_rgb(84, 80, 92));
 token!(INK_3, Color32::from_rgb(109, 104, 120), Color32::from_rgb(140, 136, 148));
 token!(FILL_1, Color32::from_rgba_premultiplied(14, 14, 14, 14), Color32::from_rgba_premultiplied(0, 0, 0, 14));
@@ -63,6 +67,33 @@ pub const TEXT_LABEL: f32 = 12.0;
 
 pub fn ui_bold() -> FontFamily {
     FontFamily::Name("ui_bold".into())
+}
+
+// ---------------------------------------------------------------- text levels
+// UI overhaul phase 2 (Ash, 10-27: legibility over bright content from text
+// colour only, the glass stays; 3:1 is the target, not more). Titles and
+// values are INK; field labels, info lines and hints are LABEL, which keeps
+// 3:1 in the worst case (dark glass over a white photo). INK_2 and INK_3
+// stay for strokes, ticks, icons and disabled text.
+
+/// A section title in a card (도구, 선택한 항목, 보정 …).
+pub fn section_title(t: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(t).font(FontId::new(TEXT_LABEL, ui_bold())).color(INK())
+}
+
+/// A group label inside a section (마스크 · room, 영역 …).
+pub fn group_label(t: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(t).font(FontId::new(TEXT_SMALL + 0.5, ui_bold())).color(INK())
+}
+
+/// The font of a field label in the label cell (불투명도, 위치 …).
+pub fn field_font() -> FontId {
+    FontId::proportional(TEXT_SMALL + 0.5)
+}
+
+/// An information line (sizes, counts, short hints): small, LABEL.
+pub fn info(t: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(t).size(TEXT_SMALL).color(LABEL())
 }
 
 pub fn card_frame() -> egui::Frame {
