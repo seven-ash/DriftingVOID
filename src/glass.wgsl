@@ -1,22 +1,24 @@
-// Glass under wgpu (src/glass_gpu.rs): the canvas texture blurred once per
-// frame at quarter size, and each card drawn from it with the same look as the
-// GL version (glass.rs FS_COMP): tint, refraction and red/blue dispersion at the
-// rim, a hairline and an optional shadow. Cards over other cards blur only the
-// canvas (Ash's choice for wgpu).
+// Glass under wgpu (src/glass_gpu.rs): each card drawn from its backdrop (the
+// canvas, or a grab of everything under it when it overlaps an earlier layer)
+// blurred at quarter size, with the GL version's look: tint, refraction and
+// red/blue dispersion at the rim, a hairline and an optional shadow. egui's
+// overlay on the canvas is laid over the glass, lightly blurred, after the
+// tint (Ash, 10-15).
 
 struct U {
     panel: vec4f, // card centre x, y, half w, h (framebuffer pixels)
     tint: vec4f,  // straight RGBA
     p: vec4f,     // radius, rim band, refraction, dispersion (pixels)
     q: vec4f,     // shadow reach, shadow on, pixels per point, sRGB target
-    map: vec4f,   // canvas texture origin x, y (framebuffer px), its size w, h
-    dir: vec4f,   // blur: direction (texels)
+    map: vec4f,   // backdrop texture origin x, y (framebuffer px), its size w, h
+    dir: vec4f,   // blur: direction (texels); card: framebuffer size
 }
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var ta: texture_2d<f32>;
 @group(0) @binding(2) var tb: texture_2d<f32>;
 @group(0) @binding(3) var smp: sampler;
+@group(0) @binding(4) var tc: texture_2d<f32>; // the overlay (premultiplied), half size
 
 struct VOut {
     @builtin(position) pos: vec4f,
@@ -100,6 +102,9 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
     col = mix(col, u.tint.rgb, u.tint.a * (1.0 - edge * 0.35));
     // neutral hairline so cards separate from what is behind them
     col = mix(col, vec3f(1.0), 0.07 * smoothstep(-1.6 * ppp, -0.4 * ppp, d));
+    // the overlay, lightly blurred: not tinted, refracted or split
+    let ov = textureSampleLevel(tc, smp, frag / u.dir.xy, 0.0);
+    col = col * (1.0 - ov.a) + ov.rgb;
     let a = clamp(0.5 - d, 0.0, 1.0);
     if u.q.w > 0.5 {
         col = to_lin(col);

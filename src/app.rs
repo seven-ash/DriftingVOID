@@ -8124,12 +8124,13 @@ impl App {
             self.rail_active = Some(r);
         }
         let p = ui.painter();
-        // the active tool's amber fill is painted by `tool_rail` (it glides)
+        // the active tool's amber fill glides: under the rail's glass on the
+        // canvas overlay (the glass spreads it), or in the rail without glass
         if resp.hovered() && !active {
             p.rect_filled(r, 9.0, FILL_2());
         }
         let col = if active {
-            ACCENT_INK
+            if crate::glass::available() { Color32::WHITE } else { ACCENT_INK }
         } else if resp.hovered() {
             INK()
         } else {
@@ -8171,8 +8172,10 @@ impl App {
                             self.tool_button(ui, t);
                         }
                     }
-                    if let Some(ir) = self.rail_indicator(ui.ctx()) {
-                        ui.painter().set(fill, Shape::rect_filled(ir, 9.0, ACCENT));
+                    if !crate::glass::available() {
+                        if let Some(ir) = self.rail_indicator(ui.ctx()) {
+                            ui.painter().set(fill, Shape::rect_filled(ir, 9.0, ACCENT));
+                        }
                     }
                     ui.add_space(SPACE_SM);
                     let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
@@ -10263,7 +10266,7 @@ impl App {
                     let at = Rect::from_min_size(rect.min - frac / ppp, vec2(w as f32, h as f32) / ppp);
                     painter.image(id, at, uv, Color32::WHITE);
                     // the glass cards blur this picture
-                    crate::glass_gpu::update(&cg.rs, &tex, [at.min.x * ppp, at.min.y * ppp]);
+                    crate::glass_gpu::update(&cg.rs, &tex, id, [at.min.x * ppp, at.min.y * ppp]);
                     crate::glass::scene_drawn(ctx.cumulative_pass_nr());
                     // what only the editor shows
                     for l in self.doc.layers.iter().filter(|l| l.visible && self.doc.alive(l)) {
@@ -10483,6 +10486,14 @@ impl App {
         }
 
 
+        // the active tool's fill under the rail's glass: half-strength amber the
+        // glass spreads (Ash, 10-15)
+        if crate::glass::available() && !self.ui_hidden {
+            if let Some(ir) = self.rail_indicator(&ctx) {
+                painter.with_clip_rect(egui::Rect::EVERYTHING).rect_filled(ir.expand(3.0), 11.0, ACCENT.gamma_multiply(0.5));
+            }
+        }
+
         if self.doc.layers.is_empty() {
             painter.text(
                 rect.center(),
@@ -10497,9 +10508,9 @@ impl App {
 
     /// Amber "selected tool" block in the overlay layer under the tool rail's glass.
     /// Where the active tool's fill is this frame: on its button, or gliding
-    /// there (ease-out only, Ash 10-15). Painted inside the rail, above the
-    /// glass: since the glass moved to wgpu (0.63) it samples only the canvas,
-    /// so the old fill under the rail was hidden (Ash noticed, 10-27).
+    /// there (ease-out only, Ash 10-15). With glass it is drawn under the rail
+    /// on the canvas overlay, which the glass lays over itself lightly blurred
+    /// (`glass_gpu`); without glass, in the rail.
     fn rail_indicator(&mut self, ctx: &egui::Context) -> Option<Rect> {
         let r = self.rail_active?;
         // eased glide (ease-out only: starts at full speed) from wherever it currently is to the active tool
@@ -12552,6 +12563,10 @@ impl eframe::App for App {
         }
         if self.drag.is_some() || crate::penhook::state().barrel || self.frames < 6 {
             ctx.request_repaint();
+        }
+        // last: what the glass cards show through them (all layers are laid out)
+        if let Some(rs) = _frame.wgpu_render_state() {
+            crate::glass_gpu::backdrop(&ctx, rs);
         }
     }
 }
