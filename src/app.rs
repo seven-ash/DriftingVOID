@@ -8,7 +8,7 @@ use egui::{
 };
 
 use crate::canvas::{self, TexCache, Xf};
-use crate::theme::{self, GlassTip, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, INK_3, PAPER_4, SPACE_LG, SPACE_MD, SPACE_SM};
+use crate::theme::{self, GlassTip, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, INK_3, PAPER_4, SPACE_2XS, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
 use crate::doc::*;
 use crate::raster::{BrushParams, RasterLayer, RasterStroke};
 use crate::vector::{VStroke, radius_for};
@@ -3429,7 +3429,7 @@ impl App {
         let mut pick = None;
         let mut add = false;
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             for c in &self.doc.cameras {
                 if ui.selectable_label(self.cam_sel == Some(c.id), egui::RichText::new(&c.name).color(CAM_COLOR)).clicked() {
                     pick = Some(c.id);
@@ -3475,7 +3475,7 @@ impl App {
                 ch = true;
             }
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                 from_frame = ui.add_enabled(self.doc.export_frame.is_some(), egui::Button::new("영역 → 카메라")).clicked();
                 to_frame = ui.button("카메라 → 영역").clicked();
                 del = ui.button("카메라 삭제").clicked();
@@ -3488,7 +3488,7 @@ impl App {
         let mut new_follow = follow;
         let picked = self.sel;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
             ui.label("객체 중심에");
             egui::ComboBox::from_id_salt(("cam_snap", self.doc.cameras[i].id)).truncate()
                 .selected_text("맞추기…")
@@ -3508,7 +3508,7 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
             if let Some(m) = cm(ch::FOLLOW) {
                 ck[2] |= crate::dial::key_button(ui, m);
             }
@@ -3539,7 +3539,7 @@ impl App {
         }
         if let Some(mut f) = new_follow {
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                 let mut c2 = false;
                 c2 |= ui.checkbox(&mut f.pos, "위치").changed();
                 c2 |= ui.checkbox(&mut f.rot, "회전").changed();
@@ -3615,7 +3615,7 @@ impl App {
         let mut new_time: Option<f64> = None;
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
             if ui.button(if playing { "멈춤" } else { "재생" }).glass_tip("Alt+A").clicked() {
                 act_play = true;
             }
@@ -4526,7 +4526,7 @@ impl App {
                         d.size_set |= a || b;
                     });
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                         let presets: &[(u32, &str)] = if d.by_width {
                             &[(3840, "3840"), (2560, "2560"), (1920, "1920"), (1280, "1280"), (1080, "1080"), (854, "854")]
                         } else {
@@ -4590,7 +4590,7 @@ impl App {
                         ui.checkbox(&mut d.gpu, "GPU 인코딩 (NVIDIA NVENC)").glass_tip("NVIDIA 그래픽카드 필요");
                     }
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
                         ui.label("슈퍼샘플링").glass_tip("크게 그린 뒤 줄여서 저장 · 경계와 두께 줄무늬가 부드러워짐");
                         for k in 1..=4u8 {
                             if ui.selectable_label(d.ss == k, format!("{k}×")).clicked() {
@@ -5128,7 +5128,7 @@ impl App {
     fn align_bar(&mut self, ui: &mut egui::Ui) {
         let mut act = None;
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_2XS, SPACE_2XS);
             for (i, (label, tip)) in [
                 ("왼쪽", "왼쪽 맞춤"),
                 ("가로 중앙", "가로 가운데 맞춤"),
@@ -5147,7 +5147,7 @@ impl App {
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(SPACE_XS);
         if let Some(a) = act {
             self.align(a);
         }
@@ -6218,7 +6218,7 @@ impl App {
             .show(ctx, |ui| {
                 theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
                         let Some(v) = self.view3d.as_mut() else { return };
                         if ui.selectable_label(v.camera, "카메라 0").clicked() {
                             v.camera = true;
@@ -8032,7 +8032,7 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = SPACE_XS;
                 ui.label("슈퍼샘플링").glass_tip("크게 그린 뒤 줄여서 저장 · 경계와 두께 줄무늬가 부드러워짐");
                 for k in 1..=4u8 {
                     if ui.selectable_label(d.ss == k, format!("{k}×")).clicked() {
@@ -8150,7 +8150,7 @@ impl App {
             .fixed_pos(pos2(screen.left() + SPACE_LG, screen.top() + 76.0))
             .show(ctx, |ui| {
                 theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
-                    ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                    ui.spacing_mut().item_spacing = vec2(0.0, SPACE_2XS);
                     let groups: [&[Tool]; 4] = [
                         &[Tool::Select, Tool::Lasso, Tool::Hand],
                         &[Tool::Brush, Tool::Pen, Tool::Eraser],
@@ -8166,7 +8166,7 @@ impl App {
                             self.tool_button(ui, t);
                         }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
                     let p = ui.painter();
                     p.circle_filled(r.center(), 14.0, FILL_2());
@@ -8226,7 +8226,7 @@ impl App {
                     ("수채", 34.0, 0.4, 0.2, true, true, 0.35),
                 ];
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                     for (name, size, op, hard, ps, po, sm) in PRESETS {
                         if ui.selectable_label(s.brush_preset == name, name).clicked() {
                             s.brush_preset = name.to_string();
@@ -8511,7 +8511,7 @@ impl App {
                 let (mut x, mut y) = (c0[0], c0[1]);
                 let mut mv = false;
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
                     crate::dial::label_cell_nav(ui, "위치", km(ch::POS), &mut kh[0], Some((kn(ch::POS), &mut kv[0])));
                     ui.add_sized([10.0, 26.0], egui::Label::new(egui::RichText::new("X").color(INK_3())));
                     ui.spacing_mut().interact_size.x = 56.0;
@@ -8542,7 +8542,7 @@ impl App {
                 LayerKind::Image(im) => {
                     if let Some(v) = &mut im.video {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.spacing_mut().item_spacing.x = SPACE_XS;
                             if ui.button(if is_playing { "멈춤" } else { "재생" }).clicked() {
                                 vid_act = Some(VidAct::Play(!is_playing));
                             }
@@ -8566,7 +8566,7 @@ impl App {
                             changed = true;
                         }
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                             ui.label("속도");
                             for sp in [0.25, 0.5, 1.0, 2.0, 4.0] {
                                 if ui.selectable_label((v.speed - sp).abs() < 1e-6, format!("{sp}×")).clicked() {
@@ -8640,7 +8640,7 @@ impl App {
                     }
                     // chroma key: drag the slot onto the canvas to take a colour
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SPACE_SM;
                         let mut no = false;
                         crate::dial::label_cell(ui, "크로마 키", None, &mut no);
                         let (sr, sresp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click_and_drag());
@@ -9081,7 +9081,7 @@ impl App {
         let mut toggle = false;
         let mut pick_mode: Option<u8> = None;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
             for (m, label, tip) in [(0u8, "자동 선택", "선택(V)·올가미(Q) 도구에서 · 클릭한 면을 가림 · Alt: 되살리기"), (1, "그랩컷", "선택(V)·올가미(Q) 도구에서 · 상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기"), (2, "가위", "선택(V)·올가미(Q) 도구에서 · 끌기: 경계 따라 자동 · 클릭/우클릭: 앵커 · 첫 점/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기")] {
                 if ui.selectable_label(armed && self.wand_mode == m, label).glass_tip(tip).clicked() {
                     pick_mode = Some(m);
@@ -9155,7 +9155,7 @@ impl App {
         }
         let mut changed = false;
         let mut select = None;
-        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.spacing_mut().item_spacing.y = SPACE_2XS;
         let width = ui.available_width();
         let ctx = ui.ctx().clone();
         // thumbnails: photos show their own (cropped) texture
@@ -9544,10 +9544,10 @@ impl App {
 
     fn view_menu_body(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
             ui.vertical(|ui| {
                 ui.set_max_width(132.0);
-                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.spacing_mut().item_spacing.y = SPACE_XS;
                 if ui.button("전체 보기  Ctrl+0").clicked() {
                     self.fit_view();
                     ui.close();
@@ -9648,7 +9648,7 @@ impl App {
     fn section(ui: &mut egui::Ui, title: &str) {
         ui.add_space(SPACE_SM);
         ui.label(egui::RichText::new(title).font(FontId::new(theme::TEXT_LABEL, theme::ui_bold())).color(INK_3()));
-        ui.add_space(2.0);
+        ui.add_space(SPACE_XS);
     }
 
     /// A section title that folds its section; true while open.
@@ -9667,7 +9667,7 @@ impl App {
             *folded = !*folded;
         }
         if !*folded {
-            ui.add_space(2.0);
+            ui.add_space(SPACE_XS);
         }
         !*folded
     }
@@ -9926,7 +9926,7 @@ impl App {
                     });
                     ui.add_space(SPACE_SM);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
                         if swatch(ui, p.orig, 22.0, false).glass_tip("원래 색으로").clicked() {
                             restore = true;
                         }
@@ -9941,9 +9941,9 @@ impl App {
                         crate::glass::save_settings();
                     }
                     if !recent.is_empty() {
-                        ui.add_space(4.0);
+                        ui.add_space(SPACE_XS);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.spacing_mut().item_spacing.x = SPACE_XS;
                             for c in &recent {
                                 if swatch(ui, *c, 18.0, false).clicked() {
                                     picked = Some(crate::okhsv::from_rgb(*c, p.h));
@@ -10439,7 +10439,7 @@ impl App {
         let mut pick = None;
         let mut new = false;
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             for sp in &self.doc.spaces {
                 let name = elide(ui, sp.name.clone(), 150.0);
                 if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, name).clicked() {
@@ -10466,7 +10466,7 @@ impl App {
         let Some(i) = self.space_idx() else { return };
         let mut axis_pick = None;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             ui.label("축");
             for ax in 0..3u8 {
                 let n = self.doc.spaces[i].count(ax);
@@ -10507,7 +10507,7 @@ impl App {
                 // metres only with a reference length (a photo alone has no scale)
                 let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
                     if ui.selectable_label(self.space_ref_draw, "기준 길이").glass_tip("수평면(바닥·탁자·창틀 등) 위 점에서 시작 · 수직: 높이, 수평: 그 면 위 길이 · 축 자동").clicked() {
                         ref_toggle = true;
                     }
@@ -10544,7 +10544,7 @@ impl App {
                 let tape = self.doc.spaces[i].tape;
                 let tape_m = self.doc.spaces[i].tape_metres(&cam);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
                     if ui.selectable_label(self.space_tape_draw, "줄자").glass_tip("기준면 위 점에서 끌기 · 수평: 거리, 수직: 높이").clicked() {
                         tape_toggle = true;
                     }
@@ -10561,7 +10561,7 @@ impl App {
                 let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked && !matches!(l.kind, LayerKind::Audio(_))).map(|l| l.id);
                 if let Some(lid) = placeable {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
                         for (lie, label) in [(false, "바닥에 세우기"), (true, "바닥에 눕히기")] {
                             let armed = self.space_place == Some((lid, lie));
                             if ui.selectable_label(armed, label).glass_tip("선택한 레이어 · 사진 속 바닥 클릭").clicked() {
@@ -10615,7 +10615,7 @@ impl App {
         let has_mask = sp.mask.is_some();
         let (mut mask_draw, mut mask_clear) = (false, false);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             ui.label(if has_mask { "마스크: 지정됨" } else { "마스크: 공간 영역 전체" });
             mask_draw = ui
                 .selectable_label(self.space_mask_draw, "마스크 그리기")
@@ -10626,7 +10626,7 @@ impl App {
         let walls: Vec<(u64, String)> = sp.walls.iter().map(|w| (w.id, w.name.clone())).collect();
         let (mut wall_pick, mut wall_add, mut wall_base) = (None, false, false);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             ui.label("벽");
             for (wid, name) in &walls {
                 let short = elide(ui, name.clone(), 150.0);
@@ -10660,7 +10660,7 @@ impl App {
         }
         let (mut clear, mut fit, mut del) = (false, false, false);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             clear = ui.button("선 모두 지우기").clicked();
             fit = ui.add_enabled(img_b.is_some(), egui::Button::new("선택한 사진에 맞추기")).clicked();
             del = ui.button("공간 삭제").clicked();
@@ -11332,7 +11332,7 @@ impl App {
             ui.set_width(300.0);
             ui.heading("저장하지 않은 변경 사항");
             ui.label("변경 사항을 저장할까요?");
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
                 if ui.button("저장").clicked() {
                     choice = Some(0);
@@ -11448,7 +11448,7 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
             // rows on screen and a few per frame, so opening the list stays quick
             let mut budget = 4;
             let width = ui.available_width().max(220.0);
-            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.spacing_mut().item_spacing.y = SPACE_2XS;
             for fam in fams.iter().filter(|x| f.is_empty() || x.name.to_lowercase().contains(&f)) {
                 let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
                 if !ui.is_rect_visible(r) {
@@ -12083,7 +12083,7 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
     let mut ch = false;
     let (mut x, mut y, mut w, mut h) = (r.min.x, r.min.y, r.width(), r.height());
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
         if let Some(m) = key {
             *key_hit |= crate::dial::key_button(ui, m);
         }
@@ -12093,7 +12093,7 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
         ch |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(0)).changed();
     });
     ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
         if let Some(m) = key {
             *key_hit |= crate::dial::key_button(ui, m);
         }
@@ -12110,7 +12110,7 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
         }
     });
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
         let portrait = h > w;
         for (pw, ph) in [(1920.0f32, 1080.0f32), (1280.0, 720.0), (2560.0, 1440.0), (3840.0, 2160.0), (1080.0, 1080.0), (1080.0, 1350.0)] {
             let (pw, ph) = if portrait && pw != ph { (ph.min(pw), ph.max(pw)) } else { (pw, ph) };
@@ -12273,6 +12273,9 @@ impl eframe::App for App {
                 ctx.request_repaint();
             }
         }
+        if std::env::var("DV_KIT").is_ok_and(|v| v == "1") {
+            crate::kit::demo(&ctx);
+        }
 
         // swap in the nicer UI face once the system font scan lands
         if !self.fonts_applied && crate::fontdb::families().is_some() {
@@ -12431,7 +12434,7 @@ fn vol_keys_hash(a: &crate::anim::Anim, h: &mut impl std::hash::Hasher) {
 fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = SPACE_2XS;
         let mut no = false;
         crate::dial::label_cell(ui, "정렬", None, &mut no);
         for al in crate::doc::TextAlign::ALL {

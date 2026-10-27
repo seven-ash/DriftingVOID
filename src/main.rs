@@ -23,6 +23,7 @@ mod persp;
 mod playcache;
 mod theme;
 mod io;
+mod kit;
 mod raster;
 mod scene;
 mod segment;

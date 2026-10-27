@@ -42,9 +42,18 @@ token!(BLOOM_COOL, Color32::from_rgb(110, 80, 220), Color32::from_rgb(140, 120, 
 pub const ACCENT: Color32 = Color32::from_rgb(242, 165, 65);
 pub const ACCENT_INK: Color32 = Color32::from_rgb(26, 18, 6);
 
+// spacing on a 4 pt grid (UI overhaul, docs/updates/ui-overhaul.md); 2XS only
+// inside packed lists and icon groups (layer rows, the rail, font list)
+pub const SPACE_2XS: f32 = 2.0;
+pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
 pub const SPACE_LG: f32 = 16.0;
+
+/// Height of every control row (dials, boxes, switches, segmented, menu rows).
+pub const ROW_H: f32 = 26.0;
+/// Width of a property column and of its rows.
+pub const COL_W: f32 = 280.0;
 pub const RADIUS_CARD: u8 = 14;
 pub const RADIUS_CTRL: u8 = 8;
 
@@ -201,9 +210,10 @@ pub fn apply_visuals(ctx: &egui::Context) {
     v.widgets.hovered.bg_stroke = Stroke::NONE;
 
     let s = &mut style.spacing;
-    s.item_spacing = vec2(SPACE_SM, 6.0);
+    // rows 4 apart, items in a row 8 apart (the row grid)
+    s.item_spacing = vec2(SPACE_SM, SPACE_XS);
     s.button_padding = vec2(10.0, 5.0);
-    s.interact_size = vec2(28.0, 26.0);
+    s.interact_size = vec2(28.0, ROW_H);
     s.slider_width = 150.0;
     s.menu_margin = Margin::same(SPACE_SM as i8);
     s.window_margin = Margin::same(SPACE_LG as i8);

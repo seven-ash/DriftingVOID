@@ -54,11 +54,18 @@ fn draw_key(p: &egui::Painter, c: Pos2, mark: KeyMark, hot: bool) {
     };
 }
 
+/// The label cell: the text's room, then the key slot (< ◇ >) at a fixed
+/// place. The slot is kept whether or not the value is keyable right now, so
+/// turning the timeline on never moves a row (UI overhaul, phase 1).
+const TEXT_W: f32 = 58.0;
+const SLOT_W: f32 = NAV_W + KEY_W + NAV_W;
+pub const LABEL_CELL: f32 = TEXT_W + SLOT_W;
+
 fn label_width(text: &str, key: bool) -> f32 {
     match (text.is_empty(), key) {
-        (true, true) => KEY_W,
+        (true, true) => SLOT_W,
         (true, false) => 0.0,
-        (false, k) => 58.0 + if k { 12.0 } else { 0.0 },
+        (false, _) => LABEL_CELL,
     }
 }
 
@@ -72,30 +79,29 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
 /// LABEL_SLOT (after the label, key mark and navigator), the number box
 /// (BOX_W, room for "-99999.99") and the reset pin's room (PIN_W) end the
 /// row, GAP apart.
-pub const ROW_W: f32 = 280.0;
-const LABEL_SLOT: f32 = 78.0;
+pub const ROW_W: f32 = crate::theme::COL_W;
+/// Where the ring starts: after the label cell and a gap.
+const LABEL_SLOT: f32 = LABEL_CELL + crate::theme::SPACE_XS;
 const BOX_W: f32 = 72.0;
 const PIN_W: f32 = 16.0;
 const GAP: f32 = 8.0;
 
 /// Width of a < or > beside the key mark.
-const NAV_W: f32 = 8.0;
+const NAV_W: f32 = 6.0;
 
-
-/// `label_cell` with the key navigator: when the value has keys, a < just left
-/// of its key mark and a > in the gap after it jump the playhead to the key
-/// before or after (`go` turns -1 or 1). The row keeps its widths: the < takes
-/// the end of the label text's room, the > sits in the spacing before the ring.
+/// `label_cell` with the key navigator: when the value has keys, a < left of
+/// its key mark and a > right of it jump the playhead to the key before or
+/// after (`go` turns -1 or 1). All three sit in the cell's key slot, so
+/// nothing reaches into what follows the cell.
 pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool, nav: Option<(KeyNav, &mut i8)>) {
     let w = label_width(text, mark.is_some());
-    let (lr, lresp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
+    let (lr, lresp) = ui.allocate_exact_size(vec2(w, crate::theme::ROW_H), Sense::hover());
     let keyed = mark.is_some_and(|m| m != KeyMark::None);
     let nav = nav.filter(|_| keyed);
-    let text_right = lr.right() - if mark.is_some() { KEY_W } else { 0.0 } - if nav.is_some() { NAV_W } else { 0.0 };
-    let text_r = egui::Rect::from_min_max(lr.min, egui::pos2(text_right, lr.bottom()));
+    let text_r = egui::Rect::from_min_max(lr.min, egui::pos2((lr.right() - SLOT_W).max(lr.left()), lr.bottom()));
     ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(crate::theme::TEXT_SMALL + 0.5), INK_2());
     if let Some(mark) = mark {
-        let kr = egui::Rect::from_min_max(egui::pos2(lr.right() - KEY_W, lr.top()), lr.max);
+        let kr = egui::Rect::from_center_size(egui::pos2(lr.right() - NAV_W - KEY_W * 0.5, lr.center().y), vec2(KEY_W, lr.height()));
         let kresp = ui.interact(kr, lresp.id.with("key"), Sense::click());
         if kresp.hovered() {
             ui.painter().circle_filled(kr.center(), 8.0, FILL_1());
@@ -131,7 +137,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
 
 /// A stand-alone key button (rows that are not dials). True when clicked.
 pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
-    let (r, resp) = ui.allocate_exact_size(vec2(KEY_W, 22.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(KEY_W, crate::theme::ROW_H), Sense::click());
     if resp.hovered() {
         ui.painter().circle_filled(r.center(), 8.0, FILL_1());
     }
@@ -466,7 +472,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
     let ring_h = 92.0;
     let mut out = ui
         .vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().item_spacing.y = crate::theme::SPACE_2XS;
             ui.spacing_mut().button_padding = vec2(2.0, 1.0);
             ui.style_mut().override_font_id = Some(FontId::proportional(crate::theme::TEXT_SMALL));
             ui.set_width(w);
