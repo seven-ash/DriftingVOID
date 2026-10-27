@@ -4,7 +4,9 @@
 //! ground, drawn by `gpu.rs` before egui paints): it is blurred once per frame
 //! at quarter size (`update`), and each card is an egui-wgpu paint callback
 //! with the GL version's look (`glass.wgsl`). Cards over other cards blur only
-//! the canvas (Ash's choice for wgpu, 10-20).
+//! the canvas, and egui's overlay under a card is hidden: a shortcut of the
+//! move to wgpu (10-20, not Ash's choice); Ash wants lower layers back
+//! (10-27, see RENDER.md).
 
 use std::sync::Mutex;
 
