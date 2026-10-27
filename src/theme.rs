@@ -4,6 +4,7 @@
 //! elevated cards instead of hairline panels, 4-pt spacing.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Painter, Pos2, Rect, Shadow, Stroke, Vec2, pos2, vec2};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------- tokens
 
@@ -58,43 +59,62 @@ pub const SPACE_LG: f32 = 16.0;
 pub const ROW_H: f32 = 26.0;
 /// Width of a property column and of its rows.
 pub const COL_W: f32 = 280.0;
-// Corner radii (Ash, 10-27): every glass surface (cards, menus, tooltips,
-// the status pill) has the card radius, 20; controls are capsules, like the
-// sliders. Shapes nested in a card's corner region take the card radius minus
-// the padding between them (`inner`): rail buttons and the tool fill, menu
-// rows. A capsule is rounder than that, which only widens the gap at a
-// corner. DV_RADIUS=old|a|b shows the earlier options (14/8; 20/8; 25 with
-// capsules) for comparison.
+// Corner radii (Ash, 10-27/28): every glass surface (cards, menus, tooltips,
+// the status pill) has the card radius, 15 by default and set in 보기 with
+// the corner smoothing (0.6: a squircle, glass only, egui's own fills stay
+// circular arcs); controls are capsules, like the sliders. Shapes nested in a
+// card's corner region take the card radius minus the padding between them
+// (`inner`): rail buttons and the tool fill, menu rows. A capsule is rounder
+// than that, which only widens the gap at a corner. DV_RADIUS=old|a|b shows
+// the earlier options (14/8; 20/8; 25 with capsules), DV_RADIUS=n any card
+// radius and DV_CORNER_SMOOTH=x any smoothing, for comparison.
+pub const RADIUS_DEFAULT: f32 = 15.0;
+pub const SMOOTH_DEFAULT: f32 = 0.6;
+pub const RADIUS_RANGE: (f32, f32) = (6.0, 24.0);
+
 fn radius_option() -> u8 {
     static O: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *O.get_or_init(|| match std::env::var("DV_RADIUS").as_deref() {
         Ok("old") => 1,
         Ok("a") => 2,
         Ok("b") => 3,
+        Ok(v) if v.parse::<u8>().is_ok() => 4,
         _ => 0,
     })
 }
 
+static CARD_R: AtomicU32 = AtomicU32::new(15);
+static SMOOTH: AtomicU32 = AtomicU32::new(0x3f19999a); // 0.6
+
+/// Takes the settings' corners; true when they changed (then `apply_visuals`).
+pub fn set_corners(radius: f32, smoothing: f32) -> bool {
+    let r = radius.round().clamp(RADIUS_RANGE.0, RADIUS_RANGE.1) as u32;
+    let k = smoothing.clamp(0.0, 1.0).to_bits();
+    let changed = CARD_R.swap(r, Ordering::Relaxed) != r;
+    SMOOTH.swap(k, Ordering::Relaxed) != k || changed
+}
+
 /// The outer radius of every glass surface.
 pub fn radius_card() -> u8 {
-    // DV_RADIUS=n tries a card radius (with capsule controls)
     static N: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
     if let Some(n) = *N.get_or_init(|| std::env::var("DV_RADIUS").ok().and_then(|v| v.parse::<u8>().ok())) {
         return n.clamp(4, 40);
     }
     match radius_option() {
         1 => 14,
+        2 => 20,
         3 => 25,
-        _ => 20,
+        _ => CARD_R.load(Ordering::Relaxed) as u8,
     }
 }
 
-/// Corner smoothing of the glass (0 = circular arcs, 0.6 = the iOS squircle),
-/// glass only: egui's own fills stay circular. DV_CORNER_SMOOTH=x compares;
-/// Ash decides from captures.
+/// Corner smoothing of the glass (0 = circular arcs, 0.6 = the iOS squircle).
 pub fn corner_smoothing() -> f32 {
-    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *S.get_or_init(|| std::env::var("DV_CORNER_SMOOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0f32).clamp(0.0, 1.0))
+    static S: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    if let Some(v) = *S.get_or_init(|| std::env::var("DV_CORNER_SMOOTH").ok().and_then(|v| v.parse().ok())) {
+        return f32::clamp(v, 0.0, 1.0);
+    }
+    f32::from_bits(SMOOTH.load(Ordering::Relaxed))
 }
 
 /// A control's radius: a capsule (half the row).

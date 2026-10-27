@@ -131,6 +131,9 @@ pub struct Settings {
     pub scissor_soft: bool,
     /// Size of the whole UI, 0.9–1.5 (Ash, 10-27; 보기 · Ctrl+Alt +/−/0).
     pub ui_scale: f32,
+    /// Glass corners: card radius (pt) and smoothing 0..1 (Ash, 10-28; 보기).
+    pub corner_radius: f32,
+    pub corner_smooth: f32,
 }
 
 impl Default for Settings {
@@ -166,6 +169,8 @@ impl Default for Settings {
             mask_grow: 1.0,
             scissor_soft: false,
             ui_scale: 1.0,
+            corner_radius: theme::RADIUS_DEFAULT,
+            corner_smooth: theme::SMOOTH_DEFAULT,
         }
     }
 }
@@ -9696,6 +9701,16 @@ impl App {
             });
             ui.add(crate::dial::Dial::new(&mut self.s.peek_delay, 0.05..=1.0).vertical().step(0.05).suffix(" s").text("미리보기").default(0.2))
                 .glass_tip("Tab을 이만큼 누르고 있으면 반대쪽 작업 공간 미리보기");
+            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_radius, theme::RADIUS_RANGE.0..=theme::RADIUS_RANGE.1).vertical().step(1.0).integer().suffix(" pt").text("모서리").default(theme::RADIUS_DEFAULT))
+                .glass_tip("패널 모서리 반지름");
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.save_prefs();
+            }
+            let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_smooth, 0.0..=1.0).vertical().step(0.05).text("스무딩").default(theme::SMOOTH_DEFAULT))
+                .glass_tip("모서리가 직선으로 이어지는 부드러움 · 0: 원호");
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.save_prefs();
+            }
             // applied when the drag ends: scaling while dragging would move the
             // menu under the pointer
             let id = egui::Id::new("ui_scale_drag");
@@ -12460,7 +12475,8 @@ impl eframe::App for App {
             1 => false,
             _ => ctx.system_theme() == Some(egui::Theme::Light),
         };
-        if light != theme::is_light() {
+        let corners = theme::set_corners(self.s.corner_radius, self.s.corner_smooth);
+        if light != theme::is_light() || corners {
             theme::set_light(light);
             theme::apply_visuals(&ctx);
         }
