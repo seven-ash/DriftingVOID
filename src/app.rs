@@ -8170,20 +8170,16 @@ impl App {
     fn tool_button(&mut self, ui: &mut egui::Ui, t: Tool) {
         let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
         let active = self.tool == t;
-        let under_glass = crate::glass::available();
         if active {
             self.rail_active = Some(r);
         }
         let p = ui.painter();
-        if active && !under_glass {
-            p.rect_filled(r, 9.0, ACCENT);
-        } else if resp.hovered() && !active {
+        // the active tool's amber fill is painted by `tool_rail` (it glides)
+        if resp.hovered() && !active {
             p.rect_filled(r, 9.0, FILL_2());
         }
-        // with glass the amber indicator is drawn in the canvas overlay layer under the
-        // rail (see `draw_rail_indicator`): blurred by the glass, but not tinted or split
         let col = if active {
-            if under_glass { Color32::WHITE } else { ACCENT_INK }
+            ACCENT_INK
         } else if resp.hovered() {
             INK()
         } else {
@@ -8208,6 +8204,8 @@ impl App {
             .show(ctx, |ui| {
                 theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, SPACE_2XS);
+                    // the active tool's fill goes under the icons, above the glass
+                    let fill = ui.painter().add(Shape::Noop);
                     let groups: [&[Tool]; 4] = [
                         &[Tool::Select, Tool::Lasso, Tool::Hand],
                         &[Tool::Brush, Tool::Pen, Tool::Eraser],
@@ -8222,6 +8220,9 @@ impl App {
                         for &t in g.iter() {
                             self.tool_button(ui, t);
                         }
+                    }
+                    if let Some(ir) = self.rail_indicator(ui.ctx()) {
+                        ui.painter().set(fill, Shape::rect_filled(ir, 9.0, ACCENT));
                     }
                     ui.add_space(SPACE_SM);
                     let (r, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
@@ -10522,7 +10523,6 @@ impl App {
             }
         }
 
-        self.draw_rail_indicator(&ctx, &painter);
 
         if self.doc.layers.is_empty() {
             painter.text(
@@ -10537,8 +10537,12 @@ impl App {
     }
 
     /// Amber "selected tool" block in the overlay layer under the tool rail's glass.
-    fn draw_rail_indicator(&mut self, ctx: &egui::Context, painter: &egui::Painter) {
-        let Some(r) = self.rail_active.filter(|_| !self.ui_hidden && crate::glass::available()) else { return };
+    /// Where the active tool's fill is this frame: on its button, or gliding
+    /// there (ease-out only, Ash 10-15). Painted inside the rail, above the
+    /// glass: since the glass moved to wgpu (0.63) it samples only the canvas,
+    /// so the old fill under the rail was hidden (Ash noticed, 10-27).
+    fn rail_indicator(&mut self, ctx: &egui::Context) -> Option<Rect> {
+        let r = self.rail_active?;
         // eased glide (ease-out only: starts at full speed) from wherever it currently is to the active tool
         const DUR: f64 = 0.08;
         let now = ctx.input(|i| i.time);
@@ -10558,9 +10562,7 @@ impl App {
         if k < 1.0 {
             ctx.request_repaint();
         }
-        let c = pos2(r.center().x, y);
-        // softer than a solid chip: half-strength amber, the glass spreads it
-        painter.rect_filled(Rect::from_center_size(c, r.size() + vec2(6.0, 6.0)), 11.0, ACCENT.gamma_multiply(0.5));
+        Some(Rect::from_center_size(pos2(r.center().x, y), r.size()))
     }
 
     fn space_panel(&mut self, ui: &mut egui::Ui) {
