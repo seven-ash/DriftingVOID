@@ -50,8 +50,11 @@ const TOOLS: &[(Tool, &str, &str, Key)] = &[
     (Tool::Picker, "스포이드", "I", Key::I),
 ];
 
-/// How to use a tool, shown in its rail tooltip one action per line (Ash,
-/// 10-27: the hints left the tool card, which starts with the settings).
+/// A rail button's name, key and how to use it.
+type RailHint = (&'static str, &'static str, &'static str);
+
+/// How to use a tool, shown in the box beside the rail one action per line
+/// (Ash, 10-27: the hints left the tool card, which starts with the settings).
 fn tool_hint(t: Tool) -> &'static str {
     match t {
         Tool::Brush => "Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기",
@@ -910,6 +913,14 @@ pub struct App {
     fonts_applied: bool,
     frames: u64,
     rail_active: Option<Rect>,
+    /// The rail button under the pointer this frame (name, key, hint) and its rect.
+    rail_hover: Option<(RailHint, Rect)>,
+    /// The hint box beside the rail: what it shows, beside which button, since
+    /// when hovered, and whether it is open (Ash, 10-27: a box beside the rail
+    /// instead of a tooltip at the pointer).
+    rail_hint: Option<(RailHint, Rect, f64, bool)>,
+    /// The hint box's height last frame (to keep it inside the rail's span).
+    rail_hint_h: f32,
     space_held: bool,
     layer_drag: Option<LayerId>,
     renaming: Option<LayerId>,
@@ -1243,6 +1254,9 @@ impl App {
             fonts_applied: false,
             frames: 0,
             rail_active: None,
+            rail_hover: None,
+            rail_hint: None,
+            rail_hint_h: 0.0,
             space_held: false,
             layer_drag: None,
             renaming: None,
@@ -8177,16 +8191,18 @@ impl App {
         };
         theme::tool_icon(p, t, Rect::from_center_size(r.center(), theme::ICON), col);
         let (name, key) = TOOLS.iter().find(|x| x.0 == t).map(|x| (x.1, x.2)).unwrap_or(("", ""));
-        if resp.glass_tip(format!("{name}  ·  {key}
-{}", tool_hint(t).replace(" · ", "
-"))).clicked() {
+        if resp.hovered() {
+            self.rail_hover = Some(((name, key, tool_hint(t)), r));
+        }
+        if resp.clicked() {
             self.set_tool(t);
         }
     }
 
     fn tool_rail(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        egui::Area::new(egui::Id::new("rail"))
+        self.rail_hover = None;
+        let rail = egui::Area::new(egui::Id::new("rail"))
             .order(egui::Order::Middle)
             .fixed_pos(pos2(screen.left() + SPACE_LG, screen.top() + 76.0))
             .show(ctx, |ui| {
@@ -8215,11 +8231,83 @@ impl App {
                     if resp.hovered() {
                         p.circle_stroke(r.center(), 14.0, Stroke::new(1.0, INK_2()));
                     }
-                    if resp.glass_tip("색  ·  캔버스에서 Alt+클릭").clicked() {
+                    if resp.hovered() {
+                        self.rail_hover = Some((("색", "", "누르기: 팔레트 · 캔버스에서 Alt+클릭: 팔레트"), r));
+                    }
+                    if resp.clicked() {
                         self.open_palette(r.right_top() + vec2(10.0, -150.0));
+                    }
+                })
+                .response
+                .rect
+            });
+        self.rail_hint_box(ctx, rail.inner);
+    }
+
+    /// The hint box beside the rail (Ash, 10-27): sized to its text, level
+    /// with the hovered button, and moving only within the rail's top and
+    /// bottom. It opens after a short hover and then follows the pointer from
+    /// button to button at once. `DV_RAIL_TIP=n` keeps the n-th tool's open.
+    fn rail_hint_box(&mut self, ctx: &egui::Context, rail: Rect) {
+        const DELAY: f64 = 0.25;
+        let forced = std::env::var("DV_RAIL_TIP").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| TOOLS.get(i)).map(|t| {
+            // the button's place: 36 px rows 2 apart from the rail's top, groups split by 9
+            let i = TOOLS.iter().position(|x| x.0 == t.0).unwrap_or(0);
+            let groups = [3usize, 6, 11];
+            let gaps = groups.iter().filter(|&&g| i >= g).count() as f32;
+            let y = rail.top() + 6.0 + i as f32 * 38.0 + gaps * 11.0;
+            ((t.1, t.2, tool_hint(t.0)), Rect::from_min_size(pos2(rail.left() + 6.0, y), vec2(36.0, 36.0)))
+        });
+        let hover = forced.or(self.rail_hover);
+        self.rail_hint = match (hover, self.rail_hint) {
+            (None, _) => None,
+            (Some((h, r)), Some((_, _, since, open))) => Some((h, r, since, open || self.now - since >= DELAY || forced.is_some())),
+            (Some((h, r)), None) => Some((h, r, self.now, forced.is_some())),
+        };
+        let Some(((name, key, hint), btn, _, open)) = self.rail_hint else { return };
+        if !open {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(DELAY));
+            return;
+        }
+        // centred on the button, kept between the rail's top and bottom
+        let h = self.rail_hint_h;
+        let top = (btn.center().y - h * 0.5).min(rail.bottom() - h).max(rail.top());
+        let pad = theme::SPACE_MD;
+        let shown = egui::Area::new(egui::Id::new("rail_hint"))
+            .order(egui::Order::Middle)
+            .interactable(false)
+            .fixed_pos(pos2(rail.right() + SPACE_SM, top))
+            .show(ctx, |ui| {
+                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                    ui.set_width(232.0);
+                    ui.spacing_mut().item_spacing.y = SPACE_SM;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(name).font(FontId::new(theme::TEXT_BODY + 1.0, theme::ui_bold())).color(INK()));
+                        if !key.is_empty() {
+                            ui.label(egui::RichText::new(key).monospace().color(INK()).background_color(FILL_2()));
+                        }
+                    });
+                    for item in hint.split(" · ") {
+                        // "input: what it does": the input bold, the result after it,
+                        // in one text so every line is spaced alike
+                        let mut job = egui::text::LayoutJob::default();
+                        let plain = egui::TextFormat { font_id: FontId::proportional(theme::TEXT_SMALL + 0.5), color: theme::LABEL(), ..Default::default() };
+                        match item.split_once(": ") {
+                            Some((input, what)) => {
+                                job.append(input, 0.0, egui::TextFormat { font_id: FontId::new(theme::TEXT_SMALL + 0.5, theme::ui_bold()), color: INK(), ..Default::default() });
+                                job.append(what, SPACE_XS, plain);
+                            }
+                            None => job.append(item, 0.0, plain),
+                        }
+                        job.wrap.max_width = ui.available_width();
+                        ui.label(job);
                     }
                 });
             });
+        if (shown.response.rect.height() - self.rail_hint_h).abs() > 0.5 {
+            self.rail_hint_h = shown.response.rect.height();
+            ctx.request_repaint();
+        }
     }
 
     /// Applies the picked colour to a selected text/shape layer, like most editors.
