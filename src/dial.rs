@@ -44,13 +44,14 @@ pub enum KeyMark {
 const KEY_W: f32 = 16.0;
 
 /// Small diamond that records the current value at the playhead.
-fn draw_key(p: &egui::Painter, c: Pos2, mark: KeyMark, hot: bool) {
+fn draw_key(p: &egui::Painter, c: Pos2, mark: KeyMark) {
     let d = 4.5;
     let pts = vec![c + vec2(0.0, -d), c + vec2(d, 0.0), c + vec2(0.0, d), c + vec2(-d, 0.0)];
     match mark {
         KeyMark::Here => p.add(Shape::convex_polygon(pts, ACCENT, Stroke::NONE)),
         KeyMark::Keyed => p.add(Shape::closed_line(pts, Stroke::new(1.3, ACCENT))),
-        KeyMark::None => p.add(Shape::closed_line(pts, Stroke::new(1.2, if hot { INK() } else { INK_3() }))),
+        // off in ink, not grey (Ash, 10-22); hover shows as a fill behind it
+        KeyMark::None => p.add(Shape::closed_line(pts, Stroke::new(1.2, INK()))),
     };
 }
 
@@ -106,7 +107,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
         if kresp.hovered() {
             ui.painter().circle_filled(kr.center(), 8.0, FILL_1());
         }
-        draw_key(ui.painter(), kr.center(), mark, kresp.hovered());
+        draw_key(ui.painter(), kr.center(), mark);
         if kresp.glass_tip("키 기록").clicked() {
             *hit = true;
         }
@@ -115,13 +116,8 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
             for (dir, x0, on) in [(-1i8, kr.left() - NAV_W, kn.prev), (1, kr.right(), kn.next)] {
                 let r = egui::Rect::from_min_max(egui::pos2(x0, cy - 9.0), egui::pos2(x0 + NAV_W, cy + 9.0));
                 let resp = ui.interact(r, lresp.id.with(("nav", dir)), if on { Sense::click() } else { Sense::hover() });
-                let col = if !on {
-                    INK_3().gamma_multiply(0.35)
-                } else if resp.hovered() {
-                    INK()
-                } else {
-                    INK_3()
-                };
+                // no key that way: the kit's unavailable look; else ink
+                let col = crate::kit::state_ink(false, on);
                 // a small chevron pointing the way it jumps
                 let c = r.center();
                 let (dx, h) = (2.2 * dir as f32, 3.6);
@@ -141,7 +137,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
     if resp.hovered() {
         ui.painter().circle_filled(r.center(), 8.0, FILL_1());
     }
-    draw_key(ui.painter(), r.center(), mark, resp.hovered());
+    draw_key(ui.painter(), r.center(), mark);
     resp.glass_tip("키 기록").clicked()
 }
 
@@ -416,7 +412,7 @@ impl Widget for Dial<'_> {
                 if let Some(d) = default {
                     let off = (*value - d).abs() > (hi - lo).abs() * 1e-4;
                     if off {
-                        let col = if presp.hovered() { INK() } else { INK_3() };
+                        let col = INK();
                         if presp.hovered() {
                             ui.painter().circle_filled(pr.center(), 8.5, FILL_1());
                         }
@@ -483,7 +479,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                     if presp.hovered() {
                         ui.painter().circle_filled(pr.center(), 7.0, FILL_1());
                     }
-                    reset_icon(ui.painter(), pr.center(), if presp.hovered() { INK() } else { INK_3() });
+                    reset_icon(ui.painter(), pr.center(), INK());
                     if presp.glass_tip(format!("기본값 ({dv})")).clicked() {
                         *value = dv;
                     }

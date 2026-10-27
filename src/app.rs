@@ -3643,7 +3643,7 @@ impl App {
             .order(egui::Order::Middle)
             .anchor(Align2::LEFT_BOTTOM, vec2(70.0, -64.0))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(10), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(10), theme::radius_card(), |ui| {
                     ui.set_width(width);
                     self.timeline_body(ui, width);
                 });
@@ -3711,7 +3711,7 @@ impl App {
                         ui.label("다음 키까지");
                         for o in crate::anim::Ease::ALL {
                             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            key_icon(ui.painter(), ir.center(), o, if e == o { ACCENT } else { INK_2() }, Stroke::new(1.0, Color32::from_black_alpha(170)));
+                            key_icon(ui.painter(), ir.center(), o, if e == o { ACCENT } else { INK() }, Stroke::new(1.0, Color32::from_black_alpha(170)));
                             if ui.selectable_label(e == o, o.label()).clicked() {
                                 pick = Some(o);
                             }
@@ -4526,7 +4526,7 @@ impl App {
             .pivot(Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::radius_card(), |ui| {
                     if crate::kit::dialog_header(ui, "영상 내보내기") {
                         open = false;
                     }
@@ -6236,7 +6236,7 @@ impl App {
             .order(egui::Order::Middle)
             .anchor(Align2::CENTER_TOP, vec2(0.0, SPACE_LG))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(6), theme::radius_card(), |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_XS;
                         let Some(v) = self.view3d.as_mut() else { return };
@@ -8007,7 +8007,7 @@ impl App {
                     .and_then(|v| v.split_once(',').and_then(|(x, y)| Some(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))))
                     .unwrap_or(ctx.content_rect().center()),
             )
-            .show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
+            .show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::radius_card(), |ui| {
             if crate::kit::dialog_header(ui, "내보내기") {
                 open = false;
             }
@@ -8127,14 +8127,13 @@ impl App {
         // the active tool's amber fill glides: under the rail's glass on the
         // canvas overlay (the glass spreads it), or in the rail without glass
         if resp.hovered() && !active {
-            p.rect_filled(r, 9.0, FILL_2());
+            p.rect_filled(r, theme::inner(theme::radius_card(), 6.0) as f32, FILL_2());
         }
+        // off in the theme's ink, not grey (Ash, 10-22)
         let col = if active {
             if crate::glass::available() { Color32::WHITE } else { ACCENT_INK }
-        } else if resp.hovered() {
-            INK()
         } else {
-            INK_2()
+            INK()
         };
         theme::tool_icon(p, t, Rect::from_center_size(r.center(), theme::ICON), col);
         let (name, key) = TOOLS.iter().find(|x| x.0 == t).map(|x| (x.1, x.2)).unwrap_or(("", ""));
@@ -8153,7 +8152,7 @@ impl App {
             .order(egui::Order::Middle)
             .fixed_pos(pos2(screen.left() + SPACE_LG, screen.top() + 76.0))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(6), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(6), theme::radius_card(), |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, SPACE_2XS);
                     // the active tool's fill goes under the icons, above the glass
                     let fill = ui.painter().add(Shape::Noop);
@@ -8174,7 +8173,7 @@ impl App {
                     }
                     if !crate::glass::available() {
                         if let Some(ir) = self.rail_indicator(ui.ctx()) {
-                            ui.painter().set(fill, Shape::rect_filled(ir, 9.0, ACCENT));
+                            ui.painter().set(fill, Shape::rect_filled(ir, theme::inner(theme::radius_card(), 6.0) as f32, ACCENT));
                         }
                     }
                     ui.add_space(SPACE_SM);
@@ -8232,7 +8231,7 @@ impl App {
             .interactable(false)
             .fixed_pos(pos2(rail.right() + SPACE_SM, top))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(pad as i8), theme::radius_card(), |ui| {
                     ui.set_width(232.0);
                     ui.spacing_mut().item_spacing.y = SPACE_SM;
                     ui.horizontal(|ui| {
@@ -8718,10 +8717,10 @@ impl App {
                                 p.rect_filled(sr, 4.0, Color32::from_rgb(r, g, b));
                             }
                             None => {
-                                p.line_segment([sr.left_bottom() + vec2(4.0, -4.0), sr.right_top() + vec2(-4.0, 4.0)], Stroke::new(1.2, INK_3()));
+                                p.line_segment([sr.left_bottom() + vec2(4.0, -4.0), sr.right_top() + vec2(-4.0, 4.0)], Stroke::new(1.2, INK()));
                             }
                         }
-                        p.rect_stroke(sr, 4.0, Stroke::new(1.0, if sresp.hovered() || sresp.dragged() { ACCENT } else { INK_3() }), StrokeKind::Inside);
+                        p.rect_stroke(sr, 4.0, Stroke::new(1.0, if sresp.hovered() || sresp.dragged() { ACCENT } else { INK() }), StrokeKind::Inside);
                         if sresp.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                             chroma_drag = ui.ctx().pointer_latest_pos();
@@ -9345,9 +9344,13 @@ impl App {
                 p.rect_filled(r, 8.0, FILL_1());
             }
             let dim = if l.visible { 1.0 } else { 0.45 };
-            theme::eye_icon(&p, eye_r.center(), l.visible, if eye.hovered() { INK() } else { INK_3() });
+            // state icons in ink, not grey (Ash, 10-22); hover shows as a fill
+            if eye.hovered() {
+                p.circle_filled(eye_r.center(), 10.0, FILL_2());
+            }
+            theme::eye_icon(&p, eye_r.center(), l.visible, INK());
             if l.locked {
-                theme::lock_icon(&p, lock_r.center(), INK_2());
+                theme::lock_icon(&p, lock_r.center(), INK());
             } else if lock.hovered() || resp.hovered() {
                 theme::lock_icon(&p, lock_r.center(), FILL_3());
             }
@@ -9375,12 +9378,16 @@ impl App {
                         LayerKind::Vector(_) => Tool::Pen,
                         _ => Tool::Brush,
                     };
-                    theme::tool_icon(&p, glyph, thumb_r.shrink(5.0), INK_3().gamma_multiply(dim));
+                    theme::tool_icon(&p, glyph, thumb_r.shrink(5.0), INK().gamma_multiply(dim));
                 }
             }
             if let Some(mb) = &mask_b {
                 {
-                    let col = if mb.hovered() { INK() } else if has_mask { ACCENT } else { INK_3() };
+                    // on (has a mask) in the accent, off in ink
+                    let col = if has_mask { ACCENT } else { INK() };
+                    if mb.hovered() {
+                        p.circle_filled(mask_r.center(), 10.0, FILL_2());
+                    }
                     let c = mask_r.center();
                     p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, col), StrokeKind::Inside);
                     p.circle_filled(c, 4.0, col);
@@ -9393,8 +9400,8 @@ impl App {
             if l.mask_of.is_some() {
                 let c = thumb_r.center();
                 p.rect_filled(thumb_r, 5.0, FILL_2());
-                p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, INK_2()), StrokeKind::Inside);
-                p.circle_filled(c, 4.0, INK_2());
+                p.rect_stroke(Rect::from_center_size(c, vec2(14.0, 14.0)), 3.0, Stroke::new(1.3, INK()), StrokeKind::Inside);
+                p.circle_filled(c, 4.0, INK());
             }
             let name_r = Rect::from_min_max(pos2(r.left() + 62.0, r.top() + 3.0), pos2(r.right() - 58.0, r.bottom() - 3.0));
             if renaming == Some(l.id) {
@@ -9550,7 +9557,7 @@ impl App {
             .order(egui::Order::Middle)
             .fixed_pos(screen.min + vec2(SPACE_LG, SPACE_LG))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::symmetric(14, 8), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::symmetric(14, 8), theme::radius_card(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Drifting VOID").font(FontId::new(14.0, theme::ui_bold())).color(INK()));
                         ui.add_space(SPACE_SM);
@@ -9713,7 +9720,7 @@ impl App {
             .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -SPACE_LG))
             .constrain_to(screen)
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::symmetric(12, 6), 18, |ui| {
+                theme::glass(ui, egui::Margin::symmetric(12, 6), theme::radius_card(), |ui| {
                     ui.horizontal(|ui| {
                         if ui.small_button("−").clicked() {
                             let z = self.zoom / 1.25;
@@ -9792,7 +9799,7 @@ impl App {
             .order(egui::Order::Middle)
             .anchor(Align2::RIGHT_TOP, vec2(-SPACE_LG, SPACE_LG))
             .show(ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(pad as i8), theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, egui::Margin::same(pad as i8), theme::radius_card(), |ui| {
                     ui.set_width(layers_w);
                     Self::section(ui, "레이어");
                     // as tall as the list (last frame's height); scrolls only past the window
@@ -9815,7 +9822,7 @@ impl App {
                 let all_folded = self.s.folded[0] && self.s.folded[1] && (!cams || self.s.folded[2]);
                 // the top stays at the folded spacing, so the title never moves
                 let m = egui::Margin { top: (pad * 0.5) as i8, bottom: if all_folded { (pad * 0.5) as i8 } else { pad as i8 }, ..egui::Margin::same(pad as i8) };
-                theme::glass(ui, m, theme::RADIUS_CARD, |ui| {
+                theme::glass(ui, m, theme::radius_card(), |ui| {
                     ui.set_width(main_w);
                     // floating areas size from the previous frame: ask for last frame's content height
                     let want = self.col_h[0].min(max_h);
@@ -9992,7 +9999,7 @@ impl App {
         let area = egui::Area::new(egui::Id::new("palette")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = vec2(SPACE_SM, SPACE_SM);
-                theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::RADIUS_CARD, |ui| ui.vertical(|ui| {
+                theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::radius_card(), |ui| ui.vertical(|ui| {
                     ui.horizontal_top(|ui| {
                         let (r, resp) = ui.allocate_exact_size(vec2(SQ, SQ), Sense::click_and_drag());
                         let (_, tex) = p.sv_tex.as_ref().unwrap();
@@ -10058,7 +10065,7 @@ impl App {
                     maps.push(("비슷한 색", p.patch_tex.as_ref().unwrap(), GamutMap::Near, "색 거리가 가까운 색 · 가로: 색상 · 세로: 채도"));
                 }
                 for (title, view, which, tip) in maps {
-                    theme::glass(ui, egui::Margin::same(10), theme::RADIUS_CARD, |ui| ui.vertical(|ui| {
+                    theme::glass(ui, egui::Margin::same(10), theme::radius_card(), |ui| ui.vertical(|ui| {
                         ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(theme::LABEL())).glass_tip(tip);
                         let side = SQ + 30.0;
                         let (r, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
@@ -10494,7 +10501,7 @@ impl App {
         // glass spreads (Ash, 10-15)
         if crate::glass::available() && !self.ui_hidden {
             if let Some(ir) = self.rail_indicator(&ctx) {
-                painter.with_clip_rect(egui::Rect::EVERYTHING).rect_filled(ir.expand(3.0), 11.0, ACCENT.gamma_multiply(0.5));
+                painter.with_clip_rect(egui::Rect::EVERYTHING).rect_filled(ir.expand(3.0), theme::inner(theme::radius_card(), 3.0) as f32, ACCENT.gamma_multiply(0.5));
             }
         }
 
@@ -11434,7 +11441,7 @@ impl App {
     fn unsaved_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("unsaved")).frame(egui::Frame::NONE).backdrop_color(Color32::from_black_alpha(45)).show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::RADIUS_CARD, |ui| {
+        egui::Modal::new(egui::Id::new("unsaved")).frame(egui::Frame::NONE).backdrop_color(Color32::from_black_alpha(45)).show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::radius_card(), |ui| {
             ui.set_width(300.0);
             ui.label(crate::kit::dialog_title("저장하지 않은 변경 사항"));
             ui.add_space(SPACE_SM);
@@ -11728,7 +11735,7 @@ fn space_header(ui: &mut egui::Ui, name: &str, count: usize, solved: bool, width
         let q = [pos2(ir.left() + 2.0, ir.top() + 3.0), pos2(ir.right() - 2.0, ir.top() + 6.0), pos2(ir.right() - 2.0, ir.bottom() - 6.0), pos2(ir.left() + 2.0, ir.bottom() - 3.0)];
         p.add(Shape::closed_line(q.to_vec(), Stroke::new(1.4, crate::view3d::WALL_COLOR)));
     } else {
-        theme::tool_icon(p, Tool::Space, ir, INK_2());
+        theme::tool_icon(p, Tool::Space, ir, INK());
     }
     p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, name, FontId::proportional(theme::TEXT_BODY), theme::LABEL());
     let info = if solved { format!("{count}") } else { "선 부족".to_string() };
@@ -11758,7 +11765,7 @@ fn theme_switch(ui: &mut egui::Ui, mode: &mut u8) -> bool {
             p.circle_filled(c, 10.5, FILL_3());
             p.circle_stroke(c, 10.5, Stroke::new(1.2, ACCENT));
         }
-        let col = if on { INK() } else { INK_3() };
+        let col = if on { ACCENT } else { INK() };
         let st = Stroke::new(1.2, col);
         match i {
             0 => {
@@ -12502,7 +12509,7 @@ impl eframe::App for App {
                 .order(egui::Order::Foreground)
                 .anchor(Align2::LEFT_BOTTOM, vec2(SPACE_LG, -SPACE_LG))
                 .show(&ctx, |ui| {
-                    theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::RADIUS_CARD, |ui| {
+                    theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::radius_card(), |ui| {
                         ui.set_width(330.0);
                         ui.label(theme::section_title("입력 기록 · F12로 닫기"));
                         let pen = crate::penhook::state();
@@ -12527,13 +12534,13 @@ impl eframe::App for App {
         // DV_SHOW_MENU=file|edit: that menu's contents in a card (as DV_SHOW_VIEW)
         if let Ok(m) = std::env::var("DV_SHOW_MENU") {
             egui::Area::new(egui::Id::new("dbg_menu")).order(egui::Order::Foreground).fixed_pos(pos2(40.0, 110.0)).show(&ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(8), theme::RADIUS_CARD, |ui| if m == "edit" { self.edit_menu_body(ui) } else { self.file_menu_body(ui) });
+                theme::glass(ui, egui::Margin::same(8), theme::radius_card(), |ui| if m == "edit" { self.edit_menu_body(ui) } else { self.file_menu_body(ui) });
             });
         }
         if std::env::var_os("DV_SHOW_VIEW").is_some() {
             // the View menu's contents in a card (screenshots; menus cannot be opened from code)
             egui::Area::new(egui::Id::new("dbg_view")).order(egui::Order::Foreground).fixed_pos(pos2(40.0, 110.0)).show(&ctx, |ui| {
-                theme::glass(ui, egui::Margin::same(8), theme::RADIUS_CARD, |ui| self.view_menu_body(ui));
+                theme::glass(ui, egui::Margin::same(8), theme::radius_card(), |ui| self.view_menu_body(ui));
             });
         }
         self.export_ui(&ctx);
@@ -12598,7 +12605,7 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
             if on || resp.hovered() {
                 p.rect_filled(r, 5.0, if on { ACCENT.gamma_multiply(0.25) } else { FILL_1() });
             }
-            let col = if on { ACCENT } else { INK_2() };
+            let col = if on { ACCENT } else { INK() };
             // four lines, long and short, flush to the side
             let (x0, x1) = (r.left() + 6.0, r.right() - 6.0);
             for (i, long) in [true, false, true, false].into_iter().enumerate() {

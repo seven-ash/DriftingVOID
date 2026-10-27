@@ -58,8 +58,44 @@ pub const SPACE_LG: f32 = 16.0;
 pub const ROW_H: f32 = 26.0;
 /// Width of a property column and of its rows.
 pub const COL_W: f32 = 280.0;
-pub const RADIUS_CARD: u8 = 14;
-pub const RADIUS_CTRL: u8 = 8;
+// Corner radii (Ash, 10-27: strict concentric shapes). The card radius is the
+// one number: what sits in a card takes the card radius minus the padding
+// between them (`inner`). Free-standing glass (menus, tooltips, the status
+// pill) takes the card radius too. DV_RADIUS=a|b tries the two options being
+// compared: A cards 20 (controls 8 inside 12 of padding), B cards 25 with
+// capsule controls; without it, the radii as before (14, 8).
+fn radius_option() -> u8 {
+    static O: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *O.get_or_init(|| match std::env::var("DV_RADIUS").as_deref() {
+        Ok("a") => 1,
+        Ok("b") => 2,
+        _ => 0,
+    })
+}
+
+/// The outer radius of every glass surface.
+pub fn radius_card() -> u8 {
+    match radius_option() {
+        1 => 20,
+        2 => 25,
+        _ => 14,
+    }
+}
+
+/// A control's radius inside a card (12 of padding): concentric with it.
+pub fn radius_ctrl() -> u8 {
+    match radius_option() {
+        0 => 8,
+        // B: capsules, half the row
+        2 => (ROW_H * 0.5) as u8,
+        _ => inner(radius_card(), SPACE_MD),
+    }
+}
+
+/// The concentric radius `pad` inside a shape of radius `outer`.
+pub fn inner(outer: u8, pad: f32) -> u8 {
+    (outer as f32 - pad).max(2.0).round() as u8
+}
 
 pub const TEXT_BODY: f32 = 13.5;
 pub const TEXT_SMALL: f32 = 11.5;
@@ -99,7 +135,7 @@ pub fn info(t: impl Into<String>) -> egui::RichText {
 pub fn card_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(PAPER_2())
-        .corner_radius(CornerRadius::same(RADIUS_CARD))
+        .corner_radius(CornerRadius::same(radius_card()))
         .inner_margin(Margin::same(SPACE_MD as i8))
         .shadow(if crate::glass::shadow() {
             Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(110) }
@@ -209,11 +245,12 @@ pub fn apply_visuals(ctx: &egui::Context) {
     let [pr, pg, pb, _] = PAPER_2().to_array();
     v.window_fill = Color32::from_rgba_unmultiplied(pr, pg, pb, 245);
     v.window_stroke = Stroke::new(1.0, FILL_1());
-    v.window_corner_radius = CornerRadius::same(RADIUS_CARD);
+    v.window_corner_radius = CornerRadius::same(radius_card());
     let shadow = crate::glass::shadow();
     v.window_shadow = if shadow { Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(130) } } else { Shadow::NONE };
     v.popup_shadow = if shadow { Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(120) } } else { Shadow::NONE };
-    v.menu_corner_radius = CornerRadius::same(12);
+    // menus and tooltips: free-standing glass, the cards' radius
+    v.menu_corner_radius = CornerRadius::same(radius_card());
     v.extreme_bg_color = FILL_1();
     v.faint_bg_color = FILL_1();
     v.code_bg_color = FILL_1();
@@ -221,7 +258,7 @@ pub fn apply_visuals(ctx: &egui::Context) {
     v.selection.stroke = Stroke::new(1.5, ACCENT);
     v.hyperlink_color = ACCENT;
     v.slider_trailing_fill = true;
-    let ctrl = CornerRadius::same(RADIUS_CTRL);
+    let ctrl = CornerRadius::same(radius_ctrl());
     for (w, bg, fg) in [
         (&mut v.widgets.noninteractive, Color32::TRANSPARENT, INK_2()),
         (&mut v.widgets.inactive, FILL_1(), INK()),

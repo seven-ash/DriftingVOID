@@ -195,7 +195,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tip: &str, on: bool) -> Response {
     use crate::theme::GlassTip;
     let (r, resp) = ui.allocate_exact_size(vec2(ROW_H, ROW_H), Sense::click());
     let enabled = ui.is_enabled();
-    let rad = theme::RADIUS_CTRL;
+    let rad = theme::radius_ctrl();
     if enabled && resp.is_pointer_button_down_on() {
         ui.painter().rect_filled(r, CornerRadius::same(rad), FILL_3());
     } else if enabled && resp.hovered() {
@@ -223,9 +223,9 @@ pub fn menu_row(ui: &mut Ui, text: &str, key: &str) -> Response {
     let enabled = ui.is_enabled();
     let p = ui.painter();
     if enabled && resp.is_pointer_button_down_on() {
-        p.rect_filled(r, CornerRadius::same(theme::RADIUS_CTRL), FILL_3());
+        p.rect_filled(r, CornerRadius::same(theme::inner(theme::radius_card(), SPACE_SM)), FILL_3());
     } else if enabled && resp.hovered() {
-        p.rect_filled(r, CornerRadius::same(theme::RADIUS_CTRL), FILL_2());
+        p.rect_filled(r, CornerRadius::same(theme::inner(theme::radius_card(), SPACE_SM)), FILL_2());
     }
     let font = egui::TextStyle::Body.resolve(ui.style());
     let ink = if enabled { INK() } else { INK_2() };
@@ -233,7 +233,7 @@ pub fn menu_row(ui: &mut Ui, text: &str, key: &str) -> Response {
     if !key.is_empty() {
         p.text(pos2(r.right() - SPACE_SM, r.center().y), Align2::RIGHT_CENTER, key, FontId::proportional(theme::TEXT_SMALL), theme::LABEL());
     }
-    focus_ring(ui, &resp, r, theme::RADIUS_CTRL as f32);
+    focus_ring(ui, &resp, r, theme::inner(theme::radius_card(), SPACE_SM) as f32);
     resp
 }
 
@@ -263,7 +263,7 @@ pub fn demo(ctx: &egui::Context) {
     let id = egui::Id::new("kit_demo");
     let mut s = ctx.data(|d| d.get_temp::<S>(id)).unwrap_or(S { sw: [false, true], seg3: 1, seg2: 0, v: [0.6, 40.0, 0.4], xy: [200.0, 0.0] });
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos2(96.0, 72.0)).show(ctx, |ui| {
-        theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::RADIUS_CARD, |ui| {
+        theme::glass(ui, egui::Margin::same(theme::SPACE_MD as i8), theme::radius_card(), |ui| {
             ui.set_width(theme::COL_W);
             let head = |ui: &mut Ui, t: &str| {
                 ui.add_space(SPACE_SM);

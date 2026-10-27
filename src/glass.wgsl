@@ -55,7 +55,8 @@ fn fs_blur(in: VOut) -> @location(0) vec4f {
 
 fn sd(p: vec2f) -> f32 {
     let b = u.panel.zw;
-    let r = u.p.x;
+    // a radius past half the short side is a capsule
+    let r = min(u.p.x, min(b.x, b.y));
     let q = abs(p) - b + r;
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
