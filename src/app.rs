@@ -57,15 +57,15 @@ type RailHint = (&'static str, &'static str, &'static str);
 /// (Ash, 10-27: the hints left the tool card, which starts with the settings).
 fn tool_hint(t: Tool) -> &'static str {
     match t {
-        Tool::Brush => "Ctrl+드래그: 크기 · Alt+클릭: 팔레트 · [ ]: 크기",
-        Tool::Pen => "획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+드래그: 굵기",
-        Tool::Eraser => "브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+드래그: 크기",
+        Tool::Brush => "Ctrl+끌기: 크기 · Alt+클릭: 팔레트 · [ ]: 크기",
+        Tool::Pen => "획 단위로 저장 · 지우개는 한 획씩 지움 · Ctrl+끌기: 굵기",
+        Tool::Eraser => "브러시 레이어: 픽셀 지움 · 펜 레이어: 닿은 획 지움 · Ctrl+끌기: 크기",
         Tool::Text => "빈 곳 클릭: 새 글 · 글 클릭: 수정 · Esc: 끝내기",
-        Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => "Shift: 수평·수직·45° / 정사각·정원 · Ctrl+드래그: 굵기 (선택한 도형에도 적용)",
+        Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse => "Shift: 수평·수직·45° / 정사각·정원 · Ctrl+끌기: 굵기 (선택한 도형에도 적용)",
         Tool::Crop => "사진 선택 → 테두리 손잡이로 자르기 · 안쪽 끌기: 위치 이동 · Enter/Esc: 끝",
         Tool::Frame => "끌어서 영역 지정 · 손잡이로 조절 · Ctrl+E: 내보내기",
         Tool::Select => "클릭: 선택 · 끌기: 이동 · Shift+끌기: 영역 선택(중심 기준, Ctrl 함께: 완전히 포함) · Shift+클릭: 추가/빼기 · 펜은 획, 브러시는 영역 안 픽셀만 · 모서리: 크기 · 위 동그라미: 회전",
-        Tool::Lasso => "자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽을 끌면 이동",
+        Tool::Lasso => "자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽 끌기: 이동",
         Tool::Hand => "휠: 확대/축소 · 가운데 버튼(펜 버튼)/Space+끌기: 이동 · Shift+가운데 끌기: 확대/축소 · F12: 입력 기록",
         Tool::Picker => "캔버스에서 색 집기",
         Tool::Space => "끌기: 공간 영역 (사진 클릭: 사진에 맞춤) · 선 긋기: 소실선 · 1/2/3 또는 X/Y/Z: 축 · 끝점 끌기 · Delete: 선 지우기",
@@ -8194,7 +8194,7 @@ impl App {
                         p.circle_stroke(r.center(), 14.0, Stroke::new(1.0, INK_2()));
                     }
                     if resp.hovered() {
-                        self.rail_hover = Some((("색", "", "누르기: 팔레트 · 캔버스에서 Alt+클릭: 팔레트"), r));
+                        self.rail_hover = Some((("색", "", "클릭: 팔레트 · 캔버스에서는 Alt+클릭"), r));
                     }
                     if resp.clicked() {
                         self.open_palette(r.right_top() + vec2(10.0, -150.0));
@@ -9679,7 +9679,7 @@ impl App {
                 }
                 // moved here from the tool card (Ash, 10-28)
                 if crate::kit::switch(ui, &mut self.s.touch_draw, "손가락으로 그리기")
-                    .glass_tip("끄면 손가락 한 개는 화면 이동, 두 개는 확대/축소. 펜은 항상 그려.")
+                    .glass_tip("끄면: 손가락 하나 화면 이동 · 둘 확대/축소 · 펜은 항상 그리기")
                     .changed()
                 {
                     self.save_prefs();
@@ -9709,7 +9709,7 @@ impl App {
                 }
             });
             ui.add(crate::dial::Dial::new(&mut self.s.peek_delay, 0.05..=1.0).vertical().height(col_h).step(0.05).suffix(" s").text("미리보기").default(0.2))
-                .glass_tip("Tab을 이만큼 누르고 있으면 반대쪽 작업 공간 미리보기");
+                .glass_tip("반대쪽 작업 공간 미리보기까지 Tab 누르는 시간");
             let r = ui.add(crate::dial::Dial::new(&mut self.s.corner_radius, theme::RADIUS_RANGE.0..=theme::RADIUS_RANGE.1).vertical().height(col_h).step(1.0).integer().suffix(" pt").text("모서리").default(theme::RADIUS_DEFAULT))
                 .glass_tip("패널 모서리 반지름");
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
@@ -10744,7 +10744,7 @@ impl App {
                 let mut on = true;
                 // a long photo name is cut, not allowed to widen the panel
                 let label = format!("사진 따라가기 · {n}");
-                if crate::kit::switch(ui, &mut on, &label).glass_tip(format!("{n}\n사진을 옮기거나 크기·회전을 바꾸면 공간 전체가 함께")).changed() {
+                if crate::kit::switch(ui, &mut on, &label).glass_tip(format!("{n}\n사진 이동·크기·회전에 공간 전체가 따라감")).changed() {
                     unfollow = true;
                 }
             });
@@ -10782,7 +10782,7 @@ impl App {
             let (mut off, mut snap, mut wdel, mut ch2) = (w.offset as f32, w.snap_axis, false, false);
             ch2 |= ui
                 .add(crate::dial::Dial::new(&mut off, -5000.0..=5000.0).step(5.0).text("벽 거리").default(0.0))
-                .glass_tip("벽을 앞뒤로 옮겨 (바닥 경계로 잡은 위치가 어긋날 때)")
+                .glass_tip("벽 앞뒤 이동 · 바닥 경계로 잡은 위치가 어긋날 때")
                 .changed();
             ui.horizontal(|ui| {
                 ch2 |= crate::kit::switch(ui, &mut snap, "공간 축에 스냅").glass_tip("공간 축과 15° 이내면 그 축으로").changed();
