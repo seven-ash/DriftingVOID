@@ -10443,8 +10443,12 @@ impl App {
             }
         }
 
-        // brush cursor
-        if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+        // brush cursor (DV_RING_AT="x,y" pins it there, for glass captures)
+        let pinned = std::env::var("DV_RING_AT").ok().and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some(pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+        });
+        if let Some(hp) = pinned.or_else(|| ctx.input(|i| i.pointer.hover_pos())) {
             if rect.contains(hp) {
                 let r = match self.tool {
                     Tool::Brush => Some(self.s.brush_size * 0.5),

@@ -1,9 +1,9 @@
-// Glass under wgpu (src/glass_gpu.rs): each card drawn from its backdrop (the
-// canvas, or a grab of everything under it when it overlaps an earlier layer)
-// blurred at quarter size, with the GL version's look: tint, refraction and
-// red/blue dispersion at the rim, a hairline and an optional shadow. egui's
-// overlay on the canvas is laid over the glass, lightly blurred, after the
-// tint (Ash, 10-15).
+// Glass under wgpu (src/glass_gpu.rs): each card drawn from the canvas and,
+// when it overlaps earlier UI, a grab of the lower cards over it, blurred at
+// quarter size, with the GL version's look: tint, refraction and red/blue
+// dispersion at the rim, a hairline and an optional shadow. egui's overlay on
+// the canvas is laid over the glass, lightly blurred, after the tint, where no
+// lower card covers it (Ash, 10-15).
 
 struct U {
     panel: vec4f, // card centre x, y, half w, h (framebuffer pixels)
@@ -19,6 +19,8 @@ struct U {
 @group(0) @binding(2) var tb: texture_2d<f32>;
 @group(0) @binding(3) var smp: sampler;
 @group(0) @binding(4) var tc: texture_2d<f32>; // the overlay (premultiplied), half size
+@group(0) @binding(5) var td: texture_2d<f32>; // the grab: lower cards (premultiplied, clear elsewhere)
+@group(0) @binding(6) var te: texture_2d<f32>; // the grab blurred
 
 struct VOut {
     @builtin(position) pos: vec4f,
@@ -88,22 +90,32 @@ fn fs_card(in: VOut) -> @location(0) vec4f {
     let edge = clamp(1.0 + d / u.p.y, 0.0, 1.0);
     let base = frag - n * edge * edge * u.p.z;
     let cap = n * edge * edge * u.p.w;
+    // the canvas, with the grab's lower cards over it (premultiplied)
+    let fb = u.dir.xy;
+    let gr = textureSampleLevel(td, smp, (base + cap) / fb, 0.0);
+    let gg = textureSampleLevel(td, smp, base / fb, 0.0);
+    let gb = textureSampleLevel(td, smp, (base - cap) / fb, 0.0);
     let sharp = vec3f(
-        textureSampleLevel(ta, smp, suv(base + cap), 0.0).r,
-        textureSampleLevel(ta, smp, suv(base), 0.0).g,
-        textureSampleLevel(ta, smp, suv(base - cap), 0.0).b,
+        gr.r + textureSampleLevel(ta, smp, suv(base + cap), 0.0).r * (1.0 - gr.a),
+        gg.g + textureSampleLevel(ta, smp, suv(base), 0.0).g * (1.0 - gg.a),
+        gb.b + textureSampleLevel(ta, smp, suv(base - cap), 0.0).b * (1.0 - gb.a),
     );
+    let er = textureSampleLevel(te, smp, (base + cap) / fb, 0.0);
+    let eg = textureSampleLevel(te, smp, base / fb, 0.0);
+    let eb = textureSampleLevel(te, smp, (base - cap) / fb, 0.0);
     let blur = vec3f(
-        textureSampleLevel(tb, smp, suv(base + cap), 0.0).r,
-        textureSampleLevel(tb, smp, suv(base), 0.0).g,
-        textureSampleLevel(tb, smp, suv(base - cap), 0.0).b,
+        er.r + textureSampleLevel(tb, smp, suv(base + cap), 0.0).r * (1.0 - er.a),
+        eg.g + textureSampleLevel(tb, smp, suv(base), 0.0).g * (1.0 - eg.a),
+        eb.b + textureSampleLevel(tb, smp, suv(base - cap), 0.0).b * (1.0 - eb.a),
     );
     var col = mix(blur, sharp, edge * 0.45);
     col = mix(col, u.tint.rgb, u.tint.a * (1.0 - edge * 0.35));
     // neutral hairline so cards separate from what is behind them
     col = mix(col, vec3f(1.0), 0.07 * smoothstep(-1.6 * ppp, -0.4 * ppp, d));
-    // the overlay, lightly blurred: not tinted, refracted or split
-    let ov = textureSampleLevel(tc, smp, frag / u.dir.xy, 0.0);
+    // the overlay, lightly blurred: not tinted, refracted or split, and only
+    // where no lower card covers it (a lower card shows it in its own glass)
+    let cover = textureSampleLevel(td, smp, frag / fb, 0.0).a;
+    let ov = textureSampleLevel(tc, smp, frag / fb, 0.0) * (1.0 - cover);
     col = col * (1.0 - ov.a) + ov.rgb;
     let a = clamp(0.5 - d, 0.0, 1.0);
     if u.q.w > 0.5 {

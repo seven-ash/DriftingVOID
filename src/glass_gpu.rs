@@ -6,10 +6,12 @@
 //! - egui's overlay on the canvas (the rail's tool fill, selection outlines)
 //!   is drawn into a half-size texture, a light blur laid over the glass after
 //!   its tint, so it is not darkened or split (Ash, 10-15);
-//! - a card over anything drawn before it gets a grab: everything up to its
-//!   layer (canvas, overlay, lower cards with their own glass) drawn into a
-//!   texture and blurred like the canvas, so what lies under it shows through
-//!   (Ash, 10-27; only the blur stacks, 10-15). See `backdrop`.
+//! - a card over another layer gets a grab: the UI layers before its own
+//!   (lower cards with their own glass) drawn on a clear texture and blurred
+//!   like the canvas. Every card stacks the same way: the canvas blur, the
+//!   grab's cards over it, then the overlay where no lower card covers it,
+//!   so the overlay looks alike under every card (Ash, 10-27; only the blur
+//!   stacks, 10-15). See `backdrop`.
 //!
 //! Each card is an egui-wgpu paint callback with the GL version's look
 //! (`glass.wgsl`).
@@ -113,6 +115,8 @@ pub fn install(rs: &egui_wgpu::RenderState, msaa: u32) {
             tex(2),
             wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
             tex(4),
+            tex(5),
+            tex(6),
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -237,6 +241,8 @@ fn pass(device: &wgpu::Device, res: &Res, enc: &mut wgpu::CommandEncoder, pipe: 
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(src) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&res.sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&cv) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&cv) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&cv) },
         ],
     });
     let dv = dst.create_view(&Default::default());
@@ -460,7 +466,8 @@ fn backdrop_inner(ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
         res.in_grab = true;
     }
     for (k, &cut) in cutoffs.iter().enumerate() {
-        let shapes: Vec<egui::epaint::ClippedShape> = layers[..cut].iter().flat_map(|(_, s)| s.iter().cloned()).collect();
+        // the UI layers only: the canvas and the overlay come from their own textures
+        let shapes: Vec<egui::epaint::ClippedShape> = layers[..cut].iter().filter(|(l, _)| l.order != egui::Order::Background).flat_map(|(_, s)| s.iter().cloned()).collect();
         let (gm, gs) = {
             let g = &r.callback_resources.get::<Res>().unwrap().grabs[k];
             (g.msaa.clone(), g.screen.clone())
@@ -488,15 +495,17 @@ impl CallbackTrait for Card {
         let Some(res) = resources.get::<Res>() else { return Vec::new() };
         let level = self.level.load(Ordering::Relaxed) as usize;
         let grab = (level > 0 && level <= res.grab_n).then(|| &res.grabs[level - 1]);
-        let (sharp, quarter, map) = match (grab, &res.scene, &res.canvas) {
-            (Some(g), _, _) => (g.view.clone(), &g.blur.quarter, [0.0, 0.0, res.fb[0], res.fb[1]]),
-            (None, Some((scene, map)), Some(b)) => (scene.clone(), &b.quarter, *map),
-            _ => return Vec::new(),
+        let (Some((sharp, map)), Some(b)) = (&res.scene, &res.canvas) else { return Vec::new() };
+        let (sharp, quarter, map) = (sharp.clone(), &b.quarter, *map);
+        let clear = || res.clear.create_view(&Default::default());
+        // the grab's cards (clear where none) and the overlay, for every card alike
+        let (gsharp, gblur) = match grab {
+            Some(g) => (g.view.clone(), g.blur.quarter.create_view(&Default::default())),
+            None => (clear(), clear()),
         };
-        // the overlay goes over canvas-level cards; a grab already holds it
-        let overlay = match (&res.overlay, grab.is_none() && res.overlay_on) {
+        let overlay = match (&res.overlay, res.overlay_on) {
             (Some((_, _, half)), true) => half.create_view(&Default::default()),
-            _ => res.clear.create_view(&Default::default()),
+            _ => clear(),
         };
         let ppp = sd.pixels_per_point;
         let c = self.card.center();
@@ -525,6 +534,8 @@ impl CallbackTrait for Card {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&qv) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&res.sampler) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&overlay) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&gsharp) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&gblur) },
             ],
         });
         if let Ok(mut b) = self.bind.lock() {
