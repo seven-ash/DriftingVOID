@@ -31,9 +31,19 @@ fn focus_ring(ui: &Ui, resp: &Response, r: Rect, radius: f32) {
 /// capsule, knob left and ink when off, right and accent when on, then the
 /// label. True in `changed()` when clicked.
 pub fn switch(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
+    switch_mixed(ui, on, text, false)
+}
+
+/// `switch` for a multi-selection: `mixed` when the selected layers differ,
+/// shown with the knob in the middle (as "—" in number boxes, 0.76.0).
+pub fn switch_mixed(ui: &mut Ui, on: &mut bool, text: &str, mixed: bool) -> Response {
     let track = vec2(26.0, 14.0);
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, INK());
+    // a long label is cut with "…", never widening its panel
+    let room = (ui.available_width() - track.x - SPACE_SM).max(20.0);
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, INK());
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    let galley = ui.painter().layout_job(job);
     let w = track.x + if text.is_empty() { 0.0 } else { SPACE_SM + galley.size().x };
     let (r, mut resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
     if resp.clicked() {
@@ -41,12 +51,13 @@ pub fn switch(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
         resp.mark_changed();
     }
     let enabled = ui.is_enabled();
-    let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let t = if mixed { 0.5 } else { ui.ctx().animate_bool_responsive(resp.id, *on) };
+    let on_look = *on && !mixed;
     let tr = Rect::from_min_size(pos2(r.left(), r.center().y - track.y * 0.5), track);
     let rad = track.y * 0.5;
     let p = ui.painter();
-    let ink = state_ink(*on, enabled);
-    if *on {
+    let ink = state_ink(on_look, enabled);
+    if on_look {
         p.rect_filled(tr, CornerRadius::same(rad as u8), if enabled { ACCENT } else { ACCENT.gamma_multiply(0.38) });
     } else {
         if resp.hovered() && enabled {
@@ -56,7 +67,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
     }
     let knob_r = rad - 3.0;
     let kx = egui::lerp((tr.left() + rad)..=(tr.right() - rad), t);
-    let knob = if *on { if enabled { ACCENT_INK } else { ACCENT_INK.gamma_multiply(0.5) } } else { ink };
+    let knob = if on_look { if enabled { ACCENT_INK } else { ACCENT_INK.gamma_multiply(0.5) } } else { ink };
     p.circle_filled(pos2(kx, tr.center().y), knob_r, knob);
     if !text.is_empty() {
         let col = if enabled { INK() } else { INK_2() };
@@ -70,10 +81,17 @@ pub fn switch(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
 /// Ash 10-27). The chosen segment is filled with the accent; its corners are
 /// concentric with the capsule's (Ash, 10-27).
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str)]) -> Response {
+    let opts: Vec<(T, &str, bool)> = opts.iter().map(|(v, s)| (*v, *s, true)).collect();
+    segmented_en(ui, value, &opts)
+}
+
+/// `segmented` where an option can be unavailable (faded, not clickable),
+/// e.g. 내보낼 영역 while there is no export frame.
+pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str, bool)]) -> Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let pad = 10.0;
     let inset = 2.0;
-    let galleys: Vec<_> = opts.iter().map(|(_, s)| ui.painter().layout_no_wrap((*s).to_owned(), font.clone(), INK())).collect();
+    let galleys: Vec<_> = opts.iter().map(|(_, s, _)| ui.painter().layout_no_wrap((*s).to_owned(), font.clone(), INK())).collect();
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad * 2.0).collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let (r, mut resp) = ui.allocate_exact_size(vec2(total, ROW_H), Sense::hover());
@@ -82,10 +100,11 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &s
     let inner = outer - inset;
     ui.painter().rect_filled(r, CornerRadius::same(outer as u8), FILL_1());
     let mut x = r.left() + inset;
-    for (i, ((v, _), g)) in opts.iter().zip(galleys).enumerate() {
+    for (i, ((v, _, on), g)) in opts.iter().zip(galleys).enumerate() {
         let sr = Rect::from_min_size(pos2(x, r.top() + inset), vec2(widths[i], ROW_H - inset * 2.0));
         x += widths[i];
-        let sresp = ui.interact(sr, resp.id.with(i), Sense::click());
+        let enabled = enabled && *on;
+        let sresp = ui.interact(sr, resp.id.with(i), if enabled { Sense::click() } else { Sense::hover() });
         let chosen = *v == *value;
         if sresp.clicked() && !chosen {
             *value = *v;
@@ -111,6 +130,34 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &s
         resp = resp.union(sresp);
     }
     resp
+}
+
+/// A dialog's title (also for dialogs closed by their own 취소).
+pub fn dialog_title(title: &str) -> egui::RichText {
+    egui::RichText::new(title).font(FontId::new(15.0, theme::ui_bold())).color(INK())
+}
+
+/// A dialog's header row (Ash, 10-27, Q5: one look for every dialog): the
+/// title left, 닫기 right. True when 닫기 is clicked.
+pub fn dialog_header(ui: &mut Ui, title: &str) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(dialog_title(title));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = ui.small_button("닫기").clicked();
+        });
+    });
+    ui.add_space(SPACE_SM);
+    close
+}
+
+/// The one primary action of a dialog (내보내기…, 저장): filled with the
+/// accent (Ash, 10-27).
+pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let fill = if enabled { ACCENT } else { ACCENT.gamma_multiply(0.38) };
+    let b = egui::Button::new(egui::RichText::new(text).color(if enabled { ACCENT_INK } else { ACCENT_INK.gamma_multiply(0.6) })).fill(fill).min_size(vec2(0.0, ROW_H));
+    ui.add(b)
 }
 
 /// Glyphs for icon buttons.
@@ -162,7 +209,16 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tip: &str, on: bool) -> Response {
 /// A menu command: label left, its key right in a quieter ink, the whole row
 /// highlighted on hover (no button fill; Ash 10-27, N4).
 pub fn menu_row(ui: &mut Ui, text: &str, key: &str) -> Response {
-    let w = ui.available_width().max(120.0);
+    // as wide as label and key need (the menu grows to it), else the menu's width
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let need = ui.painter().layout_no_wrap(text.to_owned(), font, INK()).size().x
+        + ui.painter().layout_no_wrap(key.to_owned(), FontId::proportional(theme::TEXT_SMALL), INK()).size().x
+        + SPACE_SM * 2.0
+        + 24.0;
+    // the menu's width (rows line up), at least what label and key need; in
+    // a place without a set width, only what they need
+    let room = ui.available_width();
+    let w = if room > 480.0 { need } else { room.max(need) };
     let (r, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
     let enabled = ui.is_enabled();
     let p = ui.painter();
