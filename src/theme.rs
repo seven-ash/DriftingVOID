@@ -231,11 +231,16 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     if !crate::glass::available() {
         return add(ui);
     }
-    let idx = ui.painter().add(egui::Shape::Noop);
+    // unclipped: `Painter::set` gives the slot the clip of the painter that
+    // sets it, and a drop-down's rows sit in a scroll area whose clip cut the
+    // glass's top and bottom off (Ash, 10-28)
+    let mut p = ui.painter().clone();
+    p.set_clip_rect(egui::Rect::EVERYTHING);
+    let idx = p.add(egui::Shape::Noop);
     let out = add(ui);
     let m = ui.spacing().menu_margin;
     // the popup's whole area as last drawn (a drop-down's rows sit in a scroll
-    // area, whose clip cut the glass's top and bottom); the first frame, from
+    // area inside its margins); the first frame, from
     // the content: full popup width, used height, what is scrolled into view
     let r = ui.ctx().memory(|mem| mem.area_rect(ui.layer_id().id)).unwrap_or_else(|| {
         let (mr, nr) = (ui.max_rect(), ui.min_rect());
@@ -243,7 +248,7 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
         Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32))
     });
     let radius = ui.visuals().menu_corner_radius.nw;
-    ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(r, radius));
+    p.set(idx, glass_shape(r, radius));
     out
 }
 
@@ -267,14 +272,16 @@ impl GlassTip for egui::Response {
                 ui.add(egui::Label::new(text));
                 return;
             }
-            let idx = ui.painter().add(egui::Shape::Noop);
+            let mut p = ui.painter().clone();
+            p.set_clip_rect(egui::Rect::EVERYTHING);
+            let idx = p.add(egui::Shape::Noop);
             ui.add(egui::Label::new(text));
             // the label's size (the tooltip frame hugs it), plus the frame's margin
             let m = ui.spacing().menu_margin;
             let r = ui.min_rect();
             let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
             let radius = ui.visuals().menu_corner_radius.nw;
-            ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(r, radius));
+            p.set(idx, glass_shape(r, radius));
         });
         self
     }
