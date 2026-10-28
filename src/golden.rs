@@ -873,3 +873,114 @@ fn fx_blur_sharpen() {
         assert!((got - want).abs() <= 6.0, "언샤프: at edge{dx:+} {got:.1}, want {want}");
     }
 }
+
+/// The look filters against their definitions (fx-layers.md, step 4), with
+/// the export frame 0..100 as the frame. Skipped without a GPU.
+#[test]
+fn fx_look_filters() {
+    use crate::doc::{Filter, FxLayer};
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+    let draw_at = |doc: &Document, c: egui::Pos2| crate::gpu::with_gpu(|g| g.render_ss(doc, c, region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok());
+    let rect = |doc: &mut Document, a: egui::Pos2, b: egui::Pos2, c: Color32| {
+        doc.insert("r".into(), LayerKind::Shape(shape(ShapeKind::Rect, a, b, c, Some(c), 0.0)), None);
+    };
+    let with = |mut doc: Document, f: Filter, v: [f32; 4]| {
+        doc.export_frame = Some(region);
+        doc.insert("fx".into(), LayerKind::Fx(FxLayer { v, ..FxLayer::new(f) }), None);
+        doc
+    };
+    let red = |pm: &Pixmap, x: u32, y: u32| pm.pixel(x, y).unwrap().red() as f32;
+    let half = |pm: &Pixmap, ch: usize, y: u32| {
+        // where a channel crosses half going right, sub-pixel
+        let v = |x: u32| {
+            let p = pm.pixel(x, y).unwrap();
+            [p.red(), p.green(), p.blue(), p.alpha()][ch] as f32 / 255.0
+        };
+        let x0 = (1..99).find(|&x| (v(x) - 0.5) * (v(x - 1) - 0.5) <= 0.0).unwrap();
+        (x0 - 1) as f32 + 0.5 + (v(x0 - 1) - 0.5) / (v(x0 - 1) - v(x0))
+    };
+
+    // vignette: flat grey 200; 양 .5, 크기 .5, 부드러움 .5 about the frame
+    let mut grey = Document::default();
+    rect(&mut grey, pos2(-50.0, -50.0), pos2(150.0, 150.0), Color32::from_gray(200));
+    // no GPU: skipped (any other failure to draw fails below)
+    if crate::gpu::with_gpu(|_| ()).is_none() {
+        return;
+    }
+    let pm = draw_at(&with(grey.clone(), Filter::Vignette, [0.5, 0.5, 0.5, 0.0]), region.center()).unwrap();
+    for (x, want) in [(50u32, 200.0), (87, 150.0), (99, 101.0)] {
+        // pixel centres: x 50 → e ≈ 0.01, 87 → e = 0.75, 99 → e = 0.99
+        let got = red(&pm, x, 50);
+        assert!((got - want).abs() <= 3.0, "비네트 at x {x}: {got}, want {want}");
+    }
+
+    // pixelate 10: red | blue; the cell holding the edge is their mix, one colour
+    let mut rb = Document::default();
+    rect(&mut rb, pos2(-50.0, -50.0), pos2(150.0, 150.0), Color32::BLUE);
+    rect(&mut rb, pos2(-50.0, -50.0), pos2(55.0, 150.0), Color32::RED);
+    let plain = draw_at(&rb, region.center()).unwrap();
+    let e = half(&plain, 0, 50);
+    let pm = draw_at(&with(rb.clone(), Filter::Pixelate, [10.0, 0.0, 0.0, 0.0]), region.center()).unwrap();
+    let cell = (e / 10.0).floor() as u32 * 10;
+    let frac = (e - cell as f32) / 10.0;
+    let p0 = pm.pixel(cell + 1, 41).unwrap();
+    for (x, y) in [(cell + 8, 48), (cell + 4, 44)] {
+        assert_eq!(pm.pixel(x, y).unwrap(), p0, "픽셀화: one colour per cell");
+    }
+    assert!((p0.red() as f32 - 255.0 * frac).abs() <= 8.0, "픽셀화: red {} for {frac:.2} red", p0.red());
+
+    // colour fringes 10 px at the frame's edge: about a white edge at x≈77.5
+    // on black, red moves out by 0.2·(x−50), blue in by the same
+    let mut wb = Document::default();
+    rect(&mut wb, pos2(-50.0, -50.0), pos2(150.0, 150.0), Color32::BLACK);
+    rect(&mut wb, pos2(-50.0, -50.0), pos2(75.0, 150.0), Color32::WHITE);
+    let plain = draw_at(&wb, region.center()).unwrap();
+    let e = half(&plain, 1, 50);
+    let pm = draw_at(&with(wb.clone(), Filter::Aberration, [10.0, 0.0, 0.0, 0.0]), region.center()).unwrap();
+    let (xr, xg, xb) = (half(&pm, 0, 50), half(&pm, 1, 50), half(&pm, 2, 50));
+    let (wr, wbl) = ((e - 10.0) / 0.8, (e + 10.0) / 1.2);
+    assert!((xg - e).abs() < 0.3 && (xr - wr).abs() < 0.6 && (xb - wbl).abs() < 0.6, "색수차: edge {e:.2}; red {xr:.2} (want {wr:.2}), green {xg:.2}, blue {xb:.2} (want {wbl:.2})");
+
+    // glow: white half on black, 반경 20 (sigma 10), 강도 1: outside the edge the
+    // tail of the normal distribution, 255·Φ(−d/10)
+    let pm = draw_at(&with(wb.clone(), Filter::Glow, [20.0, 1.0, 0.6, 0.0]), region.center()).unwrap();
+    for (d, want) in [(5.0, 78.7), (10.0, 40.5), (20.0, 5.8)] {
+        let x = e + d;
+        let i = (x - 0.5).floor() as u32;
+        let f = x - 0.5 - i as f32;
+        let got = red(&pm, i, 50) * (1.0 - f) + red(&pm, i + 1, 50) * f;
+        assert!((got - want).abs() <= 6.0, "글로우 {d} px out: {got:.1}, want {want}");
+    }
+    assert_eq!(red(&pm, 30, 50), 255.0);
+
+    // halftone 8 px on 50 % grey: the dots' area is the ink, so the mean stays
+    let mut mid = Document::default();
+    rect(&mut mid, pos2(-50.0, -50.0), pos2(150.0, 150.0), Color32::from_gray(128));
+    let pm = draw_at(&with(mid.clone(), Filter::Halftone, [8.0, 45.0, 0.0, 0.0]), region.center()).unwrap();
+    let mut sum = 0.0;
+    for y in 10..90 {
+        for x in 10..90 {
+            sum += red(&pm, x, y);
+        }
+    }
+    let mean = sum / 6400.0 / 255.0;
+    assert!((mean - 128.0 / 255.0).abs() <= 0.04, "하프톤: mean {mean:.3} for grey 0.502");
+
+    // grain: fixed to the canvas, the same where the frame moves; the mean stays
+    let gd = with(grey.clone(), Filter::Grain, [0.2, 1.0, 0.0, 0.0]);
+    let a = draw_at(&gd, region.center()).unwrap();
+    let b = draw_at(&gd, region.center() + vec2(20.0, 10.0)).unwrap();
+    for (x, y) in [(40u32, 40u32), (60, 70), (75, 35)] {
+        assert_eq!(a.pixel(x, y).unwrap(), b.pixel(x - 20, y - 10).unwrap(), "노이즈 at canvas {x},{y}");
+    }
+    let mut s = 0.0;
+    let mut s2 = 0.0;
+    for y in 0..100 {
+        for x in 0..100 {
+            let v = red(&a, x, y);
+            s += v;
+            s2 += v * v;
+        }
+    }
+    let (m, sd) = (s / 1e4, (s2 / 1e4 - (s / 1e4).powi(2)).sqrt());
+}

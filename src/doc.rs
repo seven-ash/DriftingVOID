@@ -515,6 +515,12 @@ pub enum Filter {
     Posterize,
     Threshold,
     GradientMap,
+    Grain,
+    Vignette,
+    Aberration,
+    Pixelate,
+    Halftone,
+    Glow,
 }
 
 /// One value of a filter: label, range, default, dial step, suffix.
@@ -528,7 +534,7 @@ pub struct FxParam {
 }
 
 impl Filter {
-    pub const ALL: [Filter; 12] = [
+    pub const ALL: [Filter; 18] = [
         Filter::Blur,
         Filter::MotionBlur,
         Filter::Unsharp,
@@ -541,6 +547,12 @@ impl Filter {
         Filter::Posterize,
         Filter::Threshold,
         Filter::GradientMap,
+        Filter::Grain,
+        Filter::Vignette,
+        Filter::Aberration,
+        Filter::Pixelate,
+        Filter::Halftone,
+        Filter::Glow,
     ];
 
     pub fn label(self) -> &'static str {
@@ -557,6 +569,12 @@ impl Filter {
             Filter::Posterize => "포스터화",
             Filter::Threshold => "임계값",
             Filter::GradientMap => "그라디언트 맵",
+            Filter::Grain => "노이즈",
+            Filter::Vignette => "비네트",
+            Filter::Aberration => "색수차",
+            Filter::Pixelate => "픽셀화",
+            Filter::Halftone => "하프톤",
+            Filter::Glow => "글로우",
         }
     }
 
@@ -564,6 +582,7 @@ impl Filter {
     pub fn point_code(self) -> Option<f32> {
         Some(match self {
             Filter::Blur | Filter::MotionBlur | Filter::Unsharp => return None,
+            Filter::Grain | Filter::Vignette | Filter::Aberration | Filter::Pixelate | Filter::Halftone | Filter::Glow => return None,
             Filter::BrightContrast => 0.0,
             Filter::Hsl => 1.0,
             Filter::Levels => 2.0,
@@ -620,6 +639,32 @@ impl Filter {
                 FxParam { name: "기준", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
                 FxParam { name: "부드러움", lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
             ],
+            // grain fixed to the canvas (cells of 크기 canvas px), mono to colour
+            Filter::Grain => &[
+                FxParam { name: "양", lo: 0.0, hi: 1.0, default: 0.15, step: 0.01, suffix: "" },
+                FxParam { name: "크기", lo: 0.5, hi: 20.0, default: 1.0, step: 0.5, suffix: " px" },
+                FxParam { name: "색", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+            ],
+            // about the frame (export frame, else the content): 크기 1 reaches
+            // the middle of its sides
+            Filter::Vignette => &[
+                FxParam { name: "양", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: "크기", lo: 0.0, hi: 1.5, default: 0.8, step: 0.01, suffix: "" },
+                FxParam { name: "부드러움", lo: 0.01, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+            ],
+            // red out, blue in, by 양 canvas px at the frame's edge
+            Filter::Aberration => &[FxParam { name: "양", lo: 0.0, hi: 50.0, default: 4.0, step: 0.5, suffix: " px" }],
+            Filter::Pixelate => &[FxParam { name: "크기", lo: 2.0, hi: 200.0, default: 16.0, step: 1.0, suffix: " px" }],
+            Filter::Halftone => &[
+                FxParam { name: "크기", lo: 2.0, hi: 100.0, default: 8.0, step: 0.5, suffix: " px" },
+                FxParam { name: "각도", lo: -90.0, hi: 90.0, default: 45.0, step: 1.0, suffix: "°" },
+            ],
+            // what is brighter than 기준, blurred by 반경 and added
+            Filter::Glow => &[
+                FxParam { name: "반경", lo: 1.0, hi: 200.0, default: 20.0, step: 0.5, suffix: " px" },
+                FxParam { name: "강도", lo: 0.0, hi: 3.0, default: 1.0, step: 0.05, suffix: "" },
+                FxParam { name: "기준", lo: 0.0, hi: 1.0, default: 0.6, step: 0.01, suffix: "" },
+            ],
         }
     }
 
@@ -663,6 +708,9 @@ impl FxLayer {
             Filter::Blur | Filter::Unsharp => self.v[0].max(0.0) * 1.5,
             // the line is centred on the pixel
             Filter::MotionBlur => self.v[0].max(0.0) * 0.5,
+            Filter::Glow => self.v[0].max(0.0) * 1.5,
+            Filter::Aberration => self.v[0].max(0.0) * 1.5,
+            Filter::Pixelate | Filter::Halftone => self.v[0].max(1.0),
             _ => 0.0,
         }
     }
@@ -674,6 +722,8 @@ impl FxLayer {
     pub fn max_scale(&self) -> f32 {
         match self.filter {
             Filter::Blur => 8.0 / (self.v[0].max(1e-3) * 0.5),
+            // one pixel a cell: the layers drawn at that scale are the cells' averages
+            Filter::Pixelate => 1.0 / self.v[0].max(1.0),
             _ => f32::INFINITY,
         }
     }
@@ -688,7 +738,9 @@ impl FxLayer {
             Filter::Levels => self.v == [0.0, 1.0, 1.0, 0.0],
             Filter::Curves => self.v[..3] == [0.25, 0.5, 0.75],
             Filter::Desaturate => self.v[0] <= 0.0,
-            Filter::Invert | Filter::Posterize | Filter::Threshold | Filter::GradientMap => false,
+            Filter::Invert | Filter::Posterize | Filter::Threshold | Filter::GradientMap | Filter::Pixelate | Filter::Halftone => false,
+            Filter::Grain | Filter::Vignette | Filter::Aberration => self.v[0] <= 0.0,
+            Filter::Glow => self.v[1] <= 0.0,
         }
     }
 }

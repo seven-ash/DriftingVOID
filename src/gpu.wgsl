@@ -449,6 +449,10 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 //  3 resample to the target (bilinear)
 //  4 motion blur: along h0.xy (unit), h0.z px long, p0.y taps, centred
 //  5 unsharp mask: tex0 the original, tex1 its blur; amount h0.x, threshold h0.y
+// 6–9, 11–12 the look filters: rot = below pixel origin (canvas) and scale,
+//    rot2 = the frame's centre and half size (canvas); h0 the values
+//  6 grain, 7 vignette, 8 colour fringes, 9 halftone, 11 glow's bright
+//    part, 12 glow added (tex1 the blurred bright part)
 // 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
 //    (p1.y on); p0.z the blend (-1: 복사), opacity tsize.z
 
@@ -569,6 +573,88 @@ fn point(kind: i32, c: vec3f) -> vec3f {
     }
 }
 
+fn hash2(p: vec2f) -> vec3f {
+    // three values in 0..1 per cell, stable everywhere on the canvas
+    var q = vec3f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)), dot(p, vec2f(419.2, 371.9)));
+    return fract(sin(q) * 43758.5453);
+}
+
+fn bilin_at(t: texture_2d<f32>, p: vec2f) -> vec4f {
+    // p in pixel units (centres at .5); transparent past the edge
+    let s = p - 0.5;
+    let i = vec2i(floor(s));
+    let f = s - floor(s);
+    let d = vec2i(textureDimensions(t));
+    var c = array<vec4f, 4>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+    var o = array<vec2i, 4>(vec2i(0, 0), vec2i(1, 0), vec2i(0, 1), vec2i(1, 1));
+    for (var k = 0; k < 4; k++) {
+        let j = i + o[k];
+        if j.x >= 0 && j.y >= 0 && j.x < d.x && j.y < d.y {
+            c[k] = textureLoad(t, j, 0);
+        }
+    }
+    return mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y);
+}
+
+fn look(op: i32, q: vec2i) -> vec4f {
+    let s = u.rot.z;
+    // this pixel's centre on the canvas
+    let cp = u.rot.xy + (vec2f(q) + 0.5) / s;
+    let p = u.h0;
+    let o = textureLoad(tex0, q, 0);
+    switch op {
+        case 6: {
+            let c = straight(o);
+            let h = hash2(floor(cp / max(p.y, 0.01))) - 0.5;
+            let n = mix(vec3f(h.x), h, p.z);
+            let v = clamp(c.rgb + n * p.x * 2.0, vec3f(0.0), vec3f(1.0));
+            return vec4f(v * c.a, c.a);
+        }
+        case 7: {
+            // distance from the frame's centre, 1 at the middle of its sides
+            let e = length((cp - u.rot2.xy) / max(u.rot2.zw, vec2f(1e-3)));
+            let k = 1.0 - p.x * smoothstep(p.y, p.y + p.z, e);
+            return vec4f(o.rgb * k, o.a);
+        }
+        case 8: {
+            // red outwards, blue inwards, by 양 at the frame's edge
+            let dir = (cp - u.rot2.xy) / max(max(u.rot2.z, u.rot2.w), 1e-3);
+            let off = dir * p.x * s;
+            let px = vec2f(q) + 0.5;
+            let r = bilin_at(tex0, px - off);
+            let b = bilin_at(tex0, px + off);
+            return vec4f(r.r, o.g, b.b, max(o.a, max(r.a, b.a)));
+        }
+        case 9: {
+            // dots on a grid turned by 각도; each dot as dark as its cell centre
+            let a = radians(p.y);
+            let cs = cos(a);
+            let sn = sin(a);
+            let rc = vec2f(cs * cp.x + sn * cp.y, -sn * cp.x + cs * cp.y);
+            let size = max(p.x, 0.5);
+            let cc = (floor(rc / size) + 0.5) * size;
+            let cw = vec2f(cs * cc.x - sn * cc.y, sn * cc.x + cs * cc.y);
+            let smp = straight(bilin_at(tex0, (cw - u.rot.xy) * s));
+            let ink = 1.0 - luma709(smp.rgb);
+            // the dot's area is the cell's ink (true tones up to where dots meet)
+            let r = size * sqrt(ink / 3.14159265);
+            let cov = clamp((r - length(rc - cc)) * s + 0.5, 0.0, 1.0);
+            let v = vec3f(1.0 - cov);
+            return vec4f(v * smp.a, smp.a);
+        }
+        case 11: {
+            let c = straight(o);
+            let k = smoothstep(p.z, p.z + 0.1, luma709(c.rgb));
+            return vec4f(c.rgb * k * c.a, k * c.a);
+        }
+        default: {
+            // 12: the blurred bright part (tex1) added
+            let g = textureLoad(tex1, q, 0) * p.y;
+            return vec4f(min(o.rgb + g.rgb, vec3f(1.0)), min(o.a + g.a, 1.0));
+        }
+    }
+}
+
 fn straight(c: vec4f) -> vec4f {
     if c.a <= 0.0 {
         return vec4f(0.0);
@@ -639,9 +725,17 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let v = clamp(so.rgb + u.h0.x * dlt * keep, vec3f(0.0), vec3f(1.0));
         return vec4f(v * o.a, o.a);
     }
+    if op >= 6 && op != 10 {
+        return look(op, q);
+    }
     if op == 3 {
-        // resample: target pixel -> below pixel (h0.x scale, h0.yz offset), bilinear
+        // resample: target pixel -> below pixel (h0.x scale, h0.yz offset),
+        // bilinear, or nearest when h0.w (pixelate)
         let p = (vec2f(q) + 0.5) * u.h0.x + u.h0.yz - 0.5;
+        if u.h0.w > 0.5 {
+            let dn = vec2i(textureDimensions(tex0)) - vec2i(1);
+            return textureLoad(tex0, clamp(vec2i(floor(p + 0.5)), vec2i(0), dn), 0);
+        }
         let dm = vec2i(textureDimensions(tex0)) - vec2i(1);
         let i = vec2i(floor(p));
         let t = p - floor(p);

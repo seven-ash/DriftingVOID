@@ -40,7 +40,9 @@ pub enum Draw {
     /// An FX layer: everything drawn so far, filtered and put back (복사 or a
     /// blend mode), mixed with the original by `opacity`, only where its mask
     /// lets it (docs/updates/fx-layers.md).
-    Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)> },
+    /// `frame`: what vignette and colour fringes centre on (the export
+    /// frame, else the content's bounds).
+    Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, frame: Rect },
 }
 
 #[derive(Clone)]
@@ -73,6 +75,7 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
         None => crate::persp::cameras(&doc.spaces),
     };
     let mut items = Vec::new();
+    let frame = doc.export_frame.or_else(|| doc.content_bounds()).unwrap_or(Rect::from_center_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0)));
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
         if layer.mask_of.is_some() {
             continue;
@@ -87,7 +90,7 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
                 continue;
             }
             let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
-            items.push(Item { bounds: Rect::EVERYTHING, draw: Draw::Fx { fx: fx.clone(), opacity: timed.opacity, mask } });
+            items.push(Item { bounds: Rect::EVERYTHING, draw: Draw::Fx { fx: fx.clone(), opacity: timed.opacity, mask, frame } });
             continue;
         }
         let Some(bounds) = timed.shown_bounds(&cams) else { continue };

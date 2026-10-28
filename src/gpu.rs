@@ -113,7 +113,7 @@ enum Node {
     /// target (`map`: target pixel to below pixel), put over the background
     /// (`top`: the frame's own list, which has one) and written back by its
     /// blend, opacity and mask.
-    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool },
+    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool, frame: Rect },
 }
 
 /// Where a mask lets a layer show: from the mask's tile atlas (as
@@ -1096,8 +1096,8 @@ impl Gpu {
     fn prepare_with_fx(&mut self, items: &[crate::scene::Item], v: &View, cull: Rect, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>, top: bool) {
         for (i, item) in items.iter().enumerate() {
             match &item.draw {
-                Draw::Fx { fx, opacity, mask } => {
-                    let n = self.prepare_fx(fx.clone(), *opacity, mask.clone(), &items[..i], v, jobs, top);
+                Draw::Fx { fx, opacity, mask, frame } => {
+                    let n = self.prepare_fx(fx.clone(), *opacity, mask.clone(), *frame, &items[..i], v, jobs, top);
                     out.push(n);
                 }
                 d if item.bounds.intersects(cull) => self.prepare(d.clone(), item.bounds, v, jobs, out),
@@ -1111,7 +1111,7 @@ impl Gpu {
     /// a Gaussian blur at a scale where sigma is at most 8 px, so the edge of
     /// the frame or screen never shows and zooming changes nothing (Ash, 10-28).
     #[allow(clippy::too_many_arguments)]
-    fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
+    fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, frame: Rect, below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
         let reach = fx.reach();
         let v2 = if reach > 0.0 {
             let want = v.full.expand(reach);
@@ -1136,7 +1136,7 @@ impl Gpu {
         self.prepare_with_fx(below, &v2, v2.full.expand(2.0 / v2.s), jobs, &mut nodes, false);
         let mask = mask.map(|(m, map)| self.mask_spec(m, map, [0, 0, v.tw as i32, v.th as i32], v, jobs));
         let map = [v2.s / v.s, (v.full.min.x - v2.full.min.x) * v2.s, (v.full.min.y - v2.full.min.y) * v2.s];
-        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top }
+        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top, frame }
     }
 
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
@@ -2205,7 +2205,7 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
         use crate::doc::Filter;
-        let Node::Fx { fx, opacity, mask, below, view: v2, map, top } = nd else { return };
+        let Node::Fx { fx, opacity, mask, below, view: v2, map, top, frame } = nd else { return };
         let full = [0.0, 0.0, tw as f32, th as f32];
         let (bw, bh) = (v2.tw, v2.th);
         let bfull = [0.0, 0.0, bw as f32, bh as f32];
@@ -2215,7 +2215,18 @@ impl Gpu {
         for n in below {
             self.run(enc, n, &src, depth + 1, ready, v2, None);
         }
-        let f2 = self.pooled(bw, bh, 5000 + depth);
+        let mut f2 = self.pooled(bw, bh, 5000 + depth);
+        // canvas units of a below pixel: its origin and scale; the frame's centre and half size
+        let canvas = [v2.full.min.x, v2.full.min.y, v2.s, 0.0];
+        let fr = [frame.center().x, frame.center().y, frame.width() * 0.5, frame.height() * 0.5];
+        let look = |op: f32| {
+            let mut u = Uniform::new(bfull, bw, bh);
+            u.p0 = [op, 0.0, 0.0, 0.0];
+            u.h0 = fx.v;
+            u.rot = canvas;
+            u.rot2 = fr;
+            u
+        };
         match fx.filter {
             Filter::Blur => self.gauss(enc, &src, &f2, fx.v[0] * v2.s * 0.5, 5100 + depth, bw, bh),
             Filter::MotionBlur => {
@@ -2228,6 +2239,19 @@ impl Gpu {
                 u.p0 = [4.0, n, 0.0, 0.0];
                 u.h0 = [cs, -sn, len, 0.0];
                 self.fx_pass(enc, &f2, &u, &src, &self.dummy, &self.dummy);
+            }
+            Filter::Grain => self.fx_pass(enc, &f2, &look(6.0), &src, &self.dummy, &self.dummy),
+            Filter::Vignette => self.fx_pass(enc, &f2, &look(7.0), &src, &self.dummy, &self.dummy),
+            Filter::Aberration => self.fx_pass(enc, &f2, &look(8.0), &src, &self.dummy, &self.dummy),
+            Filter::Halftone => self.fx_pass(enc, &f2, &look(9.0), &src, &self.dummy, &self.dummy),
+            // the layers drawn at one pixel a cell are already the cells
+            Filter::Pixelate => f2 = src.clone(),
+            Filter::Glow => {
+                let bright = self.pooled(bw, bh, 5260 + depth);
+                self.fx_pass(enc, &bright, &look(11.0), &src, &self.dummy, &self.dummy);
+                let glow = self.pooled(bw, bh, 5270 + depth);
+                self.gauss(enc, &bright, &glow, fx.v[0] * v2.s * 0.5, 5100 + depth, bw, bh);
+                self.fx_pass(enc, &f2, &look(12.0), &src, &glow, &self.dummy);
             }
             Filter::Unsharp => {
                 let blurred = self.pooled(bw, bh, 5200 + depth + 50);
@@ -2254,7 +2278,8 @@ impl Gpu {
             let t = self.pooled(tw, th, 5400 + depth);
             let mut u = Uniform::new(full, tw, th);
             u.p0 = [3.0, 0.0, 0.0, 0.0];
-            u.h0 = [map[0], map[1], map[2], 0.0];
+            // pixelate: each cell one colour (nearest), else bilinear
+            u.h0 = [map[0], map[1], map[2], (fx.filter == Filter::Pixelate) as u8 as f32];
             self.fx_pass(enc, &t, &u, &f, &self.dummy, &self.dummy);
             f = t;
         }
