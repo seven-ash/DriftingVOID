@@ -63,11 +63,14 @@ pub mod ch {
     pub const FOLLOW: u16 = 256;
     /// Sound volume (video layers, sound clips).
     pub const VOL: u16 = 512;
-    pub const ALL: u16 = 1023;
+    /// An FX layer's values, one channel each (`FxLayer::v`).
+    pub const FX: [u16; 4] = [1024, 2048, 4096, 8192];
+    pub const FX_ALL: u16 = 1024 | 2048 | 4096 | 8192;
+    pub const ALL: u16 = 16383;
     /// Everything a key held before volume existed (older files).
     pub const OLD_ALL: u16 = 511;
     /// Number of value bits.
-    pub const COUNT: u16 = 10;
+    pub const COUNT: u16 = 14;
 }
 
 /// The values that differ between two states (for auto-key).
@@ -88,6 +91,11 @@ pub fn diff_ch(a: &Key, b: &Key) -> u16 {
     }
     if ne(a.vol, b.vol) {
         c |= ch::VOL;
+    }
+    for i in 0..4 {
+        if ne(a.fx[i], b.fx[i]) {
+            c |= ch::FX[i];
+        }
     }
     if a.follow != b.follow {
         c |= ch::FOLLOW;
@@ -136,6 +144,11 @@ fn copy_ch(dst: &mut Key, src: &Key, c: u16) {
     if c & ch::VOL != 0 {
         dst.vol = src.vol;
     }
+    for i in 0..4 {
+        if c & ch::FX[i] != 0 {
+            dst.fx[i] = src.fx[i];
+        }
+    }
     if c & ch::FOLLOW != 0 {
         dst.follow = src.follow;
     }
@@ -178,6 +191,9 @@ pub struct Key {
     /// Sound volume (1 = as recorded).
     #[serde(default = "unit_vol")]
     pub vol: f32,
+    /// An FX layer's values.
+    #[serde(default)]
+    pub fx: [f32; 4],
 }
 
 fn lerp(a: f32, b: f32, u: f64) -> f32 {
@@ -197,6 +213,7 @@ impl Key {
             rot: lerp(self.rot, o.rot, u),
             opacity: lerp(self.opacity, o.opacity, u),
             vol: lerp(self.vol, o.vol, u),
+            fx: std::array::from_fn(|i| lerp(self.fx[i], o.fx[i], u)),
             place: match (self.place, o.place) {
                 (Some(a), Some(b)) => Some(PlaceKey {
                     pos: lerp3(a.pos, b.pos, u),
@@ -402,7 +419,7 @@ pub struct Follow {
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL & !ch::VOL, vol: 1.0 }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL & !ch::VOL & !ch::FX_ALL, vol: 1.0, fx: [0.0; 4] }
     }
 
     pub fn apply(&mut self, k: &Key) {
@@ -479,6 +496,11 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         LayerKind::Vector(v) => (v.offset.to_pos2(), Vec2::ZERO, 0.0),
         LayerKind::Raster(r) => (r.offset.to_pos2(), Vec2::ZERO, 0.0),
         LayerKind::Audio(a) => (a.pos, Vec2::ZERO, 0.0),
+        LayerKind::Fx(_) => (Pos2::ZERO, Vec2::ZERO, 0.0),
+    };
+    let fx = match &l.kind {
+        LayerKind::Fx(f) => Some(f.v),
+        _ => None,
     };
     Key {
         t,
@@ -490,8 +512,10 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         ease: Ease::default(),
         follow: None,
         // only video and sound layers have a volume to key
-        ch: if sound_vol(l).is_some() { ch::ALL } else { ch::ALL & !ch::VOL },
+        // volume only on video and sound layers, filter values only on FX layers
+        ch: ch::ALL & (if sound_vol(l).is_some() { !0 } else { !ch::VOL }) & (if fx.is_some() { !0 } else { !ch::FX_ALL }),
         vol: sound_vol(l).unwrap_or(1.0),
+        fx: fx.unwrap_or_default(),
     }
 }
 
@@ -533,6 +557,11 @@ pub fn apply_key(l: &mut Layer, k: &Key) {
         LayerKind::Audio(a) => {
             a.pos = c;
             a.volume = k.vol.max(0.0);
+        }
+        LayerKind::Fx(f) => {
+            for (i, p) in f.filter.params().iter().enumerate() {
+                f.v[i] = k.fx[i].clamp(p.lo, p.hi);
+            }
         }
     }
     l.opacity = k.opacity.clamp(0.0, 1.0);
@@ -643,7 +672,7 @@ mod tests {
     }
 
     fn k(t: f64, x: f32) -> Key {
-        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL, vol: 1.0 }
+        Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL, vol: 1.0, fx: [0.0; 4] }
     }
 
     #[test]

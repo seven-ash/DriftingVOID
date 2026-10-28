@@ -106,6 +106,16 @@ enum Node {
     /// target pixel to an atlas pixel (the mask's own pixels; nearest, as
     /// export::mask_hide), `invert` and `strength` as the mask layer's.
     MaskedGpu { inner: Vec<Node>, atlas: Arc<wgpu::Texture>, a: [[f32; 3]; 2], rect: [i32; 4], invert: bool, strength: f32 },
+    /// An FX layer: the target so far, filtered (`s`: target pixels per canvas
+    /// pixel, for sizes) and written back by its blend, opacity and mask.
+    Fx { fx: crate::doc::FxLayer, s: f32, opacity: f32, mask: Option<MaskSpec> },
+}
+
+/// Where a mask lets a layer show: from the mask's tile atlas (as
+/// `Node::MaskedGpu`) or from keep values made on the CPU (as `Node::Masked`).
+enum MaskSpec {
+    Atlas { atlas: Arc<wgpu::Texture>, a: [[f32; 3]; 2], invert: bool, strength: f32 },
+    Keep { keep: Img, off: [i32; 2], outside: f32 },
 }
 
 /// A texture: cached, or still to be rasterized (index into the job list).
@@ -151,6 +161,9 @@ pub struct Gpu {
     from_nv12: wgpu::RenderPipeline,
     ground: wgpu::RenderPipeline,
     mask_atlas: wgpu::RenderPipeline,
+    /// FX layers (`fs_fx`): filter passes and the write-back, three textures.
+    fx_layout: wgpu::BindGroupLayout,
+    fx: wgpu::RenderPipeline,
     prep: wgpu::RenderPipeline,
     mip: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
@@ -419,6 +432,37 @@ impl Gpu {
         let down = pipe("fs_down", None);
         let image = pipe("fs_image", Some(over_blend));
         let prep = pipe("fs_prep", None);
+        let fx_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                tex_entry(1),
+                tex_entry(2),
+                tex_entry(3),
+            ],
+        });
+        let fx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&fx_layout)], immediate_size: 0 });
+        let fx = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fs_fx"),
+            layout: Some(&fx_pl),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_fx"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: FMT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let mip = pipe("fs_mip", None);
         let sides_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sides"), source: wgpu::ShaderSource::Wgsl(include_str!("sides.wgsl").into()) });
         let sides_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -585,6 +629,8 @@ impl Gpu {
             from_nv12,
             ground,
             mask_atlas,
+            fx_layout,
+            fx,
             prep,
             mip,
             dummy,
@@ -1046,36 +1092,48 @@ impl Gpu {
                 let mut nodes = Vec::new();
                 self.prepare(*inner, bounds, v, jobs, &mut nodes);
                 let Some(rect) = v.px(bounds) else { return };
-                let strength = mask.opacity.clamp(0.0, 1.0);
-                // on the GPU from the mask's tiles (nothing to compute per pixel
-                // on the CPU, so zooming costs nothing); the CPU keep values
-                // only when the mask is too big for one texture
-                if let Some((atlas, o)) = self.atlas_of(&mask) {
-                    // target pixel -> canvas -> (the mask's own place) -> atlas pixel
-                    let sv = v.s;
-                    let f = v.full.min;
-                    let (r, sc, c, last) = match map {
-                        Some(m) => (m.th, m.s.max(1e-6), m.c, m.last),
-                        None => (0.0, 1.0, Pos2::ZERO, Pos2::ZERO),
-                    };
-                    let (sn, cs) = (-r).sin_cos();
-                    // q = last + R(-th)·((F + P/sv) − c)/s − O
-                    let k = 1.0 / (sv * sc);
-                    let (dx, dy) = ((f.x - c.x) / sc, (f.y - c.y) / sc);
-                    let a = [
-                        [cs * k, -sn * k, last.x + cs * dx - sn * dy - o.x],
-                        [sn * k, cs * k, last.y + sn * dx + cs * dy - o.y],
-                    ];
-                    out.push(Node::MaskedGpu { inner: nodes, atlas, a, rect, invert: mask.mask_invert, strength });
-                    return;
+                match self.mask_spec(mask, map, rect, v, jobs) {
+                    MaskSpec::Atlas { atlas, a, invert, strength } => out.push(Node::MaskedGpu { inner: nodes, atlas, a, rect, invert, strength }),
+                    MaskSpec::Keep { keep, off, outside } => out.push(Node::Masked { inner: nodes, keep, off, rect, outside }),
                 }
-                let strength = mask.opacity.clamp(0.0, 1.0);
-                let outside = 1.0 - if mask.mask_invert { strength } else { 0.0 };
-                let keep = self.keep(mask, map, rect, v, jobs);
-                out.push(Node::Masked { inner: nodes, keep, off: [rect[0], rect[1]], rect, outside });
+            }
+            Draw::Fx { fx, opacity, mask } => {
+                let rect = [0, 0, v.tw as i32, v.th as i32];
+                let mask = mask.map(|(m, map)| self.mask_spec(m, map, rect, v, jobs));
+                out.push(Node::Fx { fx, s: v.s, opacity, mask });
             }
             Draw::Projected(p) => self.projected(*p, v, out),
         }
+    }
+
+    /// How a mask cuts what is drawn in `rect` (target pixels).
+    fn mask_spec(&mut self, mask: Layer, map: Option<MaskMap>, rect: [i32; 4], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>) -> MaskSpec {
+        let strength = mask.opacity.clamp(0.0, 1.0);
+        // on the GPU from the mask's tiles (nothing to compute per pixel
+        // on the CPU, so zooming costs nothing); the CPU keep values
+        // only when the mask is too big for one texture
+        if let Some((atlas, o)) = self.atlas_of(&mask) {
+            // target pixel -> canvas -> (the mask's own place) -> atlas pixel
+            let sv = v.s;
+            let f = v.full.min;
+            let (r, sc, c, last) = match map {
+                Some(m) => (m.th, m.s.max(1e-6), m.c, m.last),
+                None => (0.0, 1.0, Pos2::ZERO, Pos2::ZERO),
+            };
+            let (sn, cs) = (-r).sin_cos();
+            // q = last + R(-th)·((F + P/sv) − c)/s − O
+            let k = 1.0 / (sv * sc);
+            let (dx, dy) = ((f.x - c.x) / sc, (f.y - c.y) / sc);
+            let a = [
+                [cs * k, -sn * k, last.x + cs * dx - sn * dy - o.x],
+                [sn * k, cs * k, last.y + sn * dx + cs * dy - o.y],
+            ];
+            return MaskSpec::Atlas { atlas, a, invert: mask.mask_invert, strength };
+        }
+        let strength = mask.opacity.clamp(0.0, 1.0);
+        let outside = 1.0 - if mask.mask_invert { strength } else { 0.0 };
+        let keep = self.keep(mask, map, rect, v, jobs);
+        MaskSpec::Keep { keep, off: [rect[0], rect[1]], outside }
     }
 
     /// A 2D layer rasterized into its box (target pixels), from the cache when
@@ -2052,6 +2110,7 @@ impl Gpu {
                 let u = Uniform::new(rect.map(|x| x as f32), tw, th);
                 self.pass(enc, &self.cut, target, &u, &g, &o);
             }
+            Node::Fx { fx, s, opacity, mask } => self.run_fx(enc, fx, *s, *opacity, mask.as_ref(), target, depth, ready, tw, th),
             Node::Masked { inner, keep, off, rect, outside } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);
                 self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
@@ -2064,6 +2123,90 @@ impl Gpu {
                 self.pass(enc, &self.mask, target, &u, &g, &k);
             }
         }
+    }
+
+    /// An FX node: the target so far (`back`), filtered into `f`, then written
+    /// back over the whole target (fx-layers.md).
+    #[allow(clippy::too_many_arguments)]
+    fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, fx: &crate::doc::FxLayer, s: f32, opacity: f32, mask: Option<&MaskSpec>, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
+        use crate::doc::Filter;
+        let full = [0.0, 0.0, tw as f32, th as f32];
+        let back = self.backdrop(enc, target, depth, tw, th);
+        let f = self.pooled(tw, th, 5000 + depth);
+        match fx.filter {
+            Filter::Blur => {
+                // the radius reaches about 2 sigma; at most 48 taps each side,
+                // spread further apart for big radii
+                let sigma = (fx.v[0] * s * 0.5).max(0.01);
+                let step = (sigma * 3.0 / 48.0).max(1.0);
+                let n = (sigma * 3.0 / step).ceil().min(48.0);
+                let tmp = self.pooled(tw, th, 5100 + depth);
+                for (dir, from, to) in [([1.0, 0.0], &back, &tmp), ([0.0, 1.0], &tmp, &f)] {
+                    let mut u = Uniform::new(full, tw, th);
+                    u.p0 = [1.0, n, 0.0, 0.0];
+                    u.h0 = [dir[0], dir[1], sigma, step];
+                    self.fx_pass(enc, to, &u, from, &self.dummy, &self.dummy);
+                }
+            }
+            Filter::BrightContrast => {
+                let mut u = Uniform::new(full, tw, th);
+                u.p0 = [2.0, 0.0, 0.0, 0.0];
+                u.h0 = [fx.v[0], fx.v[1], 0.0, 0.0];
+                self.fx_pass(enc, &f, &u, &back, &self.dummy, &self.dummy);
+            }
+        }
+        // where the mask lets it: a white sheet cut by the mask
+        let cov = mask.map(|m| {
+            let c = self.pooled(tw, th, 5200 + depth);
+            let w = self.pooled(tw, th, 5300 + depth);
+            self.clear_to(enc, &c, wgpu::Color::TRANSPARENT);
+            self.clear_to(enc, &w, wgpu::Color::WHITE);
+            let mut u = Uniform::new(full, tw, th);
+            match m {
+                MaskSpec::Atlas { atlas, a, invert, strength } => {
+                    u.h0 = [a[0][0], a[0][1], a[0][2], 0.0];
+                    u.h1 = [a[1][0], a[1][1], a[1][2], 0.0];
+                    u.p1 = [*invert as u8 as f32, *strength, 0.0, 0.0];
+                    self.pass(enc, &self.mask_atlas, &c, &u, &w, atlas);
+                }
+                MaskSpec::Keep { keep, off, outside } => {
+                    let k = Self::img(keep, ready);
+                    u.p0 = [off[0] as f32, off[1] as f32, 0.0, *outside];
+                    self.pass(enc, &self.mask, &c, &u, &w, &k);
+                }
+            }
+            c
+        });
+        let mut u = Uniform::new(full, tw, th);
+        u.tsize[2] = opacity;
+        u.p0 = [10.0, 0.0, fx.blend.map_or(-1.0, mode_code), 0.0];
+        u.p1 = [0.0, cov.is_some() as u8 as f32, 0.0, 0.0];
+        self.fx_pass(enc, target, &u, &f, &back, cov.as_ref().unwrap_or(&self.dummy));
+    }
+
+    /// One rectangle drawn with the FX pipeline (three textures) onto `target`.
+    fn fx_pass(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::Texture, u: &Uniform, t0: &wgpu::Texture, t1: &wgpu::Texture, t2: &wgpu::Texture) {
+        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: u.bytes(), usage: wgpu::BufferUsages::UNIFORM });
+        let (v0, v1, v2) = (t0.create_view(&Default::default()), t1.create_view(&Default::default()), t2.create_view(&Default::default()));
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.fx_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&v0) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v1) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&v2) },
+            ],
+        });
+        let view = target.create_view(&Default::default());
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            ..Default::default()
+        });
+        rp.set_pipeline(&self.fx);
+        rp.set_bind_group(0, &bg, &[]);
+        rp.draw(0..6, 0..1);
     }
 
     /// A copy of `target` as it is now (blend modes read what is below).

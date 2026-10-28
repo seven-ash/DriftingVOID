@@ -144,6 +144,7 @@ enum FileKind {
     },
     Vector { offset: [f32; 2], strokes: Vec<FileStroke> },
     Audio(crate::doc::AudioLayer),
+    Fx(crate::doc::FxLayer),
     Raster {
         offset: [f32; 2],
         tiles: Vec<[i32; 2]>,
@@ -274,6 +275,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, blend: r.blend, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
                 }
                 LayerKind::Audio(a) => FileKind::Audio(a.clone()),
+                LayerKind::Fx(fx) => FileKind::Fx(fx.clone()),
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert, mask_res: l.mask_res });
         }
@@ -362,6 +364,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 LayerKind::Raster(r)
             }
             FileKind::Audio(a) => LayerKind::Audio(a),
+            FileKind::Fx(fx) => LayerKind::Fx(fx),
         };
         doc.next_id = doc.next_id.max(fl.id);
         doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert, mask_res: fl.mask_res });
@@ -441,11 +444,38 @@ mod video_tests {
         assert_eq!(bv.strokes[0].rec.as_ref().unwrap().times, vec![0.0, 0.3]);
     }
 
+    /// An FX layer keeps its filter, values, blend and keys through a save,
+    /// and its keyed value plays back.
+    #[test]
+    fn fx_layer_roundtrip() {
+        use crate::doc::{Filter, FxLayer};
+        let mut doc = Document::default();
+        let id = doc.insert("fx".into(), LayerKind::Fx(FxLayer { filter: Filter::BrightContrast, v: [0.2, -0.3, 0.0, 0.0], blend: Some(Blend::Multiply) }), None);
+        let mut an = crate::anim::Anim::default();
+        for (t, b) in [(0.0, 0.0f32), (2.0, 0.8)] {
+            let mut k = crate::anim::key_of(doc.get(id).unwrap(), t);
+            k.ch = crate::anim::ch::FX[0];
+            k.fx[0] = b;
+            an.keys.push(k);
+        }
+        doc.get_mut(id).unwrap().anim = Some(an);
+        let path = std::env::temp_dir().join("dv_fx_roundtrip.void");
+        save_project(&doc, &path).unwrap();
+        let mut back = load_project(&path).unwrap();
+        let LayerKind::Fx(fx) = &back.layers[0].kind else { panic!() };
+        assert_eq!((fx.filter, fx.v, fx.blend), (Filter::BrightContrast, [0.2, -0.3, 0.0, 0.0], Some(Blend::Multiply)));
+        back.timeline.on = true;
+        back.timeline.time = 1.0;
+        crate::anim::evaluate(&mut back);
+        let LayerKind::Fx(fx) = &back.layers[0].kind else { panic!() };
+        assert!((fx.v[0] - 0.4).abs() < 1e-3 && (fx.v[1] + 0.3).abs() < 1e-6, "{:?}", fx.v);
+    }
+
     #[test]
     fn old_sound_clips_become_sound_layers() {
         let mut doc = Document::default();
         let mut clip = crate::anim::AudioClip { id: 7, name: "bgm".into(), path: "bgm.wav".into(), start: 2.0, offset: 1.5, len: 3.0, gain: 0.5, mute: false, anim: Default::default() };
-        clip.anim.keys.push(crate::anim::Key { t: 2.5, center: [0.0; 2], ext: [0.0; 2], rot: 0.0, opacity: 1.0, place: None, ease: Default::default(), follow: None, ch: crate::anim::ch::VOL, vol: 0.25 });
+        clip.anim.keys.push(crate::anim::Key { t: 2.5, center: [0.0; 2], ext: [0.0; 2], rot: 0.0, opacity: 1.0, place: None, ease: Default::default(), follow: None, ch: crate::anim::ch::VOL, vol: 0.25, fx: [0.0; 4] });
         clips_to_layers(&mut doc, vec![clip]);
         let l = &doc.layers[0];
         let an = l.anim.as_ref().unwrap();

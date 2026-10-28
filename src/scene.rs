@@ -4,7 +4,7 @@
 //! about how a layer is drawn (projected, grouped, masked, blended) is made in
 //! one place. See docs/RENDER.md.
 
-use crate::doc::{Blend, Document, Layer, LayerKind};
+use crate::doc::{Blend, Document, FxLayer, Layer, LayerKind};
 use crate::export::MaskMap;
 use crate::persp::{Camera, Light, Placement};
 use egui::Rect;
@@ -35,6 +35,10 @@ pub enum Draw {
     Masked { inner: Box<Draw>, mask: Layer, map: Option<MaskMap> },
     /// A layer in a 3D space: flattened, then projected through its camera.
     Projected(Box<Projected>),
+    /// An FX layer: everything drawn so far, filtered and put back (복사 or a
+    /// blend mode), mixed with the original by `opacity`, only where its mask
+    /// lets it (docs/updates/fx-layers.md).
+    Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)> },
 }
 
 pub struct Projected {
@@ -74,6 +78,15 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
             continue;
         }
         let timed = crate::anim::layer_at_time(doc, layer).unwrap_or_else(|| layer.clone());
+        // a filter of the whole picture so far (never in a space)
+        if let LayerKind::Fx(fx) = &timed.kind {
+            if fx.is_noop() && fx.blend.is_none() {
+                continue;
+            }
+            let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
+            items.push(Item { bounds: Rect::EVERYTHING, draw: Draw::Fx { fx: fx.clone(), opacity: timed.opacity, mask } });
+            continue;
+        }
         let Some(bounds) = timed.shown_bounds(&cams) else { continue };
         let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
         let draw = match mask {

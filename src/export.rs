@@ -183,6 +183,8 @@ fn draw_item(out: &mut Pixmap, d: &Draw, b: &Band) -> Result<(), String> {
             blend_onto(out, &pm, *mode, *opacity, b.bg);
         }
         Draw::Projected(p) => draw_projected(out, p, b),
+        // FX layers: GPU only (this path is a test reference)
+        Draw::Fx { .. } => {}
         Draw::Blend(layer, mode) => {
             let mut pm = b.blank()?;
             draw_layer(&mut pm, layer, b.base, b.cull, b.scale);
@@ -680,7 +682,8 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg:
 
 pub(crate) fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
     match &layer.kind {
-        LayerKind::Audio(_) => {}
+        // FX layers: GPU only (the CPU path is a test reference)
+        LayerKind::Audio(_) | LayerKind::Fx(_) => {}
         LayerKind::Image(im) => draw_image(pm, im, base, scale, region),
         LayerKind::Raster(r) => {
             let local = region.translate(-r.offset);

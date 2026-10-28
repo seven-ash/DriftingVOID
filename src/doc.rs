@@ -499,6 +499,81 @@ impl AudioLayer {
     }
 }
 
+/// A filter of an FX layer (`docs/updates/fx-layers.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug, Serialize, Deserialize)]
+pub enum Filter {
+    #[default]
+    Blur,
+    BrightContrast,
+}
+
+/// One value of a filter: label, range, default, dial step, suffix.
+pub struct FxParam {
+    pub name: &'static str,
+    pub lo: f32,
+    pub hi: f32,
+    pub default: f32,
+    pub step: f32,
+    pub suffix: &'static str,
+}
+
+impl Filter {
+    pub const ALL: [Filter; 2] = [Filter::Blur, Filter::BrightContrast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::Blur => "가우시안 흐림",
+            Filter::BrightContrast => "밝기/대비",
+        }
+    }
+
+    /// Its values, in the order of `FxLayer::v` (at most four; sizes in
+    /// canvas pixels so every zoom and export scale agree).
+    pub fn params(self) -> &'static [FxParam] {
+        match self {
+            Filter::Blur => &[FxParam { name: "반경", lo: 0.0, hi: 200.0, default: 8.0, step: 0.5, suffix: " px" }],
+            Filter::BrightContrast => &[
+                FxParam { name: "밝기", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: "대비", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+            ],
+        }
+    }
+
+    pub fn defaults(self) -> [f32; 4] {
+        let mut v = [0.0; 4];
+        for (i, p) in self.params().iter().enumerate() {
+            v[i] = p.default;
+        }
+        v
+    }
+}
+
+/// A filter instead of pixels: what is below it in the list, filtered (Ash,
+/// 10-28). `blend` None is 복사 (the filtered picture replaces what is below,
+/// alpha too); a mode lays it over the original with that mode. Opacity
+/// mixes the original and the result; a mask limits where.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FxLayer {
+    pub filter: Filter,
+    pub v: [f32; 4],
+    #[serde(default)]
+    pub blend: Option<Blend>,
+}
+
+impl FxLayer {
+    pub fn new(filter: Filter) -> Self {
+        FxLayer { filter, v: filter.defaults(), blend: None }
+    }
+
+    /// Does nothing at these values (skipped when drawing).
+    pub fn is_noop(&self) -> bool {
+        match self.filter {
+            Filter::Blur => self.v[0] <= 0.0,
+            Filter::BrightContrast => self.v[0] == 0.0 && self.v[1] == 0.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum LayerKind {
     Image(ImageLayer),
@@ -507,6 +582,7 @@ pub enum LayerKind {
     Vector(VectorLayer),
     Raster(RasterLayer),
     Audio(AudioLayer),
+    Fx(FxLayer),
 }
 
 #[derive(Clone)]
@@ -590,6 +666,7 @@ impl Layer {
             LayerKind::Vector(_) => "펜",
             LayerKind::Raster(_) => "브러시",
             LayerKind::Audio(_) => "소리",
+            LayerKind::Fx(_) => "FX",
         }
     }
 
@@ -632,6 +709,8 @@ impl Layer {
             }
             LayerKind::Raster(r) => r.bounds(),
             LayerKind::Audio(a) => Some(a.rect()),
+            // the whole picture; nothing to pick on the canvas
+            LayerKind::Fx(_) => None,
         }
     }
 
@@ -648,6 +727,7 @@ impl Layer {
             LayerKind::Raster(_) if self.mask_res != 1.0 => {}
             LayerKind::Raster(r) => r.offset = (r.offset + d).round(),
             LayerKind::Audio(a) => a.pos += d,
+            LayerKind::Fx(_) => {}
         }
     }
 }

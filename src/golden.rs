@@ -676,6 +676,7 @@ fn inspect_project() {
             crate::scene::Draw::Blend(l, b) => format!("Blend {:?} {b:?}", l.name),
             crate::scene::Draw::Group { mode, opacity, inner } => format!("Group {mode:?} {opacity} inner {}", match inner.as_ref() { crate::scene::Draw::Projected(p) => format!("Projected {:?}", p.layer.name), crate::scene::Draw::Flat(l) => format!("Flat {:?}", l.name), _ => "other".into() }),
             crate::scene::Draw::Masked { .. } => "Masked".into(),
+            crate::scene::Draw::Fx { fx, .. } => format!("Fx {:?}", fx.filter),
             crate::scene::Draw::Projected(p) => format!("Projected {:?} thick {}", p.layer.name, p.pl.thick),
         };
         eprintln!("  item {what} bounds {:?}", it.bounds);
@@ -706,4 +707,55 @@ fn masked_layer_keeps_its_blend_mode() {
     if let Some(Ok(pm)) = crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, 1.0, Some(Color32::BLACK), 1)) {
         check(&pm, "GPU");
     }
+}
+
+/// FX layers on the GPU (fx-layers.md): a blur spreads a bar's edge both
+/// ways in 복사 (the picture below is replaced, alpha too) but keeps the
+/// opaque original under it in 보통; a mask keeps the hidden half as it was;
+/// brightness darkens. Skipped without a GPU.
+#[test]
+fn fx_layers() {
+    use crate::doc::{Filter, FxLayer};
+    // the bar covers x 37.5..62.5 (the shape's own margin)
+    let bar = |doc: &mut Document| {
+        doc.insert("bar".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(40.0, 0.0), pos2(60.0, 100.0), Color32::RED, Some(Color32::RED), 0.0)), None);
+    };
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+    let draw = |doc: &Document| crate::gpu::with_gpu(|g| g.render_ss(doc, region.center(), region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok());
+    let blur = |blend| LayerKind::Fx(FxLayer { filter: Filter::Blur, v: [10.0, 0.0, 0.0, 0.0], blend });
+
+    let mut doc = Document::default();
+    bar(&mut doc);
+    doc.insert("fx".into(), blur(None), None);
+    let Some(pm) = draw(&doc) else { return };
+    let (inside, outside) = (pm.pixel(40, 50).unwrap(), pm.pixel(66, 50).unwrap());
+    assert!(inside.alpha() < 250, "복사: the edge inside softens {inside:?}");
+    assert!(outside.alpha() > 10, "복사: the edge spreads out {outside:?}");
+    assert!(pm.pixel(50, 50).unwrap().red() > 200);
+
+    let mut doc = Document::default();
+    bar(&mut doc);
+    doc.insert("fx".into(), blur(Some(Blend::Normal)), None);
+    let pm = draw(&doc).unwrap();
+    assert!(pm.pixel(40, 50).unwrap().alpha() > 250, "보통: the original stays under the blur");
+    assert!(pm.pixel(66, 50).unwrap().alpha() > 10);
+
+    // a mask hiding the left half: the left edge stays sharp, the right spreads
+    let mut doc = Document::default();
+    bar(&mut doc);
+    let fx = doc.insert("fx".into(), blur(None), None);
+    let mut m = crate::raster::RasterLayer::default();
+    m.fill_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 100.0)), true);
+    let mid = doc.insert("m".into(), LayerKind::Raster(m), None);
+    doc.get_mut(mid).unwrap().mask_of = Some(fx);
+    let pm = draw(&doc).unwrap();
+    assert_eq!(pm.pixel(34, 50).unwrap().alpha(), 0, "masked side as it was");
+    assert!(pm.pixel(40, 50).unwrap().alpha() > 250);
+    assert!(pm.pixel(66, 50).unwrap().alpha() > 10, "open side blurred");
+
+    let mut doc = Document::default();
+    bar(&mut doc);
+    doc.insert("fx".into(), LayerKind::Fx(FxLayer { filter: Filter::BrightContrast, v: [-0.5, 0.0, 0.0, 0.0], blend: None }), None);
+    let p = draw(&doc).unwrap().pixel(50, 50).unwrap();
+    assert!((110..=145).contains(&p.red()) && p.alpha() == 255, "brightness -0.5 {p:?}");
 }

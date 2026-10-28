@@ -1719,6 +1719,21 @@ impl App {
             app.cam_sel = Some(cid);
             app.set_time(1.0);
         }
+        if let Ok(v) = std::env::var("DV_FX") {
+            // DV_FX="filter,v0,v1,blend": an FX layer on top, selected (captures);
+            // filter: Filter::ALL index; blend: Blend::ALL index, -1 or none 복사
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            app.sel = None;
+            app.add_fx();
+            if let Some(LayerKind::Fx(fx)) = app.sel.and_then(|id| app.doc.get_mut(id)).map(|l| &mut l.kind) {
+                let f = crate::doc::Filter::ALL.get(n.first().copied().unwrap_or(0.0) as usize).copied().unwrap_or_default();
+                *fx = crate::doc::FxLayer::new(f);
+                for (i, x) in n.iter().skip(1).take(2).enumerate() {
+                    fx.v[i] = *x;
+                }
+                fx.blend = n.get(3).filter(|b| **b >= 0.0).and_then(|b| Blend::ALL.get(*b as usize).copied());
+            }
+        }
         if std::env::var_os("DV_MASK_DEMO").is_some() {
             // the selected layer masked to its left half, the mask selected (screenshots)
             if let Some(id) = app.sel {
@@ -4290,6 +4305,17 @@ impl App {
     /// A sound file becomes a sound layer: a gizmo at `at` (where it was dropped,
     /// or the middle of the view), its span starting at the playhead (the timeline
     /// turns on). The span's end is set once the file is decoded.
+    /// A new FX layer above the selected layer (above a mask's owner), else
+    /// at the top: it filters what is below it (fx-layers.md).
+    fn add_fx(&mut self) {
+        let above = self.sel.and_then(|id| self.doc.get(id)).map(|l| l.mask_of.unwrap_or(l.id));
+        let kind = LayerKind::Fx(crate::doc::FxLayer::new(crate::doc::Filter::Blur));
+        let id = self.doc.insert("FX".into(), kind, above.or_else(|| self.doc.layers.last().map(|l| l.id)));
+        self.select_only(Some(id));
+        self.status = "FX 레이어 · 아래 레이어에 필터".into();
+        self.mark();
+    }
+
     fn add_audio(&mut self, p: &std::path::Path, at: Pos2) {
         let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("소리").to_string();
         let path = p.to_string_lossy().to_string();
@@ -4951,8 +4977,8 @@ impl App {
     /// Puts a layer into a space on a camera-facing plane, so it looks exactly as
     /// before; the layer moves next to the space's other members in the stack.
     fn put_in_space(&mut self, id: LayerId, sid: u64) {
-        // sounds have no picture to place
-        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+        // sounds and FX layers have no picture to place
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_) | LayerKind::Fx(_))) {
             return;
         }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
@@ -4979,7 +5005,7 @@ impl App {
     /// Stands a layer upright on the floor where canvas point `w` shows, facing the
     /// camera, its bottom middle on the floor (AR-style placing).
     fn stand_on_floor(&mut self, id: LayerId, sid: u64, w: Pos2, lie: bool) {
-        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_) | LayerKind::Fx(_))) {
             return;
         }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
@@ -5013,7 +5039,7 @@ impl App {
     /// Puts a layer on a wall: its plane lies on the wall where its centre shows, and it
     /// moves along the wall from then on.
     fn put_in_wall(&mut self, id: LayerId, sid: u64, wid: u64) {
-        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) {
+        if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_) | LayerKind::Fx(_))) {
             return;
         }
         let Some(sp) = self.doc.spaces.iter().find(|s| s.id == sid) else { return };
@@ -5124,6 +5150,8 @@ impl App {
                 LayerKind::Vector(v) => v.strokes.iter().any(|s| s.hit(w - v.offset, tol)),
                 LayerKind::Raster(r) => r.alpha_at_world(w) > 8,
                 LayerKind::Audio(a) => a.rect().expand(tol).contains(w),
+                // picked in the layer list only
+                LayerKind::Fx(_) => false,
             };
             if hit {
                 return Some(l.id);
@@ -8561,8 +8589,8 @@ impl App {
         };
         use crate::anim::ch;
         // key buttons pressed, by value bit; key jumps asked for (-1/1), by value bit
-        let mut kh = [false; 10];
-        let mut kv = [0i8; 10];
+        let mut kh = [false; ch::COUNT as usize];
+        let mut kv = [0i8; ch::COUNT as usize];
         {
             let l = &mut self.doc.layers[idx];
             ui.horizontal(|ui| {
@@ -8581,7 +8609,7 @@ impl App {
             if !matches!(l.kind, LayerKind::Audio(_)) {
                 changed |= ui.add(crate::dial::Dial::new(&mut l.opacity, 0.0..=1.0).text("불투명도").default(1.0).key(km(ch::OPA), &mut kh[3]).nav(kn(ch::OPA), &mut kv[3]).mixed(mxc(ch::OPA))).changed();
             }
-            if l.place.is_none() {
+            if l.place.is_none() && !matches!(l.kind, LayerKind::Fx(_)) {
                 // 2D position (the centre); placed layers use the 3D fields below
                 let c0 = crate::anim::key_of(l, 0.0).center;
                 let (mut x, mut y) = (c0[0], c0[1]);
@@ -8604,6 +8632,16 @@ impl App {
             let is_mask = l.mask_of.is_some();
             let span = l.anim.as_ref().and_then(|a| a.span);
             match &mut l.kind {
+                LayerKind::Fx(fx) => {
+                    changed |= fx_props(ui, fx);
+                    for (i, p) in fx.filter.params().iter().enumerate() {
+                        let c = ch::FX[i];
+                        let b = 10 + i;
+                        changed |= ui
+                            .add(crate::dial::Dial::new(&mut fx.v[i], p.lo..=p.hi).step(p.step).suffix(p.suffix).text(p.name).default(p.default).key(km(c), &mut kh[b]).nav(kn(c), &mut kv[b]).mixed(mxc(c)))
+                            .changed();
+                    }
+                }
                 LayerKind::Audio(a) => {
                     changed |= ui.add(crate::dial::Dial::new(&mut a.volume, 0.0..=4.0).step(0.05).text("볼륨").default(1.0).key(km(ch::VOL), &mut kh[9]).nav(kn(ch::VOL), &mut kv[9]).mixed(mxc(ch::VOL))).changed();
                     changed |= crate::kit::switch(ui, &mut a.mute, "소리 끔").changed();
@@ -8878,7 +8916,7 @@ impl App {
                     }
                 }
             }
-            if !spaces.is_empty() && !matches!(l.kind, LayerKind::Audio(_)) {
+            if !spaces.is_empty() && !matches!(l.kind, LayerKind::Audio(_) | LayerKind::Fx(_)) {
                 ui.separator();
                 let cur = l.place.as_ref().map(|p| (p.space, p.wall));
                 let shown = match cur {
@@ -9224,6 +9262,9 @@ impl App {
                     self.delete_selected();
                 }
             });
+            if crate::kit::icon_button(ui, crate::kit::Icon::Fx, "FX 레이어 추가 · 아래 레이어에 필터", false).clicked() {
+                self.add_fx();
+            }
         });
         ui.add_space(SPACE_SM);
         if self.doc.layers.is_empty() {
@@ -9372,6 +9413,9 @@ impl App {
                 None if is_sound => {
                     let mute = matches!(&l.kind, LayerKind::Audio(a) if a.mute);
                     crate::canvas::sound_gizmo(&p, thumb_r.shrink(2.0), mute);
+                }
+                None if matches!(l.kind, LayerKind::Fx(_)) => {
+                    crate::kit::fx_glyph(&p, thumb_r.center(), thumb_r.height() * 0.32, Stroke::new(1.3, INK().gamma_multiply(dim)));
                 }
                 None => {
                     let glyph = match l.kind {
@@ -9625,6 +9669,10 @@ impl App {
         }
         if crate::kit::menu_row(ui, "비우기", "Del").clicked() {
             self.clear_selected();
+        }
+        ui.separator();
+        if crate::kit::menu_row(ui, "FX 레이어 추가", "").clicked() {
+            self.add_fx();
         }
     }
 
@@ -10695,7 +10743,7 @@ impl App {
                         }
                     }
                 });
-                let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked && !matches!(l.kind, LayerKind::Audio(_))).map(|l| l.id);
+                let placeable = self.sel.and_then(|id| self.doc.get(id)).filter(|l| l.mask_of.is_none() && !l.locked && !matches!(l.kind, LayerKind::Audio(_) | LayerKind::Fx(_))).map(|l| l.id);
                 if let Some(lid) = placeable {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_XS;
@@ -11718,6 +11766,7 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
                 .collect();
         }
         LayerKind::Audio(a) => a.pos = map(a.pos),
+        LayerKind::Fx(_) => {}
         // a photo mask stays on its photo's pixels (it turns and scales with the photo)
         LayerKind::Raster(_) if o.mask_res != 1.0 => {}
         LayerKind::Raster(r) => {
@@ -12644,6 +12693,53 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
                 changed = true;
             }
         }
+    });
+    changed
+}
+
+/// An FX layer's filter and blend (복사, or a mode over the original). A new
+/// filter starts from its defaults.
+fn fx_props(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("필터");
+        egui::ComboBox::from_id_salt("fx_filter")
+            .truncate()
+            .selected_text(fx.filter.label())
+            .width(150.0)
+            .popup_style(theme::glass_popup_style(false))
+            .show_ui(ui, |ui| {
+                theme::glass_popup(ui, |ui| {
+                    for f in crate::doc::Filter::ALL {
+                        if ui.selectable_label(fx.filter == f, f.label()).clicked() && fx.filter != f {
+                            *fx = crate::doc::FxLayer { blend: fx.blend, ..crate::doc::FxLayer::new(f) };
+                            changed = true;
+                        }
+                    }
+                })
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("혼합");
+        egui::ComboBox::from_id_salt("fx_blend")
+            .truncate()
+            .selected_text(fx.blend.map_or("복사", |b| b.label()))
+            .width(110.0)
+            .popup_style(theme::glass_popup_style(false))
+            .show_ui(ui, |ui| {
+                theme::glass_popup(ui, |ui| {
+                    if ui.selectable_label(fx.blend.is_none(), "복사").glass_tip("아래 그림을 필터 결과로 바꿈").clicked() {
+                        changed |= fx.blend.is_some();
+                        fx.blend = None;
+                    }
+                    for x in Blend::ALL.into_iter().filter(|b| *b != Blend::Erase) {
+                        if ui.selectable_label(fx.blend == Some(x), x.label()).clicked() {
+                            changed |= fx.blend != Some(x);
+                            fx.blend = Some(x);
+                        }
+                    }
+                })
+            });
     });
     changed
 }

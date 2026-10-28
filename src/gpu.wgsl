@@ -19,6 +19,8 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tex0: texture_2d<f32>;
 @group(0) @binding(2) var tex1: texture_2d<f32>;
+// FX passes only (their own layout): the mask coverage in the write-back
+@group(0) @binding(3) var tex2: texture_2d<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -437,4 +439,84 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let c = pos.xy * r;
     let o = r * 0.25;
     return (bilin(c + vec2f(-o.x, -o.y)) + bilin(c + vec2f(o.x, -o.y)) + bilin(c + vec2f(-o.x, o.y)) + bilin(c + o)) * 0.25;
+}
+
+// ---------------------------------------------------------------- FX layers
+// (docs/updates/fx-layers.md) p0.x is the pass:
+//  1 Gaussian blur along h0.xy (one axis), sigma h0.z, taps h0.w apart, p0.y each side
+//  2 brightness h0.x / contrast h0.y (GIMP's formulas)
+// 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
+//    (p1.y on); p0.z the blend (-1: 복사), opacity tsize.z
+
+fn load_edge(t: texture_2d<f32>, p: vec2i) -> vec4f {
+    let d = vec2i(textureDimensions(t)) - vec2i(1);
+    return textureLoad(t, clamp(p, vec2i(0), d), 0);
+}
+
+fn straight(c: vec4f) -> vec4f {
+    if c.a <= 0.0 {
+        return vec4f(0.0);
+    }
+    return vec4f(min(c.rgb / c.a, vec3f(1.0)), c.a);
+}
+
+@fragment
+fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let q = vec2i(floor(pos.xy));
+    let op = i32(u.p0.x);
+    if op == 1 {
+        let dir = vec2f(u.h0.xy);
+        let sg = u.h0.z;
+        let n = i32(u.p0.y);
+        var acc = vec4f(0.0);
+        var ws = 0.0;
+        for (var k = -n; k <= n; k++) {
+            let x = f32(k) * u.h0.w;
+            let w = exp(-x * x / (2.0 * sg * sg));
+            // past the picture's edge, its edge (the view does not hold more)
+            acc += w * load_edge(tex0, q + vec2i(round(dir * x)));
+            ws += w;
+        }
+        return acc / ws;
+    }
+    if op == 2 {
+        let c = straight(textureLoad(tex0, q, 0));
+        let b = u.h0.x;
+        var v = c.rgb;
+        if b < 0.0 {
+            v = v * (1.0 + b);
+        } else {
+            v = v + (1.0 - v) * b;
+        }
+        let k = tan((clamp(u.h0.y, -0.99, 0.99) + 1.0) * 0.7853982);
+        v = clamp((v - 0.5) * k + 0.5, vec3f(0.0), vec3f(1.0));
+        return vec4f(v * c.a, c.a);
+    }
+    // write-back
+    let f = textureLoad(tex0, q, 0);
+    let d = textureLoad(tex1, q, 0);
+    var cov = 1.0;
+    if u.p1.y > 0.5 {
+        cov = textureLoad(tex2, q, 0).a;
+    }
+    let m = i32(u.p0.z);
+    var mixed = f;
+    if m >= 0 && f.a > 0.0 {
+        // the filtered picture over the original with that mode (as fs_blend)
+        let sa = f.a;
+        let da = d.a;
+        var o = vec3f(0.0);
+        for (var k = 0; k < 3; k++) {
+            let cs = min(f[k] / sa, 1.0);
+            var cd = 0.0;
+            if da > 0.0 {
+                cd = d[k] / da;
+            }
+            o[k] = sa * (1.0 - da) * cs + sa * da * mixmode(m, cd, cs) + (1.0 - sa) * da * cd;
+        }
+        mixed = vec4f(o, sa + da * (1.0 - sa));
+    } else if m >= 0 {
+        mixed = d;
+    }
+    return mix(d, mixed, clamp(u.tsize.z * cov, 0.0, 1.0));
 }

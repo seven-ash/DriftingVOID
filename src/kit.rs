@@ -178,6 +178,8 @@ pub enum Icon {
     Down,
     Duplicate,
     Delete,
+    /// A new FX layer: a four-point spark.
+    Fx,
 }
 
 fn draw_icon(p: &egui::Painter, icon: Icon, c: Pos2, col: Color32) {
@@ -197,7 +199,18 @@ fn draw_icon(p: &egui::Painter, icon: Icon, c: Pos2, col: Color32) {
             p.line_segment([c + vec2(-2.0, -6.5), c + vec2(2.0, -6.5)], s);
             p.add(Shape::closed_line(vec![c + vec2(-4.5, -4.0), c + vec2(-3.5, 6.5), c + vec2(3.5, 6.5), c + vec2(4.5, -4.0)], s));
         }
+        Icon::Fx => fx_glyph(p, c, 7.0, s),
     }
+}
+
+/// The FX spark: four points, pinched sides (the layer button and the FX
+/// layer's row).
+pub fn fx_glyph(p: &egui::Painter, c: Pos2, r: f32, s: Stroke) {
+    let k = r * 0.28;
+    p.add(Shape::closed_line(
+        vec![c + vec2(0.0, -r), c + vec2(k, -k), c + vec2(r, 0.0), c + vec2(k, k), c + vec2(0.0, r), c + vec2(-k, k), c + vec2(-r, 0.0), c + vec2(-k, -k)],
+        s,
+    ));
 }
 
 /// A square icon button on the row grid with a glass tip (list actions such

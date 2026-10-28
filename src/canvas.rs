@@ -277,6 +277,12 @@ pub fn content_key(l: &Layer) -> u64 {
             f(&mut h, a.pos.x);
             f(&mut h, a.pos.y);
         }
+        LayerKind::Fx(fx) => {
+            (6u8, fx.filter, fx.blend).hash(&mut h);
+            for v in fx.v {
+                f(&mut h, v);
+            }
+        }
     }
     h.finish()
 }
@@ -572,6 +578,8 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
                     sound_gizmo(painter, xf.rect_w2s(a.rect()), a.mute);
                 }
             }
+            // drawn by the GPU renderer only (a filter of what is below)
+            LayerKind::Fx(_) => {}
             LayerKind::Image(im) => {
                 if !Rect::from_points(&im.corners()).intersects(view_w) {
                     return;
