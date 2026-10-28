@@ -447,6 +447,8 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 //  2 a point filter, p0.y its kind (Filter::point_code), h0 its values,
 //    h1/h2 the gradient map's colours (straight)
 //  3 resample to the target (bilinear)
+//  4 motion blur: along h0.xy (unit), h0.z px long, p0.y taps, centred
+//  5 unsharp mask: tex0 the original, tex1 its blur; amount h0.x, threshold h0.y
 // 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
 //    (p1.y on); p0.z the blend (-1: 복사), opacity tsize.z
 
@@ -605,6 +607,37 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let c = straight(textureLoad(tex0, q, 0));
         let v = point(i32(u.p0.y), c.rgb);
         return vec4f(v * c.a, c.a);
+    }
+    if op == 4 {
+        let d = vec2i(textureDimensions(tex0));
+        let n = i32(u.p0.y);
+        var acc = vec4f(0.0);
+        var ws = 0.0;
+        for (var k = 0; k <= n; k++) {
+            let t = (f32(k) / f32(max(n, 1)) - 0.5) * u.h0.z;
+            let p = vec2f(q) + 0.5 + u.h0.xy * t - 0.5;
+            let i = vec2i(floor(p));
+            // past the picture's edge nothing is known: left out, as the blur
+            if i.x < 0 || i.y < 0 || i.x + 1 >= d.x || i.y + 1 >= d.y {
+                continue;
+            }
+            let f = p - floor(p);
+            let s = mix(mix(textureLoad(tex0, i, 0), textureLoad(tex0, i + vec2i(1, 0), 0), f.x), mix(textureLoad(tex0, i + vec2i(0, 1), 0), textureLoad(tex0, i + vec2i(1, 1), 0), f.x), f.y);
+            acc += s;
+            ws += 1.0;
+        }
+        return acc / max(ws, 1e-6);
+    }
+    if op == 5 {
+        let o = textureLoad(tex0, q, 0);
+        let b = textureLoad(tex1, q, 0);
+        // on straight colours; where the difference is under the threshold, as it was
+        let so = straight(o);
+        let sb = straight(b);
+        let dlt = so.rgb - sb.rgb;
+        let keep = step(vec3f(u.h0.y), abs(dlt));
+        let v = clamp(so.rgb + u.h0.x * dlt * keep, vec3f(0.0), vec3f(1.0));
+        return vec4f(v * o.a, o.a);
     }
     if op == 3 {
         // resample: target pixel -> below pixel (h0.x scale, h0.yz offset), bilinear

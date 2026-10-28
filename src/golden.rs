@@ -809,3 +809,67 @@ fn fx_colour_filters() {
     let got = px(Color32::from_gray(128), fx(Filter::Curves, [0.4, 0.7, 0.9, 0.0])).unwrap();
     assert!((got[0] as i32 - 179).abs() <= 3, "커브: {got:?}");
 }
+
+/// Motion blur and unsharp mask against their definitions, measured from the
+/// unfiltered edge (where it crosses half) so the shapes' own antialiasing
+/// does not matter. Skipped without a GPU.
+#[test]
+fn fx_blur_sharpen() {
+    use crate::doc::{Filter, FxLayer};
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
+    let draw = |doc: &Document| crate::gpu::with_gpu(|g| g.render_ss(doc, region.center(), region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok());
+    let edge_doc = || {
+        let mut doc = Document::default();
+        doc.insert("left".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(-200.0, -200.0), pos2(50.0, 300.0), Color32::RED, Some(Color32::RED), 0.0)), None);
+        doc
+    };
+    let Some(plain) = draw(&edge_doc()) else { return };
+    // the half-crossing of the vertical edge, sub-pixel (row 50)
+    let a = |pm: &Pixmap, x: u32| pm.pixel(x, 50).unwrap().alpha() as f32 / 255.0;
+    let x0 = (1..99).find(|&x| a(&plain, x) < 0.5).unwrap();
+    let e0 = (x0 - 1) as f32 + 0.5 + (a(&plain, x0 - 1) - 0.5) / (a(&plain, x0 - 1) - a(&plain, x0));
+    let at = |pm: &Pixmap, x: f32| {
+        let i = (x - 0.5).floor();
+        let f = x - 0.5 - i;
+        a(pm, i as u32) * (1.0 - f) + a(pm, i as u32 + 1) * f
+    };
+    let mut doc = edge_doc();
+    doc.insert("fx".into(), LayerKind::Fx(FxLayer { v: [20.0, 0.0, 0.0, 0.0], ..FxLayer::new(Filter::MotionBlur) }), None);
+    let pm = draw(&doc).unwrap();
+    for (dx, want) in [(-5.0, 0.75), (0.0, 0.5), (5.0, 0.25), (-12.0, 1.0), (12.0, 0.0)] {
+        let got = at(&pm, e0 + dx);
+        assert!((got - want).abs() <= 0.04, "동작 흐림 0°: alpha at edge{dx:+} {got:.3}, want {want}");
+    }
+    let mut doc = edge_doc();
+    doc.insert("fx".into(), LayerKind::Fx(FxLayer { v: [20.0, 90.0, 0.0, 0.0], ..FxLayer::new(Filter::MotionBlur) }), None);
+    let pm = draw(&doc).unwrap();
+    for dx in [-3.0, 0.0, 3.0] {
+        let (got, want) = (at(&pm, e0 + dx), at(&plain, e0 + dx));
+        assert!((got - want).abs() <= 0.02, "동작 흐림 90°: a vertical edge stays ({dx:+}: {got:.3} vs {want:.3})");
+    }
+
+    // unsharp: 64 | 192 grey step, radius 8 (sigma 4), amount 1
+    let step_doc = || {
+        let mut doc = Document::default();
+        let (dk, lt) = (Color32::from_gray(64), Color32::from_gray(192));
+        doc.insert("dark".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(-200.0, -200.0), pos2(300.0, 300.0), dk, Some(dk), 0.0)), None);
+        doc.insert("light".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(50.0, -200.0), pos2(300.0, 300.0), lt, Some(lt), 0.0)), None);
+        doc
+    };
+    let plain = draw(&step_doc()).unwrap();
+    let g = |pm: &Pixmap, x: u32| pm.pixel(x, 50).unwrap().red() as f32;
+    let x1 = (1..99).find(|&x| g(&plain, x) > 128.0).unwrap();
+    let e1 = (x1 - 1) as f32 + 0.5 + (128.0 - g(&plain, x1 - 1)) / (g(&plain, x1) - g(&plain, x1 - 1));
+    let mut doc = step_doc();
+    doc.insert("fx".into(), LayerKind::Fx(FxLayer { v: [8.0, 1.0, 0.0, 0.0], ..FxLayer::new(Filter::Unsharp) }), None);
+    let pm = draw(&doc).unwrap();
+    let gv = |x: f32| {
+        let i = (x - 0.5).floor();
+        let f = x - 0.5 - i;
+        g(&pm, i as u32) * (1.0 - f) + g(&pm, i as u32 + 1) * f
+    };
+    for (dx, want) in [(2.0, 231.5), (6.0, 200.5), (-2.0, 24.5), (-6.0, 55.5), (30.0, 192.0), (-30.0, 64.0)] {
+        let got = gv(e1 + dx);
+        assert!((got - want).abs() <= 6.0, "언샤프: at edge{dx:+} {got:.1}, want {want}");
+    }
+}

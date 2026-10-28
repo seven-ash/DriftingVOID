@@ -1107,17 +1107,16 @@ impl Gpu {
     }
 
     /// An FX item over `below` (fx-layers.md). Point filters see the frame's
-    /// own pixels; a blur sees a view wider by its reach (3 sigma) at a scale
-    /// where sigma is at most 8 px, so the edge of the frame or screen never
-    /// shows and zooming changes nothing (Ash, 10-28).
+    /// own pixels; the others a view wider by their reach (`FxLayer::reach`),
+    /// a Gaussian blur at a scale where sigma is at most 8 px, so the edge of
+    /// the frame or screen never shows and zooming changes nothing (Ash, 10-28).
     #[allow(clippy::too_many_arguments)]
     fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
         let reach = fx.reach();
         let v2 = if reach > 0.0 {
             let want = v.full.expand(reach);
-            let sigma = fx.v[0].max(1e-3) * 0.5;
             let lim = self.max_side as f32 * 0.9;
-            let s2 = v.s.min(8.0 / sigma).min(lim / want.width().max(1.0)).min(lim / want.height().max(1.0));
+            let s2 = v.s.min(fx.max_scale()).min(lim / want.width().max(1.0)).min(lim / want.height().max(1.0));
             let (ox, oy) = ((want.min.x * s2).floor(), (want.min.y * s2).floor());
             let tw = ((want.max.x * s2).ceil() - ox).max(1.0) as u32;
             let th = ((want.max.y * s2).ceil() - oy).max(1.0) as u32;
@@ -2218,18 +2217,25 @@ impl Gpu {
         }
         let f2 = self.pooled(bw, bh, 5000 + depth);
         match fx.filter {
-            Filter::Blur => {
-                // at most 48 taps each side, spread for big radii
-                let sigma = (fx.v[0] * v2.s * 0.5).max(0.01);
-                let step = (sigma * 3.0 / 48.0).max(1.0);
-                let n = (sigma * 3.0 / step).ceil().min(48.0);
-                let tmp = self.pooled(bw, bh, 5100 + depth);
-                for (dir, from, to) in [([1.0, 0.0], &src, &tmp), ([0.0, 1.0], &tmp, &f2)] {
-                    let mut u = Uniform::new(bfull, bw, bh);
-                    u.p0 = [1.0, n, 0.0, 0.0];
-                    u.h0 = [dir[0], dir[1], sigma, step];
-                    self.fx_pass(enc, to, &u, from, &self.dummy, &self.dummy);
-                }
+            Filter::Blur => self.gauss(enc, &src, &f2, fx.v[0] * v2.s * 0.5, 5100 + depth, bw, bh),
+            Filter::MotionBlur => {
+                // one pass along the line, at most 96 taps spread over it
+                let len = (fx.v[0] * v2.s).max(0.0);
+                let n = len.ceil().clamp(1.0, 96.0);
+                let (sn, cs) = fx.v[1].to_radians().sin_cos();
+                let mut u = Uniform::new(bfull, bw, bh);
+                // canvas y points down: positive angles turn counter-clockwise on screen
+                u.p0 = [4.0, n, 0.0, 0.0];
+                u.h0 = [cs, -sn, len, 0.0];
+                self.fx_pass(enc, &f2, &u, &src, &self.dummy, &self.dummy);
+            }
+            Filter::Unsharp => {
+                let blurred = self.pooled(bw, bh, 5200 + depth + 50);
+                self.gauss(enc, &src, &blurred, fx.v[0] * v2.s * 0.5, 5100 + depth, bw, bh);
+                let mut u = Uniform::new(bfull, bw, bh);
+                u.p0 = [5.0, 0.0, 0.0, 0.0];
+                u.h0 = [fx.v[1], fx.v[2], 0.0, 0.0];
+                self.fx_pass(enc, &f2, &u, &src, &blurred, &self.dummy);
             }
             point => {
                 let mut u = Uniform::new(bfull, bw, bh);
@@ -2294,6 +2300,23 @@ impl Gpu {
         u.p0 = [10.0, 0.0, fx.blend.map_or(-1.0, mode_code), 0.0];
         u.p1 = [0.0, cov.is_some() as u8 as f32, 0.0, 0.0];
         self.fx_pass(enc, target, &u, &f, &back, cov.as_ref().unwrap_or(&self.dummy));
+    }
+
+    /// A Gaussian blur of `from` into `to` (sigma in their pixels), two passes
+    /// through a pooled texture at `slot`: at most 48 taps each side, spread
+    /// for big radii.
+    #[allow(clippy::too_many_arguments)]
+    fn gauss(&mut self, enc: &mut wgpu::CommandEncoder, from: &wgpu::Texture, to: &wgpu::Texture, sigma: f32, slot: usize, w: u32, h: u32) {
+        let sigma = sigma.max(0.01);
+        let step = (sigma * 3.0 / 48.0).max(1.0);
+        let n = (sigma * 3.0 / step).ceil().min(48.0);
+        let tmp = self.pooled(w, h, slot);
+        for (dir, a, b) in [([1.0, 0.0], from, &tmp), ([0.0, 1.0], &tmp, to)] {
+            let mut u = Uniform::new([0.0, 0.0, w as f32, h as f32], w, h);
+            u.p0 = [1.0, n, 0.0, 0.0];
+            u.h0 = [dir[0], dir[1], sigma, step];
+            self.fx_pass(enc, b, &u, a, &self.dummy, &self.dummy);
+        }
     }
 
     /// One rectangle drawn with the FX pipeline (three textures) onto `target`.

@@ -504,6 +504,8 @@ impl AudioLayer {
 pub enum Filter {
     #[default]
     Blur,
+    MotionBlur,
+    Unsharp,
     BrightContrast,
     Hsl,
     Levels,
@@ -526,8 +528,10 @@ pub struct FxParam {
 }
 
 impl Filter {
-    pub const ALL: [Filter; 10] = [
+    pub const ALL: [Filter; 12] = [
         Filter::Blur,
+        Filter::MotionBlur,
+        Filter::Unsharp,
         Filter::BrightContrast,
         Filter::Hsl,
         Filter::Levels,
@@ -542,6 +546,8 @@ impl Filter {
     pub fn label(self) -> &'static str {
         match self {
             Filter::Blur => "가우시안 흐림",
+            Filter::MotionBlur => "동작 흐림",
+            Filter::Unsharp => "언샤프 마스크",
             Filter::BrightContrast => "밝기/대비",
             Filter::Hsl => "색조/채도/명도",
             Filter::Levels => "레벨",
@@ -557,7 +563,7 @@ impl Filter {
     /// The point filters' code in `fs_fx` (pass 2); None for the others.
     pub fn point_code(self) -> Option<f32> {
         Some(match self {
-            Filter::Blur => return None,
+            Filter::Blur | Filter::MotionBlur | Filter::Unsharp => return None,
             Filter::BrightContrast => 0.0,
             Filter::Hsl => 1.0,
             Filter::Levels => 2.0,
@@ -575,6 +581,17 @@ impl Filter {
     pub fn params(self) -> &'static [FxParam] {
         match self {
             Filter::Blur => &[FxParam { name: "반경", lo: 0.0, hi: 200.0, default: 8.0, step: 0.5, suffix: " px" }],
+            Filter::MotionBlur => &[
+                FxParam { name: "거리", lo: 0.0, hi: 400.0, default: 20.0, step: 1.0, suffix: " px" },
+                FxParam { name: "각도", lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
+            ],
+            // result = original + amount × (original − blurred), where they
+            // differ by more than the threshold
+            Filter::Unsharp => &[
+                FxParam { name: "반경", lo: 0.1, hi: 50.0, default: 2.0, step: 0.1, suffix: " px" },
+                FxParam { name: "양", lo: 0.0, hi: 5.0, default: 1.0, step: 0.05, suffix: "" },
+                FxParam { name: "임계값", lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
+            ],
             Filter::BrightContrast => &[
                 FxParam { name: "밝기", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
                 FxParam { name: "대비", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
@@ -643,15 +660,29 @@ impl FxLayer {
     /// alone). A blur's radius is 2 sigma; it reads 3 sigma.
     pub fn reach(&self) -> f32 {
         match self.filter {
-            Filter::Blur => self.v[0].max(0.0) * 1.5,
+            Filter::Blur | Filter::Unsharp => self.v[0].max(0.0) * 1.5,
+            // the line is centred on the pixel
+            Filter::MotionBlur => self.v[0].max(0.0) * 0.5,
             _ => 0.0,
+        }
+    }
+
+    /// The most target pixels per canvas unit the filter needs: a Gaussian
+    /// blur's result is smooth, so it is filtered where sigma is at most 8
+    /// px (cheap however far the view zooms in); the others keep the detail
+    /// across their line or around their blur.
+    pub fn max_scale(&self) -> f32 {
+        match self.filter {
+            Filter::Blur => 8.0 / (self.v[0].max(1e-3) * 0.5),
+            _ => f32::INFINITY,
         }
     }
 
     /// Does nothing at these values (skipped when drawing).
     pub fn is_noop(&self) -> bool {
         match self.filter {
-            Filter::Blur => self.v[0] <= 0.0,
+            Filter::Blur | Filter::MotionBlur => self.v[0] <= 0.0,
+            Filter::Unsharp => self.v[1] <= 0.0,
             Filter::BrightContrast => self.v[0] == 0.0 && self.v[1] == 0.0,
             Filter::Hsl => self.v[..3] == [0.0; 3],
             Filter::Levels => self.v == [0.0, 1.0, 1.0, 0.0],
