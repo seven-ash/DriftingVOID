@@ -2231,10 +2231,13 @@ impl Gpu {
                     self.fx_pass(enc, to, &u, from, &self.dummy, &self.dummy);
                 }
             }
-            Filter::BrightContrast => {
+            point => {
                 let mut u = Uniform::new(bfull, bw, bh);
-                u.p0 = [2.0, 0.0, 0.0, 0.0];
-                u.h0 = [fx.v[0], fx.v[1], 0.0, 0.0];
+                u.p0 = [2.0, point.point_code().unwrap_or(0.0), 0.0, 0.0];
+                u.h0 = fx.v;
+                let col = |c: [u8; 4]| c.map(|x| x as f32 / 255.0);
+                u.h1 = col(fx.colors[0]);
+                u.h2 = col(fx.colors[1]);
                 self.fx_pass(enc, &f2, &u, &src, &self.dummy, &self.dummy);
             }
         }

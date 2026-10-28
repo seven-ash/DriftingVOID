@@ -278,7 +278,7 @@ pub fn content_key(l: &Layer) -> u64 {
             f(&mut h, a.pos.y);
         }
         LayerKind::Fx(fx) => {
-            (6u8, fx.filter, fx.blend).hash(&mut h);
+            (6u8, fx.filter, fx.blend, fx.colors).hash(&mut h);
             for v in fx.v {
                 f(&mut h, v);
             }

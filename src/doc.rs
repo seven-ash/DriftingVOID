@@ -505,6 +505,14 @@ pub enum Filter {
     #[default]
     Blur,
     BrightContrast,
+    Hsl,
+    Levels,
+    Curves,
+    Desaturate,
+    Invert,
+    Posterize,
+    Threshold,
+    GradientMap,
 }
 
 /// One value of a filter: label, range, default, dial step, suffix.
@@ -518,13 +526,48 @@ pub struct FxParam {
 }
 
 impl Filter {
-    pub const ALL: [Filter; 2] = [Filter::Blur, Filter::BrightContrast];
+    pub const ALL: [Filter; 10] = [
+        Filter::Blur,
+        Filter::BrightContrast,
+        Filter::Hsl,
+        Filter::Levels,
+        Filter::Curves,
+        Filter::Desaturate,
+        Filter::Invert,
+        Filter::Posterize,
+        Filter::Threshold,
+        Filter::GradientMap,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Filter::Blur => "가우시안 흐림",
             Filter::BrightContrast => "밝기/대비",
+            Filter::Hsl => "색조/채도/명도",
+            Filter::Levels => "레벨",
+            Filter::Curves => "커브",
+            Filter::Desaturate => "흑백",
+            Filter::Invert => "반전",
+            Filter::Posterize => "포스터화",
+            Filter::Threshold => "임계값",
+            Filter::GradientMap => "그라디언트 맵",
         }
+    }
+
+    /// The point filters' code in `fs_fx` (pass 2); None for the others.
+    pub fn point_code(self) -> Option<f32> {
+        Some(match self {
+            Filter::Blur => return None,
+            Filter::BrightContrast => 0.0,
+            Filter::Hsl => 1.0,
+            Filter::Levels => 2.0,
+            Filter::Curves => 3.0,
+            Filter::Desaturate => 4.0,
+            Filter::Invert => 5.0,
+            Filter::Posterize => 6.0,
+            Filter::Threshold => 7.0,
+            Filter::GradientMap => 8.0,
+        })
     }
 
     /// Its values, in the order of `FxLayer::v` (at most four; sizes in
@@ -535,6 +578,30 @@ impl Filter {
             Filter::BrightContrast => &[
                 FxParam { name: "밝기", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
                 FxParam { name: "대비", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+            ],
+            Filter::Hsl => &[
+                FxParam { name: "색조", lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
+                FxParam { name: "채도", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: "명도", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+            ],
+            Filter::Levels => &[
+                FxParam { name: "검정점", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: "감마", lo: 0.1, hi: 4.0, default: 1.0, step: 0.01, suffix: "" },
+                FxParam { name: "흰점", lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" },
+                FxParam { name: "출력 검정", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+            ],
+            // three points of a monotone curve through (0, 0) and (1, 1)
+            Filter::Curves => &[
+                FxParam { name: "어두운 곳", lo: 0.0, hi: 1.0, default: 0.25, step: 0.01, suffix: "" },
+                FxParam { name: "중간", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: "밝은 곳", lo: 0.0, hi: 1.0, default: 0.75, step: 0.01, suffix: "" },
+            ],
+            Filter::Desaturate => &[FxParam { name: "양", lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
+            Filter::Invert | Filter::GradientMap => &[],
+            Filter::Posterize => &[FxParam { name: "단계", lo: 2.0, hi: 32.0, default: 4.0, step: 1.0, suffix: "" }],
+            Filter::Threshold => &[
+                FxParam { name: "기준", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: "부드러움", lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
             ],
         }
     }
@@ -558,11 +625,18 @@ pub struct FxLayer {
     pub v: [f32; 4],
     #[serde(default)]
     pub blend: Option<Blend>,
+    /// 그라디언트 맵: the dark and the light end (straight sRGBA).
+    #[serde(default = "fx_colors")]
+    pub colors: [[u8; 4]; 2],
+}
+
+fn fx_colors() -> [[u8; 4]; 2] {
+    [[0, 0, 0, 255], [255, 255, 255, 255]]
 }
 
 impl FxLayer {
     pub fn new(filter: Filter) -> Self {
-        FxLayer { filter, v: filter.defaults(), blend: None }
+        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors() }
     }
 
     /// How far the filter reads around a pixel, in canvas units (0: the pixel
@@ -570,7 +644,7 @@ impl FxLayer {
     pub fn reach(&self) -> f32 {
         match self.filter {
             Filter::Blur => self.v[0].max(0.0) * 1.5,
-            Filter::BrightContrast => 0.0,
+            _ => 0.0,
         }
     }
 
@@ -579,6 +653,11 @@ impl FxLayer {
         match self.filter {
             Filter::Blur => self.v[0] <= 0.0,
             Filter::BrightContrast => self.v[0] == 0.0 && self.v[1] == 0.0,
+            Filter::Hsl => self.v[..3] == [0.0; 3],
+            Filter::Levels => self.v == [0.0, 1.0, 1.0, 0.0],
+            Filter::Curves => self.v[..3] == [0.25, 0.5, 0.75],
+            Filter::Desaturate => self.v[0] <= 0.0,
+            Filter::Invert | Filter::Posterize | Filter::Threshold | Filter::GradientMap => false,
         }
     }
 }

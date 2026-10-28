@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.92.3"
+version = "0.93.0"
 edition = "2024"
 
 [[bin]]

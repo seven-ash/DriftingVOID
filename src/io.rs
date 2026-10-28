@@ -450,7 +450,7 @@ mod video_tests {
     fn fx_layer_roundtrip() {
         use crate::doc::{Filter, FxLayer};
         let mut doc = Document::default();
-        let id = doc.insert("fx".into(), LayerKind::Fx(FxLayer { filter: Filter::BrightContrast, v: [0.2, -0.3, 0.0, 0.0], blend: Some(Blend::Multiply) }), None);
+        let id = doc.insert("fx".into(), LayerKind::Fx(FxLayer { v: [0.2, -0.3, 0.0, 0.0], blend: Some(Blend::Multiply), ..FxLayer::new(Filter::BrightContrast) }), None);
         let mut an = crate::anim::Anim::default();
         for (t, b) in [(0.0, 0.0f32), (2.0, 0.8)] {
             let mut k = crate::anim::key_of(doc.get(id).unwrap(), t);

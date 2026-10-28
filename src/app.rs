@@ -481,6 +481,8 @@ enum PalTarget {
     TextBg(LayerId),
     ShapeColor(LayerId),
     ShapeFill(LayerId),
+    /// An FX layer's gradient map colour (0 dark, 1 light).
+    FxColor(LayerId, usize),
     DefaultTextBg,
     DefaultFill,
     ExportBg,
@@ -8634,6 +8636,20 @@ impl App {
             match &mut l.kind {
                 LayerKind::Fx(fx) => {
                     changed |= fx_props(ui, fx);
+                    if fx.filter == crate::doc::Filter::GradientMap {
+                        for (i, name) in ["어둠", "밝음"].into_iter().enumerate() {
+                            // as the other colour rows: a short label, wraps instead of overflowing
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(name);
+                                let [r, g, b, a] = fx.colors[i];
+                                let mut c = Color32::from_rgba_unmultiplied(r, g, b, a);
+                                if color_row(ui, &mut c, PalTarget::FxColor(id, i), &mut pal_req) {
+                                    fx.colors[i] = c.to_srgba_unmultiplied();
+                                    changed = true;
+                                }
+                            });
+                        }
+                    }
                     for (i, p) in fx.filter.params().iter().enumerate() {
                         let c = ch::FX[i];
                         let b = 10 + i;
@@ -9974,6 +9990,13 @@ impl App {
             PalTarget::ShapeFill(id) => {
                 self.s.fill_color = c;
                 Some((id, Force::ShapeFill(Some(c))))
+            }
+            PalTarget::FxColor(id, i) => {
+                if let Some(LayerKind::Fx(fx)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    fx.colors[i.min(1)] = c.to_srgba_unmultiplied();
+                    self.mark();
+                }
+                return;
             }
             PalTarget::DefaultTextBg => {
                 self.s.text_bg_color = c;

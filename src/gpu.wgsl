@@ -444,10 +444,128 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 // ---------------------------------------------------------------- FX layers
 // (docs/updates/fx-layers.md) p0.x is the pass:
 //  1 Gaussian blur along h0.xy (one axis), sigma h0.z, taps h0.w apart, p0.y each side
-//  2 brightness h0.x / contrast h0.y (GIMP's formulas)
+//  2 a point filter, p0.y its kind (Filter::point_code), h0 its values,
+//    h1/h2 the gradient map's colours (straight)
 //  3 resample to the target (bilinear)
 // 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
 //    (p1.y on); p0.z the blend (-1: 복사), opacity tsize.z
+
+fn luma709(c: vec3f) -> f32 {
+    return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+fn rgb2hsl(c: vec3f) -> vec3f {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let l = (mx + mn) * 0.5;
+    let d = mx - mn;
+    if d <= 1e-6 {
+        return vec3f(0.0, 0.0, l);
+    }
+    let s = d / (1.0 - abs(2.0 * l - 1.0));
+    var h = 0.0;
+    if mx == c.r {
+        h = (c.g - c.b) / d;
+        if h < 0.0 {
+            h += 6.0;
+        }
+    } else if mx == c.g {
+        h = (c.b - c.r) / d + 2.0;
+    } else {
+        h = (c.r - c.g) / d + 4.0;
+    }
+    return vec3f(h / 6.0, s, l);
+}
+
+fn hsl2rgb(h: vec3f) -> vec3f {
+    let k = (vec3f(0.0, 8.0, 4.0) + h.x * 12.0) % 12.0;
+    let a = h.y * min(h.z, 1.0 - h.z);
+    return h.z - a * max(min(min(k - 3.0, 9.0 - k), vec3f(1.0)), vec3f(-1.0));
+}
+
+// a monotone cubic through (0,0), (.25,y0), (.5,y1), (.75,y2), (1,1)
+// (Fritsch-Carlson tangents)
+fn curve(x: f32, y0: f32, y1: f32, y2: f32) -> f32 {
+    var ys = array<f32, 5>(0.0, y0, y1, y2, 1.0);
+    var dk = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    for (var i = 0; i < 4; i++) {
+        dk[i] = (ys[i + 1] - ys[i]) * 4.0;
+    }
+    var m = array<f32, 5>(dk[0], 0.0, 0.0, 0.0, dk[3]);
+    for (var i = 1; i < 4; i++) {
+        if dk[i - 1] * dk[i] <= 0.0 {
+            m[i] = 0.0;
+        } else {
+            m[i] = 2.0 / (1.0 / dk[i - 1] + 1.0 / dk[i]);
+        }
+    }
+    let t = clamp(x, 0.0, 1.0) * 4.0;
+    let i = min(i32(floor(t)), 3);
+    let s = t - f32(i);
+    let s2 = s * s;
+    let s3 = s2 * s;
+    let h = 0.25;
+    let y = (2.0 * s3 - 3.0 * s2 + 1.0) * ys[i] + (s3 - 2.0 * s2 + s) * h * m[i] + (-2.0 * s3 + 3.0 * s2) * ys[i + 1] + (s3 - s2) * h * m[i + 1];
+    return clamp(y, 0.0, 1.0);
+}
+
+// The point filters on straight sRGB values (as GIMP and Krita by default).
+fn point(kind: i32, c: vec3f) -> vec3f {
+    let p = u.h0;
+    switch kind {
+        case 0: {
+            // brightness, then contrast (GIMP's formulas)
+            var v = c;
+            if p.x < 0.0 {
+                v = v * (1.0 + p.x);
+            } else {
+                v = v + (1.0 - v) * p.x;
+            }
+            let k = tan((clamp(p.y, -0.99, 0.99) + 1.0) * 0.7853982);
+            return clamp((v - 0.5) * k + 0.5, vec3f(0.0), vec3f(1.0));
+        }
+        case 1: {
+            var h = rgb2hsl(c);
+            h.x = fract(h.x + p.x / 360.0);
+            h.y = clamp(h.y * (1.0 + p.y), 0.0, 1.0);
+            if p.z < 0.0 {
+                h.z = h.z * (1.0 + p.z);
+            } else {
+                h.z = h.z + (1.0 - h.z) * p.z;
+            }
+            return clamp(hsl2rgb(h), vec3f(0.0), vec3f(1.0));
+        }
+        case 2: {
+            // levels: input black / gamma / input white, output black
+            let v = clamp((c - p.x) / max(p.z - p.x, 1e-4), vec3f(0.0), vec3f(1.0));
+            return p.w + pow(v, vec3f(1.0 / max(p.y, 0.01))) * (1.0 - p.w);
+        }
+        case 3: {
+            return vec3f(curve(c.r, p.x, p.y, p.z), curve(c.g, p.x, p.y, p.z), curve(c.b, p.x, p.y, p.z));
+        }
+        case 4: {
+            return mix(c, vec3f(luma709(c)), p.x);
+        }
+        case 5: {
+            return 1.0 - c;
+        }
+        case 6: {
+            let n = max(round(p.x), 2.0) - 1.0;
+            return round(c * n) / n;
+        }
+        case 7: {
+            let l = luma709(c);
+            if p.y <= 0.0 {
+                return vec3f(select(0.0, 1.0, l >= p.x));
+            }
+            return vec3f(smoothstep(p.x - p.y, p.x + p.y, l));
+        }
+        default: {
+            // gradient map: the dark colour to the light one by luma
+            return mix(u.h1.rgb, u.h2.rgb, luma709(c));
+        }
+    }
+}
 
 fn straight(c: vec4f) -> vec4f {
     if c.a <= 0.0 {
@@ -485,15 +603,7 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
     if op == 2 {
         let c = straight(textureLoad(tex0, q, 0));
-        let b = u.h0.x;
-        var v = c.rgb;
-        if b < 0.0 {
-            v = v * (1.0 + b);
-        } else {
-            v = v + (1.0 - v) * b;
-        }
-        let k = tan((clamp(u.h0.y, -0.99, 0.99) + 1.0) * 0.7853982);
-        v = clamp((v - 0.5) * k + 0.5, vec3f(0.0), vec3f(1.0));
+        let v = point(i32(u.p0.y), c.rgb);
         return vec4f(v * c.a, c.a);
     }
     if op == 3 {

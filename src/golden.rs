@@ -722,7 +722,7 @@ fn fx_layers() {
     };
     let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0));
     let draw = |doc: &Document| crate::gpu::with_gpu(|g| g.render_ss(doc, region.center(), region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok());
-    let blur = |blend| LayerKind::Fx(FxLayer { filter: Filter::Blur, v: [10.0, 0.0, 0.0, 0.0], blend });
+    let blur = |blend| LayerKind::Fx(FxLayer { v: [10.0, 0.0, 0.0, 0.0], blend, ..FxLayer::new(Filter::Blur) });
 
     let mut doc = Document::default();
     bar(&mut doc);
@@ -763,7 +763,49 @@ fn fx_layers() {
 
     let mut doc = Document::default();
     bar(&mut doc);
-    doc.insert("fx".into(), LayerKind::Fx(FxLayer { filter: Filter::BrightContrast, v: [-0.5, 0.0, 0.0, 0.0], blend: None }), None);
+    doc.insert("fx".into(), LayerKind::Fx(FxLayer { v: [-0.5, 0.0, 0.0, 0.0], ..FxLayer::new(Filter::BrightContrast) }), None);
     let p = draw(&doc).unwrap().pixel(50, 50).unwrap();
     assert!((110..=145).contains(&p.red()) && p.alpha() == 255, "brightness -0.5 {p:?}");
+}
+
+/// The colour FX filters on the GPU against values computed independently
+/// (Python's colorsys and the same published formulas) for one colour,
+/// 200·100·50. Skipped without a GPU.
+#[test]
+fn fx_colour_filters() {
+    use crate::doc::{Filter, FxLayer};
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(40.0, 40.0));
+    let px = |base: Color32, fx: FxLayer| {
+        let mut doc = Document::default();
+        doc.insert("c".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(-10.0, -10.0), pos2(50.0, 50.0), base, Some(base), 0.0)), None);
+        doc.insert("fx".into(), LayerKind::Fx(fx), None);
+        crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok()).map(|pm| {
+            let p = pm.pixel(20, 20).unwrap();
+            [p.red(), p.green(), p.blue()]
+        })
+    };
+    let c = Color32::from_rgb(200, 100, 50);
+    let fx = |f: Filter, v: [f32; 4]| FxLayer { v, ..FxLayer::new(f) };
+    let mut grad = FxLayer::new(Filter::GradientMap);
+    grad.colors = [[20, 40, 120, 255], [250, 230, 180, 255]];
+    let cases: Vec<(&str, FxLayer, [u8; 3])> = vec![
+        ("밝기/대비", fx(Filter::BrightContrast, [0.2, 0.3, 0.0, 0.0]), [255, 133, 68]),
+        ("색조/채도/명도", fx(Filter::Hsl, [120.0, -0.5, 0.2, 0.0]), [120, 182, 141]),
+        ("레벨", fx(Filter::Levels, [0.1, 2.0, 0.9, 0.2]), [240, 174, 122]),
+        ("흑백", fx(Filter::Desaturate, [0.5, 0.0, 0.0, 0.0]), [159, 109, 84]),
+        ("반전", fx(Filter::Invert, [0.0; 4]), [55, 155, 205]),
+        ("포스터화", fx(Filter::Posterize, [4.0, 0.0, 0.0, 0.0]), [170, 85, 85]),
+        ("임계값", fx(Filter::Threshold, [0.3, 0.0, 0.0, 0.0]), [255, 255, 255]),
+        ("그라디언트 맵", grad, [126, 128, 148]),
+        ("커브 (그대로)", fx(Filter::Curves, [0.25, 0.5, 0.75, 0.0]), [200, 100, 50]),
+    ];
+    for (name, f, want) in cases {
+        let Some(got) = px(c, f) else { return };
+        for i in 0..3 {
+            assert!((got[i] as i32 - want[i] as i32).abs() <= 2, "{name}: got {got:?}, want {want:?}");
+        }
+    }
+    // a curve through its middle point: grey 128 (x 0.502) to about 0.7
+    let got = px(Color32::from_gray(128), fx(Filter::Curves, [0.4, 0.7, 0.9, 0.0])).unwrap();
+    assert!((got[0] as i32 - 179).abs() <= 3, "커브: {got:?}");
 }
