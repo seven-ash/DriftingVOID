@@ -85,6 +85,8 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
 pub const ROW_W: f32 = crate::theme::COL_W;
 /// Where the ring starts: after the label cell and a gap.
 const LABEL_SLOT: f32 = LABEL_CELL + crate::theme::SPACE_XS;
+/// The same, for rows of other widgets that line up with the rings.
+pub const RING_X: f32 = LABEL_SLOT;
 const BOX_W: f32 = 72.0;
 const PIN_W: f32 = 16.0;
 const GAP: f32 = 8.0;

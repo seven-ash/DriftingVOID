@@ -8637,18 +8637,7 @@ impl App {
                 LayerKind::Fx(fx) => {
                     changed |= fx_props(ui, fx);
                     if fx.filter == crate::doc::Filter::GradientMap {
-                        for (i, name) in ["어둠", "밝음"].into_iter().enumerate() {
-                            // as the other colour rows: a short label, wraps instead of overflowing
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(name);
-                                let [r, g, b, a] = fx.colors[i];
-                                let mut c = Color32::from_rgba_unmultiplied(r, g, b, a);
-                                if color_row(ui, &mut c, PalTarget::FxColor(id, i), &mut pal_req) {
-                                    fx.colors[i] = c.to_srgba_unmultiplied();
-                                    changed = true;
-                                }
-                            });
-                        }
+                        gradient_bar(ui, fx.colors, id, &mut pal_req);
                     }
                     for (i, p) in fx.filter.params().iter().enumerate() {
                         let c = ch::FX[i];
@@ -12718,6 +12707,42 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
         }
     });
     changed
+}
+
+/// The gradient map's colours as the gradient itself (Ash, 10-28): a bar on
+/// the label grid with a swatch at each end; a swatch opens the palette
+/// (hex, copy and paste live there).
+fn gradient_bar(ui: &mut egui::Ui, colors: [[u8; 4]; 2], id: LayerId, req: &mut PalReq) {
+    let col = |c: [u8; 4]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+    let (a, b) = (col(colors[0]), col(colors[1]));
+    // laid out as a dial row: the whole row, the label cell at its left,
+    // the bar from where the dials' rings start
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), theme::ROW_H), Sense::hover());
+    let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(row.min, vec2(crate::dial::LABEL_CELL, row.height()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    crate::dial::label_cell(&mut lu, "색", None, &mut false);
+    let row = Rect::from_min_max(pos2(row.left() + crate::dial::RING_X, row.top()), row.max);
+    let sw = 22.0;
+    let r0 = Rect::from_center_size(pos2(row.left() + sw * 0.5, row.center().y), vec2(sw, sw));
+    let r1 = Rect::from_center_size(pos2(row.right() - sw * 0.5, row.center().y), vec2(sw, sw));
+    // the ramp between the swatches, under them at both ends
+    let bar = Rect::from_min_max(pos2(r0.center().x, row.center().y - 6.0), pos2(r1.center().x, row.center().y + 6.0));
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(bar.left_top(), a);
+    m.colored_vertex(bar.right_top(), b);
+    m.colored_vertex(bar.right_bottom(), b);
+    m.colored_vertex(bar.left_bottom(), a);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    ui.painter().add(Shape::mesh(m));
+    ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0, FILL_3()), StrokeKind::Outside);
+    for (i, (r, c, tip)) in [(r0, a, "어두운 쪽 색 · 팔레트"), (r1, b, "밝은 쪽 색 · 팔레트")].into_iter().enumerate() {
+        let resp = ui.interact(r, ui.id().with(("fx_grad", i)), Sense::click());
+        ui.painter().rect_filled(r, 5.0, c);
+        ui.painter().rect_stroke(r, 5.0, Stroke::new(1.0, if resp.hovered() { INK_2() } else { FILL_3() }), StrokeKind::Inside);
+        if resp.glass_tip(tip).clicked() {
+            *req = Some((PalTarget::FxColor(id, i), c, r.right_top()));
+        }
+    }
 }
 
 /// An FX layer's filter and blend (복사, or a mode over the original). A new
