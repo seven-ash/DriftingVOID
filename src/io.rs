@@ -15,6 +15,12 @@ use crate::vector::VStroke;
 
 pub fn decode_image(bytes: Vec<u8>, ext_hint: Option<&str>) -> Result<ImageSource, String> {
     use image::ImageDecoder;
+    // HEIC/HEIF (phone photos): through ffmpeg, which the app has anyway; the
+    // original file is kept as it is, as for every photo
+    if is_heif(&bytes) {
+        let img = crate::video::decode_heif(&bytes)?;
+        return Ok(ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(bytes), ext: "heic".into(), logical: None, nv12: None });
+    }
     let reader = image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format().map_err(|e| e.to_string())?;
     let fmt = reader.format();
     let mut dec = reader.into_decoder().map_err(|e| e.to_string())?;
@@ -41,7 +47,12 @@ pub fn image_from_rgba(img: image::RgbaImage) -> ImageSource {
     ImageSource { id: next_rev(), rgba: Arc::new(img), encoded: Arc::new(png), ext: "png".into(), logical: None, nv12: None }
 }
 
-pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif"];
+
+/// An HEIF still (HEIC from phones): the ISO box `ftyp` with an HEIF brand.
+pub fn is_heif(b: &[u8]) -> bool {
+    b.len() >= 12 && &b[4..8] == b"ftyp" && matches!(&b[8..12], b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"mif1" | b"msf1")
+}
 
 // ---------------------------------------------------------------- project
 

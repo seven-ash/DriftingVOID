@@ -65,6 +65,28 @@ pub fn tools() -> Option<&'static Tools> {
     .as_ref()
 }
 
+/// An HEIF still decoded by ffmpeg (grids of tiles and the rotation tag are
+/// applied by ffmpeg 7.1+), as RGBA. ffmpeg needs a seekable file, so the
+/// bytes go through a temporary one. An alpha plane, rare in photos, is not
+/// read.
+pub fn decode_heif(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    let t = tools().ok_or(MISSING)?;
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("dv_heif_{}_{n}.heic", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    let out = no_window(Command::new(&t.ffmpeg).args(["-hide_banner", "-loglevel", "error", "-i"]).arg(&tmp).args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-pix_fmt", "rgba", "-"]))
+        .stdin(Stdio::null())
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    let out = out.map_err(|e| e.to_string())?;
+    if !out.status.success() || out.stdout.is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("HEIC 읽기 실패: {}", err.lines().next().unwrap_or("ffmpeg")));
+    }
+    image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png).map(|i| i.to_rgba8()).map_err(|e| e.to_string())
+}
+
 pub const MISSING: &str = "ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -354,6 +376,26 @@ mod tests {
         assert!(i.audio);
         assert_eq!(i.preview_size(1920), (1080, 1920));
         assert_eq!(i.preview_size(960), (540, 960));
+    }
+
+    /// A phone photo: HEIC, 1200×800 tagged to turn 90° (orientation 6),
+    /// comes in upright, 800×1200, with its corner mark at the top right
+    /// (skipped without ffmpeg).
+    #[test]
+    fn heic_upright() {
+        if tools().is_none() {
+            return;
+        }
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/rot6.heic")).unwrap();
+        assert!(crate::io::is_heif(&bytes));
+        let src = crate::io::decode_image(bytes, None).unwrap();
+        assert_eq!(src.ext, "heic");
+        assert_eq!(src.rgba.dimensions(), (800, 1200));
+        // the red 300×200 block at the original top left turns to the top right
+        let p = src.rgba.get_pixel(700, 100);
+        assert!(p[0] > 180 && p[1] < 120, "{p:?}");
+        let q = src.rgba.get_pixel(100, 100);
+        assert!(q[0] > 150 && q[1] > 150, "{q:?}");
     }
 
     #[test]
