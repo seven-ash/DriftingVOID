@@ -215,6 +215,13 @@ pub fn glass_popup_style(menu: bool) -> egui::style::StyleModifier {
             s.visuals.window_stroke = Stroke::NONE;
             s.visuals.popup_shadow = Shadow::NONE;
         }
+        // rows in a popup sit one menu margin inside its corner: concentric
+        // with it, not capsules (Ash, 10-28: the drop-down's corners looked odd)
+        let r = CornerRadius::same(inner(radius_card(), s.spacing.menu_margin.left as f32));
+        let w = &mut s.visuals.widgets;
+        for v in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            v.corner_radius = r;
+        }
     })
     .into()
 }
@@ -227,11 +234,14 @@ pub fn glass_popup<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
     let idx = ui.painter().add(egui::Shape::Noop);
     let out = add(ui);
     let m = ui.spacing().menu_margin;
-    // full popup width (items can be narrower than the frame), used height; scrolled
-    // popups (font list) only show part of their content
-    let (mr, nr) = (ui.max_rect(), ui.min_rect());
-    let r = Rect::from_min_max(mr.min, pos2(mr.max.x.max(nr.max.x), nr.max.y)).intersect(ui.clip_rect());
-    let r = Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32));
+    // the popup's whole area as last drawn (a drop-down's rows sit in a scroll
+    // area, whose clip cut the glass's top and bottom); the first frame, from
+    // the content: full popup width, used height, what is scrolled into view
+    let r = ui.ctx().memory(|mem| mem.area_rect(ui.layer_id().id)).unwrap_or_else(|| {
+        let (mr, nr) = (ui.max_rect(), ui.min_rect());
+        let r = Rect::from_min_max(mr.min, pos2(mr.max.x.max(nr.max.x), nr.max.y)).intersect(ui.clip_rect());
+        Rect::from_min_max(r.min - vec2(m.left as f32, m.top as f32), r.max + vec2(m.right as f32, m.bottom as f32))
+    });
     let radius = ui.visuals().menu_corner_radius.nw;
     ui.painter().with_clip_rect(egui::Rect::EVERYTHING).set(idx, glass_shape(r, radius));
     out
@@ -320,6 +330,8 @@ pub fn apply_visuals(ctx: &egui::Context) {
     s.interact_size = vec2(28.0, ROW_H);
     s.slider_width = 150.0;
     s.menu_margin = Margin::same(SPACE_SM as i8);
+    // drop-downs show their whole list before they scroll (blend modes, filters)
+    s.combo_height = 420.0;
     s.window_margin = Margin::same(SPACE_LG as i8);
     s.combo_width = 170.0;
 

@@ -12721,6 +12721,7 @@ fn fx_props(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer) -> bool {
     });
     ui.horizontal(|ui| {
         ui.label("혼합");
+        crate::kit::dbg_open_combo(ui, "fx_blend");
         egui::ComboBox::from_id_salt("fx_blend")
             .truncate()
             .selected_text(fx.blend.map_or("복사", |b| b.label()))

@@ -203,6 +203,19 @@ fn draw_icon(p: &egui::Painter, icon: Icon, c: Pos2, col: Color32) {
     }
 }
 
+/// DV_OPEN_COMBO=<id salt>: that drop-down stays open (captures; drop-downs
+/// cannot be opened from outside). Call in the ui that makes the ComboBox.
+pub fn dbg_open_combo(ui: &Ui, salt: &str) {
+    if std::env::var("DV_OPEN_COMBO").is_ok_and(|v| v == salt) {
+        let id = ui.make_persistent_id(egui::IdSalt::new(salt)).with("popup");
+        if !egui::Popup::is_id_open(ui.ctx(), id) {
+            egui::Popup::open_id(ui.ctx(), id);
+        }
+        // the popup's first pass only measures: draw again
+        ui.ctx().request_repaint();
+    }
+}
+
 /// The FX spark: four points, pinched sides (the layer button and the FX
 /// layer's row).
 pub fn fx_glyph(p: &egui::Painter, c: Pos2, r: f32, s: Stroke) {
