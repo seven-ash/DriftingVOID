@@ -106,9 +106,14 @@ enum Node {
     /// target pixel to an atlas pixel (the mask's own pixels; nearest, as
     /// export::mask_hide), `invert` and `strength` as the mask layer's.
     MaskedGpu { inner: Vec<Node>, atlas: Arc<wgpu::Texture>, a: [[f32; 3]; 2], rect: [i32; 4], invert: bool, strength: f32 },
-    /// An FX layer: the target so far, filtered (`s`: target pixels per canvas
-    /// pixel, for sizes) and written back by its blend, opacity and mask.
-    Fx { fx: crate::doc::FxLayer, s: f32, opacity: f32, mask: Option<MaskSpec> },
+    /// An FX layer: the layers below it drawn again on their own (`below`,
+    /// through `view`: the frame's view, or for a blur a wider one at a scale
+    /// fitting the radius, so what lies past the frame's edge is blurred in
+    /// and the result never depends on the view), filtered, resampled to the
+    /// target (`map`: target pixel to below pixel), put over the background
+    /// (`top`: the frame's own list, which has one) and written back by its
+    /// blend, opacity and mask.
+    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool },
 }
 
 /// Where a mask lets a layer show: from the mask's tile atlas (as
@@ -164,6 +169,9 @@ pub struct Gpu {
     /// FX layers (`fs_fx`): filter passes and the write-back, three textures.
     fx_layout: wgpu::BindGroupLayout,
     fx: wgpu::RenderPipeline,
+    /// The frame's background (canvas ground, export colour) on its own while
+    /// a frame with FX layers is drawn: 복사 puts the filtered layers over it.
+    under: Option<wgpu::Texture>,
     prep: wgpu::RenderPipeline,
     mip: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
@@ -631,6 +639,7 @@ impl Gpu {
             mask_atlas,
             fx_layout,
             fx,
+            under: None,
             prep,
             mip,
             dummy,
@@ -817,10 +826,7 @@ impl Gpu {
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
         let mut nodes = Vec::new();
-        for item in scene.items.into_iter().filter(|it| it.bounds.intersects(cull)) {
-            let b = item.bounds;
-            self.prepare(item.draw, b, &view, &mut jobs, &mut nodes);
-        }
+        let has_fx = self.prepare_items(scene.items, &view, cull, &mut jobs, &mut nodes);
 
         // 2. rasterize on every core, then upload
         let t1 = std::time::Instant::now();
@@ -835,6 +841,11 @@ impl Gpu {
             wgpu::Color { r: r * a, g: gg * a, b: b * a, a }
         });
         self.clear_to(&mut enc, &target, clear);
+        self.under = (has_fx && bg.is_some()).then(|| {
+            let t = self.pooled(tw, th, 6100);
+            self.clear_to(&mut enc, &t, clear);
+            t
+        });
         let bgp = bg.map(|c| {
             let [r, gg, b, a] = c.to_srgba_unmultiplied().map(|v| v as f32 / 255.0);
             [r * a, gg * a, b * a, a]
@@ -842,6 +853,7 @@ impl Gpu {
         for nd in &nodes {
             self.run(&mut enc, nd, &target, 0, &ready, &view, bgp);
         }
+        self.under = None;
         // 4. down to the output size (and turned), then read back
         let out = self.texture(fw, fh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let mut u = Uniform::new([0.0, 0.0, fw as f32, fh as f32], fw, fh);
@@ -946,10 +958,7 @@ impl Gpu {
         let cull = full.expand(2.0 / s);
         let mut jobs: Vec<(Raster, Option<Key>)> = Vec::new();
         let mut nodes = Vec::new();
-        for item in scene.items.into_iter().filter(|it| it.bounds.intersects(cull)) {
-            let b = item.bounds;
-            self.prepare(item.draw, b, &view, &mut jobs, &mut nodes);
-        }
+        let has_fx = self.prepare_items(scene.items, &view, cull, &mut jobs, &mut nodes);
         let t1 = std::time::Instant::now();
         let ready = self.run_jobs(jobs, 1.0);
         let t2 = std::time::Instant::now();
@@ -967,12 +976,19 @@ impl Gpu {
                 let step = ground.step * s;
                 u.rot = [step, (ox).rem_euclid(step), (oy).rem_euclid(step), ground.dot_r];
                 self.pass(&mut enc, &self.ground, out, &u, &self.dummy, &self.dummy);
+                if has_fx {
+                    let t = self.pooled(tw, th, 6100);
+                    self.clear_to(&mut enc, &t, wgpu::Color::TRANSPARENT);
+                    self.pass(&mut enc, &self.ground, &t, &u, &self.dummy, &self.dummy);
+                    self.under = Some(t);
+                }
             }
             None => self.clear_to(&mut enc, out, wgpu::Color::TRANSPARENT),
         }
         for nd in &nodes {
             self.run(&mut enc, nd, out, 0, &ready, &view, None);
         }
+        self.under = None;
         self.queue.submit([enc.finish()]);
         if TIMING.with(|c| c.get()) {
             let t3 = std::time::Instant::now();
@@ -1062,6 +1078,68 @@ impl Gpu {
         Ok(frame)
     }
 
+    /// Turns a frame's items into nodes, in order, those outside `cull` left
+    /// out. An FX item needs the items below it again (`prepare_fx`), so with
+    /// one in the list the items are kept. True when there is one.
+    fn prepare_items(&mut self, items: Vec<crate::scene::Item>, v: &View, cull: Rect, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) -> bool {
+        if !items.iter().any(|it| matches!(it.draw, Draw::Fx { .. })) {
+            for item in items.into_iter().filter(|it| it.bounds.intersects(cull)) {
+                let b = item.bounds;
+                self.prepare(item.draw, b, v, jobs, out);
+            }
+            return false;
+        }
+        self.prepare_with_fx(&items, v, cull, jobs, out, true);
+        true
+    }
+
+    fn prepare_with_fx(&mut self, items: &[crate::scene::Item], v: &View, cull: Rect, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>, top: bool) {
+        for (i, item) in items.iter().enumerate() {
+            match &item.draw {
+                Draw::Fx { fx, opacity, mask } => {
+                    let n = self.prepare_fx(fx.clone(), *opacity, mask.clone(), &items[..i], v, jobs, top);
+                    out.push(n);
+                }
+                d if item.bounds.intersects(cull) => self.prepare(d.clone(), item.bounds, v, jobs, out),
+                _ => {}
+            }
+        }
+    }
+
+    /// An FX item over `below` (fx-layers.md). Point filters see the frame's
+    /// own pixels; a blur sees a view wider by its reach (3 sigma) at a scale
+    /// where sigma is at most 8 px, so the edge of the frame or screen never
+    /// shows and zooming changes nothing (Ash, 10-28).
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
+        let reach = fx.reach();
+        let v2 = if reach > 0.0 {
+            let want = v.full.expand(reach);
+            let sigma = fx.v[0].max(1e-3) * 0.5;
+            let lim = self.max_side as f32 * 0.9;
+            let s2 = v.s.min(8.0 / sigma).min(lim / want.width().max(1.0)).min(lim / want.height().max(1.0));
+            let (ox, oy) = ((want.min.x * s2).floor(), (want.min.y * s2).floor());
+            let tw = ((want.max.x * s2).ceil() - ox).max(1.0) as u32;
+            let th = ((want.max.y * s2).ceil() - oy).max(1.0) as u32;
+            View {
+                full: Rect::from_min_size(Pos2::new(ox / s2, oy / s2), egui::vec2(tw as f32 / s2, th as f32 / s2)),
+                s: s2,
+                tw,
+                th,
+                k: v.k,
+                origin: v.origin.map(|_| [ox as i32, oy as i32]),
+                zooming: v.zooming,
+            }
+        } else {
+            *v
+        };
+        let mut nodes = Vec::new();
+        self.prepare_with_fx(below, &v2, v2.full.expand(2.0 / v2.s), jobs, &mut nodes, false);
+        let mask = mask.map(|(m, map)| self.mask_spec(m, map, [0, 0, v.tw as i32, v.th as i32], v, jobs));
+        let map = [v2.s / v.s, (v.full.min.x - v2.full.min.x) * v2.s, (v.full.min.y - v2.full.min.y) * v2.s];
+        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top }
+    }
+
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
     fn prepare(&mut self, d: Draw, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         match d {
@@ -1097,11 +1175,8 @@ impl Gpu {
                     MaskSpec::Keep { keep, off, outside } => out.push(Node::Masked { inner: nodes, keep, off, rect, outside }),
                 }
             }
-            Draw::Fx { fx, opacity, mask } => {
-                let rect = [0, 0, v.tw as i32, v.th as i32];
-                let mask = mask.map(|(m, map)| self.mask_spec(m, map, rect, v, jobs));
-                out.push(Node::Fx { fx, s: v.s, opacity, mask });
-            }
+            // drawn by `prepare_items` (it needs the items below)
+            Draw::Fx { .. } => {}
             Draw::Projected(p) => self.projected(*p, v, out),
         }
     }
@@ -2110,7 +2185,7 @@ impl Gpu {
                 let u = Uniform::new(rect.map(|x| x as f32), tw, th);
                 self.pass(enc, &self.cut, target, &u, &g, &o);
             }
-            Node::Fx { fx, s, opacity, mask } => self.run_fx(enc, fx, *s, *opacity, mask.as_ref(), target, depth, ready, tw, th),
+            Node::Fx { .. } => self.run_fx(enc, nd, target, depth, ready, tw, th),
             Node::Masked { inner, keep, off, rect, outside } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);
                 self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
@@ -2125,38 +2200,72 @@ impl Gpu {
         }
     }
 
-    /// An FX node: the target so far (`back`), filtered into `f`, then written
-    /// back over the whole target (fx-layers.md).
+    /// An FX node (see `Node::Fx`): its layers drawn on their own, filtered,
+    /// resampled to the target, over the background for 복사, then written
+    /// back against the target as it is (`back`).
     #[allow(clippy::too_many_arguments)]
-    fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, fx: &crate::doc::FxLayer, s: f32, opacity: f32, mask: Option<&MaskSpec>, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
+    fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
         use crate::doc::Filter;
+        let Node::Fx { fx, opacity, mask, below, view: v2, map, top } = nd else { return };
         let full = [0.0, 0.0, tw as f32, th as f32];
-        let back = self.backdrop(enc, target, depth, tw, th);
-        let f = self.pooled(tw, th, 5000 + depth);
+        let (bw, bh) = (v2.tw, v2.th);
+        let bfull = [0.0, 0.0, bw as f32, bh as f32];
+        // the layers below, alone (no background: that goes under at the end)
+        let src = self.pooled(bw, bh, 7000 + depth);
+        self.clear_to(enc, &src, wgpu::Color::TRANSPARENT);
+        for n in below {
+            self.run(enc, n, &src, depth + 1, ready, v2, None);
+        }
+        let f2 = self.pooled(bw, bh, 5000 + depth);
         match fx.filter {
             Filter::Blur => {
-                // the radius reaches about 2 sigma; at most 48 taps each side,
-                // spread further apart for big radii
-                let sigma = (fx.v[0] * s * 0.5).max(0.01);
+                // at most 48 taps each side, spread for big radii
+                let sigma = (fx.v[0] * v2.s * 0.5).max(0.01);
                 let step = (sigma * 3.0 / 48.0).max(1.0);
                 let n = (sigma * 3.0 / step).ceil().min(48.0);
-                let tmp = self.pooled(tw, th, 5100 + depth);
-                for (dir, from, to) in [([1.0, 0.0], &back, &tmp), ([0.0, 1.0], &tmp, &f)] {
-                    let mut u = Uniform::new(full, tw, th);
+                let tmp = self.pooled(bw, bh, 5100 + depth);
+                for (dir, from, to) in [([1.0, 0.0], &src, &tmp), ([0.0, 1.0], &tmp, &f2)] {
+                    let mut u = Uniform::new(bfull, bw, bh);
                     u.p0 = [1.0, n, 0.0, 0.0];
                     u.h0 = [dir[0], dir[1], sigma, step];
                     self.fx_pass(enc, to, &u, from, &self.dummy, &self.dummy);
                 }
             }
             Filter::BrightContrast => {
-                let mut u = Uniform::new(full, tw, th);
+                let mut u = Uniform::new(bfull, bw, bh);
                 u.p0 = [2.0, 0.0, 0.0, 0.0];
                 u.h0 = [fx.v[0], fx.v[1], 0.0, 0.0];
-                self.fx_pass(enc, &f, &u, &back, &self.dummy, &self.dummy);
+                self.fx_pass(enc, &f2, &u, &src, &self.dummy, &self.dummy);
             }
         }
+        // to the target's pixels (as they are when the views match)
+        let same = (bw, bh) == (tw, th) && (map[0] - 1.0).abs() < 1e-6 && map[1] == 0.0 && map[2] == 0.0;
+        let mut f = f2;
+        if !same {
+            let t = self.pooled(tw, th, 5400 + depth);
+            let mut u = Uniform::new(full, tw, th);
+            u.p0 = [3.0, 0.0, 0.0, 0.0];
+            u.h0 = [map[0], map[1], map[2], 0.0];
+            self.fx_pass(enc, &t, &u, &f, &self.dummy, &self.dummy);
+            f = t;
+        }
+        // 복사 replaces the layers below; the frame's background stays under them
+        if *top && fx.blend.is_none() {
+            if let Some(under) = self.under.clone() {
+                let t = self.pooled(tw, th, 5500 + depth);
+                enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &under, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+                );
+                let u = Uniform::new(full, tw, th);
+                self.pass(enc, &self.over, &t, &u, &f, &self.dummy);
+                f = t;
+            }
+        }
+        let back = self.backdrop(enc, target, depth, tw, th);
         // where the mask lets it: a white sheet cut by the mask
-        let cov = mask.map(|m| {
+        let cov = mask.as_ref().map(|m| {
             let c = self.pooled(tw, th, 5200 + depth);
             let w = self.pooled(tw, th, 5300 + depth);
             self.clear_to(enc, &c, wgpu::Color::TRANSPARENT);
@@ -2178,7 +2287,7 @@ impl Gpu {
             c
         });
         let mut u = Uniform::new(full, tw, th);
-        u.tsize[2] = opacity;
+        u.tsize[2] = *opacity;
         u.p0 = [10.0, 0.0, fx.blend.map_or(-1.0, mode_code), 0.0];
         u.p1 = [0.0, cov.is_some() as u8 as f32, 0.0, 0.0];
         self.fx_pass(enc, target, &u, &f, &back, cov.as_ref().unwrap_or(&self.dummy));

@@ -15,11 +15,13 @@ pub struct Scene {
 
 /// One top-level layer: where it shows (canvas space, for culling) and how it
 /// is drawn.
+#[derive(Clone)]
 pub struct Item {
     pub bounds: Rect,
     pub draw: Draw,
 }
 
+#[derive(Clone)]
 pub enum Draw {
     /// A 2D layer drawn as it is, at its opacity (put down as one picture when
     /// translucent, so overlapping parts don't add up).
@@ -41,6 +43,7 @@ pub enum Draw {
     Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)> },
 }
 
+#[derive(Clone)]
 pub struct Projected {
     pub layer: Layer,
     pub pl: Placement,

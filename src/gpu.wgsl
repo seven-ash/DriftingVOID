@@ -445,13 +445,9 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 // (docs/updates/fx-layers.md) p0.x is the pass:
 //  1 Gaussian blur along h0.xy (one axis), sigma h0.z, taps h0.w apart, p0.y each side
 //  2 brightness h0.x / contrast h0.y (GIMP's formulas)
+//  3 resample to the target (bilinear)
 // 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
 //    (p1.y on); p0.z the blend (-1: 복사), opacity tsize.z
-
-fn load_edge(t: texture_2d<f32>, p: vec2i) -> vec4f {
-    let d = vec2i(textureDimensions(t)) - vec2i(1);
-    return textureLoad(t, clamp(p, vec2i(0), d), 0);
-}
 
 fn straight(c: vec4f) -> vec4f {
     if c.a <= 0.0 {
@@ -468,16 +464,24 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let dir = vec2f(u.h0.xy);
         let sg = u.h0.z;
         let n = i32(u.p0.y);
+        let d = vec2i(textureDimensions(tex0));
         var acc = vec4f(0.0);
         var ws = 0.0;
         for (var k = -n; k <= n; k++) {
             let x = f32(k) * u.h0.w;
+            let p = q + vec2i(round(dir * x));
+            // past the picture's edge nothing is known (the view holds no
+            // more): those taps are left out and the rest weighed up. Extending
+            // the edge instead smeared whatever touched it across the screen,
+            // flashing as it changed while zooming (Ash, 10-28)
+            if p.x < 0 || p.y < 0 || p.x >= d.x || p.y >= d.y {
+                continue;
+            }
             let w = exp(-x * x / (2.0 * sg * sg));
-            // past the picture's edge, its edge (the view does not hold more)
-            acc += w * load_edge(tex0, q + vec2i(round(dir * x)));
+            acc += w * textureLoad(tex0, p, 0);
             ws += w;
         }
-        return acc / ws;
+        return acc / max(ws, 1e-6);
     }
     if op == 2 {
         let c = straight(textureLoad(tex0, q, 0));
@@ -491,6 +495,18 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         let k = tan((clamp(u.h0.y, -0.99, 0.99) + 1.0) * 0.7853982);
         v = clamp((v - 0.5) * k + 0.5, vec3f(0.0), vec3f(1.0));
         return vec4f(v * c.a, c.a);
+    }
+    if op == 3 {
+        // resample: target pixel -> below pixel (h0.x scale, h0.yz offset), bilinear
+        let p = (vec2f(q) + 0.5) * u.h0.x + u.h0.yz - 0.5;
+        let dm = vec2i(textureDimensions(tex0)) - vec2i(1);
+        let i = vec2i(floor(p));
+        let t = p - floor(p);
+        let a = textureLoad(tex0, clamp(i, vec2i(0), dm), 0);
+        let b = textureLoad(tex0, clamp(i + vec2i(1, 0), vec2i(0), dm), 0);
+        let c = textureLoad(tex0, clamp(i + vec2i(0, 1), vec2i(0), dm), 0);
+        let e = textureLoad(tex0, clamp(i + vec2i(1, 1), vec2i(0), dm), 0);
+        return mix(mix(a, b, t.x), mix(c, e, t.x), t.y);
     }
     // write-back
     let f = textureLoad(tex0, q, 0);

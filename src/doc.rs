@@ -565,6 +565,15 @@ impl FxLayer {
         FxLayer { filter, v: filter.defaults(), blend: None }
     }
 
+    /// How far the filter reads around a pixel, in canvas units (0: the pixel
+    /// alone). A blur's radius is 2 sigma; it reads 3 sigma.
+    pub fn reach(&self) -> f32 {
+        match self.filter {
+            Filter::Blur => self.v[0].max(0.0) * 1.5,
+            Filter::BrightContrast => 0.0,
+        }
+    }
+
     /// Does nothing at these values (skipped when drawing).
     pub fn is_noop(&self) -> bool {
         match self.filter {

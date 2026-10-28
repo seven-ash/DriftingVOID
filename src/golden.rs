@@ -733,6 +733,14 @@ fn fx_layers() {
     assert!(outside.alpha() > 10, "복사: the edge spreads out {outside:?}");
     assert!(pm.pixel(50, 50).unwrap().red() > 200);
 
+    // the same canvas point alike whatever the frame: with the bar's edge at
+    // the frame's left edge the blur still sees the bar past it
+    let shifted = crate::gpu::with_gpu(|g| g.render_ss(&doc, pos2(110.0, 50.0), vec2(100.0, 100.0), 0.0, 1.0, None, 1)).and_then(|r| r.ok()).unwrap();
+    for x in [61, 63, 66, 70] {
+        let (a, b) = (pm.pixel(x, 50).unwrap().alpha() as i32, shifted.pixel(x - 60, 50).unwrap().alpha() as i32);
+        assert!((a - b).abs() <= 3, "x {x}: {a} vs {b} in a frame starting at 60");
+    }
+
     let mut doc = Document::default();
     bar(&mut doc);
     doc.insert("fx".into(), blur(Some(Blend::Normal)), None);
