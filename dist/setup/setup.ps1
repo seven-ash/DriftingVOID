@@ -1,4 +1,4 @@
-﻿# Drifting VOID beta setup: copies the app to the user's programs folder,
+﻿# Drifting VOID setup: copies the app to the user's programs folder,
 # adds shortcuts, the .void file type and an uninstall entry, and fetches
 # ffmpeg (video, sound) from GitHub when none is installed.
 # Per-user install: no administrator rights needed.
@@ -39,7 +39,7 @@ if (-not (Test-Path $exeSrc)) { Say "  $exeName 없음: 압축을 모두 푼 폴
 $ver = (Get-Item $exeSrc).VersionInfo.ProductVersion
 
 Write-Host ""
-Write-Host "  DRIFTING VOID  $ver  ·  클로즈 베타 설치" -ForegroundColor White
+Write-Host "  DRIFTING VOID  $ver  ·  설치" -ForegroundColor White
 Say "  설치 위치  $InstallDir" DarkGray
 
 # ---------------------------------------------------------------- the app

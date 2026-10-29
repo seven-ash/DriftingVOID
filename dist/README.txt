@@ -1,10 +1,10 @@
-﻿Drifting VOID · 클로즈 베타
+﻿Drifting VOID {VERSION}
 
 설치
   1. 압축을 모두 풉니다 (압축 파일 안에서 바로 실행하지 마세요).
   2. Setup.cmd를 더블 클릭합니다.
      "Windows의 PC 보호" 창이 뜨면 [추가 정보] → [실행]을 누릅니다.
-     (베타 빌드에는 아직 코드 서명이 없습니다.)
+     (아직 코드 서명이 없어서 나오는 창입니다.)
   3. 영상·소리에 쓰는 ffmpeg가 없으면 GitHub에서 내려받을지 묻습니다 (약 80 MB).
      관리자 권한은 필요 없습니다. 설치 위치: %LOCALAPPDATA%\Programs\DriftingVOID
 

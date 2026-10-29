@@ -121,7 +121,8 @@ fn install_crash_log() {
             let _ = std::fs::create_dir_all(&dir);
             let bt = std::backtrace::Backtrace::force_capture();
             let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let text = format!("[{secs}] v{} {info}\n{bt}\n\n", env!("CARGO_PKG_VERSION"));
+            let rel = match env!("DV_RELEASE") { "" => String::new(), r => format!(" (release {r})") };
+            let text = format!("[{secs}] v{}{rel} {info}\n{bt}\n\n", env!("CARGO_PKG_VERSION"));
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
                 let _ = f.write_all(text.as_bytes());

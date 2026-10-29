@@ -1,4 +1,4 @@
-﻿# Drifting VOID beta uninstall: removes the install folder (with its ffmpeg),
+﻿# Drifting VOID uninstall: removes the install folder (with its ffmpeg),
 # shortcuts, the .void file type and the uninstall entry. Settings in
 # %APPDATA%\DriftingVOID stay unless asked. Projects (.void files) are never touched.
 param([switch]$Quiet)
