@@ -1975,10 +1975,10 @@ impl App {
             // only the values that changed since the last commit get keyed
             if self.tool == Tool::Frame {
                 if let Some(id) = self.cam_sel {
-                    let prev = self.committed.cameras.iter().find(|c| c.id == id).map(|c| c.key(t));
+                    let before = self.committed.cameras.iter().find(|c| c.id == id).cloned();
                     if let Some(c) = self.doc.cameras.iter_mut().find(|c| c.id == id) {
                         let mut k = c.key(t);
-                        k.ch = prev.map_or(k.ch, |p| crate::anim::diff_ch(&p, &k) & k.ch);
+                        k.ch = before.map_or(k.ch, |b| crate::anim::autokey_channels_cam(&b, c, t));
                         if k.ch != 0 {
                             c.anim.set_key(k);
                         }
@@ -1986,10 +1986,10 @@ impl App {
                 }
             }
             for id in self.selected_ids() {
-                let prev = self.committed.get(id).map(|l| crate::anim::key_of(l, t));
+                let before = self.committed.get(id).cloned();
                 if let Some(l) = self.doc.get_mut(id) {
                     let mut key = crate::anim::key_of(l, t);
-                    key.ch = prev.map_or(key.ch, |p| crate::anim::diff_ch(&p, &key) & key.ch);
+                    key.ch = before.map_or(key.ch, |b| crate::anim::autokey_channels(&b, l, t));
                     if key.ch != 0 {
                         l.anim.get_or_insert_with(Default::default).set_key(key);
                     }

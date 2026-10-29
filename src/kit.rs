@@ -206,13 +206,11 @@ fn draw_icon(p: &egui::Painter, icon: Icon, c: Pos2, col: Color32) {
 // ---------------------------------------------------------------- drop-downs
 //
 // Every drop-down (Ash, 10-28): the wheel over a closed one steps to the
-// option before or after and applies it at once; pressing and holding it
-// (0.25 s, or moving 6 px) opens the list, and releasing on an option picks
-// it (elsewhere: nothing; on the box: the list stays open); a plain click
-// opens the list as before.
+// option before or after and applies it at once; pressing it and dragging
+// down past its bottom edge opens the list (Ash, 10-29: no waiting), and
+// releasing on an option picks it (elsewhere: nothing; on the box: the list
+// stays open); a plain click opens the list as before.
 
-/// Seconds a press is held before the list opens under it.
-const HOLD_OPEN: f64 = 0.25;
 /// Wheel travel (points) per option step; a mouse notch is 50.
 const WHEEL_STEP: f32 = 40.0;
 
@@ -248,22 +246,25 @@ pub fn dd_button(ui: &Ui, salt: impl egui::AsIdSalt + Clone, resp: &Response) ->
     let ctx = ui.ctx();
     let open = egui::Popup::is_id_open(ctx, popup);
     let dragging = ui.data(|d| d.get_temp::<bool>(drag)).unwrap_or(false);
-    // press and hold (or press and move) on the box: the list opens under it
-    if !open && !dragging && resp.is_pointer_button_down_on() {
-        let (held, moved) = ui.input(|i| {
-            let t = i.pointer.press_start_time().map_or(0.0, |t0| i.time - t0);
-            let d = match (i.pointer.press_origin(), i.pointer.latest_pos()) {
-                (Some(a), Some(b)) => (b - a).length(),
-                _ => 0.0,
-            };
-            (t, d)
+    // pressed on the box and dragged down out of it: the list opens under it
+    // pressed on the box and dragged down out of it: the list opens under
+    // it. The press is remembered here: egui lets go of a click-only widget
+    // as soon as a press on it moves.
+    let press = drag.with("press");
+    let (pressed_now, down, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos()));
+    if pressed_now && resp.contains_pointer() {
+        ui.data_mut(|d| d.insert_temp(press, true));
+    }
+    let pressed = down && ui.data(|d| d.get_temp::<bool>(press)).unwrap_or(false);
+    if !down {
+        ui.data_mut(|d| d.remove::<bool>(press));
+    }
+    if !open && !dragging && pressed && pos.is_some_and(|p| p.y > resp.rect.bottom()) {
+        egui::Popup::open_id(ctx, popup);
+        ui.data_mut(|d| {
+            d.insert_temp(drag, true);
+            d.remove::<bool>(press);
         });
-        if held >= HOLD_OPEN || moved >= 6.0 {
-            egui::Popup::open_id(ctx, popup);
-            ui.data_mut(|d| d.insert_temp(drag, true));
-        } else {
-            ctx.request_repaint();
-        }
     }
     // the press that opened it ends: on the box the list stays, elsewhere it
     // closes (a row under the pointer was picked in the list)
@@ -592,16 +593,22 @@ mod tests {
         assert_eq!((p, open.is_some()), (None, true), "a click opens the list and picks nothing");
     }
 
-    /// Press and hold on the box: the list opens; returns its rect.
+    /// Press on the box and drag down out of it: the list opens; returns
+    /// the box and the list.
     fn hold_open(h: &mut Harness) -> (Rect, Rect) {
         let (b, _) = h.settle();
         h.frame(0.016, vec![mv(b.center())]);
         h.frame(0.016, vec![btn(b.center(), true)]);
-        for _ in 0..20 {
-            h.frame(0.02, vec![]);
+        // still inside the box: nothing yet, however long
+        h.frame(0.016, vec![mv(b.center() + vec2(0.0, b.height() * 0.4))]);
+        for _ in 0..30 {
+            h.frame(0.05, vec![]);
         }
         let (_, open) = h.settle();
-        (b, open.expect("held: the list is open"))
+        assert!(open.is_none(), "held inside the box: the list stays shut");
+        h.frame(0.016, vec![mv(pos2(b.center().x, b.bottom() + 4.0))]);
+        let (_, open) = h.settle();
+        (b, open.expect("dragged below the box: the list is open"))
     }
 
     #[test]

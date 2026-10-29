@@ -570,6 +570,30 @@ pub fn channels_of(l: &Layer) -> u16 {
     c
 }
 
+/// The state `l` shows at `t`: its own values, its keyed ones as sampled there.
+pub fn posed_key(l: &Layer, t: f64) -> Key {
+    let base = key_of(l, t);
+    l.anim.as_ref().and_then(|a| a.sample_on(t, &base)).unwrap_or(base)
+}
+
+/// Auto-key: the values the user changed at `t`, `before` (the last
+/// committed layer) against `now`. Both as they show at `t`, so a value only
+/// eased there by its keys never counts as changed (Ash, 10-29: keying the
+/// size also keyed the opacity at its eased value, because the committed
+/// layer still held the opacity of the time it was committed at).
+pub fn autokey_channels(before: &Layer, now: &Layer, t: f64) -> u16 {
+    let k = key_of(now, t);
+    diff_ch(&posed_key(before, t), &k) & k.ch
+}
+
+/// As `autokey_channels`, for a canvas camera.
+pub fn autokey_channels_cam(before: &CanvasCam, now: &CanvasCam, t: f64) -> u16 {
+    let base = before.key(t);
+    let prev = before.anim.sample_on(t, &base).unwrap_or(base);
+    let k = now.key(t);
+    diff_ch(&prev, &k) & k.ch
+}
+
 /// A video or sound layer's volume.
 fn sound_vol(l: &Layer) -> Option<f32> {
     match &l.kind {
@@ -729,6 +753,41 @@ mod tests {
     /// The position channel's keys (every value has its own key).
     fn pos_keys(a: &mut Anim) -> Vec<&mut Key> {
         a.keys.iter_mut().filter(|k| k.ch == ch::POS).collect()
+    }
+
+    /// Auto-key keys only what changed: with opacity keyed 1 → 0 over 2 s and
+    /// the layer committed at 0 s, moving to 1 s and changing the size keys
+    /// the size alone, not the opacity at its eased 0.5 (Ash, 10-29).
+    #[test]
+    fn autokey_keys_only_what_changed() {
+        use crate::doc::{Document, LayerKind};
+        let mut doc = Document::default();
+        let shape = crate::doc::ShapeLayer { kind: crate::doc::ShapeKind::Rect, a: Pos2::ZERO, b: pos2(10.0, 10.0), color: egui::Color32::RED, fill: None, width: 1.0, rotation: 0.0 };
+        let id = doc.insert("s".into(), LayerKind::Shape(shape), None);
+        let mut a = Anim::default();
+        for (t, o) in [(0.0, 1.0f32), (2.0, 0.0)] {
+            let mut k = key_of(doc.get(id).unwrap(), t);
+            k.ch = ch::OPA;
+            k.opacity = o;
+            k.ease = Ease::Linear;
+            a.set_key(k);
+        }
+        doc.get_mut(id).unwrap().anim = Some(a);
+        doc.timeline.on = true;
+        evaluate(&mut doc);
+        let committed = doc.get(id).unwrap().clone();
+        // the playhead moves to 1 s: the opacity eases to 0.5; then the size changes
+        doc.timeline.time = 1.0;
+        evaluate(&mut doc);
+        let l = doc.get_mut(id).unwrap();
+        assert!((l.opacity - 0.5).abs() < 1e-4);
+        if let LayerKind::Shape(s) = &mut l.kind {
+            s.b = pos2(30.0, 20.0);
+        }
+        let now = doc.get(id).unwrap().clone();
+        // what auto-key did before: the opacity counted as changed
+        assert_ne!(diff_ch(&key_of(&committed, 1.0), &key_of(&now, 1.0)) & ch::OPA, 0, "the bug's precondition");
+        assert_eq!(autokey_channels(&committed, &now, 1.0), ch::POS | ch::SIZE, "the size (and its centre), not the opacity");
     }
 
     /// Keys are made only of the values a layer or camera has (one timeline
