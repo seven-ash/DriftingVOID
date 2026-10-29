@@ -1915,8 +1915,12 @@ impl App {
                 app.set_time(t);
             }
         }
-        if std::env::var_os("DV_SHOW_VEXPORT").is_some() {
+        // DV_SHOW_VEXPORT=1 (=mbps: with the bitrate chosen)
+        if let Ok(v) = std::env::var("DV_SHOW_VEXPORT") {
             app.open_video_export();
+            if let Some(d) = app.vexport.as_mut().filter(|_| v == "mbps") {
+                d.use_mbps = true;
+            }
         }
         // DV_SELECT_ALL=1: every unlocked layer selected (group box captures)
         if std::env::var_os("DV_SELECT_ALL").is_some() {
@@ -4755,14 +4759,17 @@ impl App {
                     });
                     if d.codec.has_quality() {
                         crate::kit::row(ui, crate::i18n::tr("화질 기준"), |ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if d.use_mbps {
-                                    ui.add(crate::calc::drag(&mut d.mbps).range(0.2..=400.0).speed(0.1).suffix(" Mbps").max_decimals(1));
-                                }
-                                crate::kit::segmented(ui, &mut d.use_mbps, &[(false, crate::i18n::tr("품질")), (true, crate::i18n::tr("비트레이트"))]);
-                            });
+                            crate::kit::segmented(ui, &mut d.use_mbps, &[(false, crate::i18n::tr("품질")), (true, crate::i18n::tr("비트레이트"))]);
                         });
-                        if !d.use_mbps {
+                        // the bitrate is a dial row like the quality, under the
+                        // choice (Ash, 10-30: not squeezed in beside it)
+                        if d.use_mbps {
+                            // the dial's label: a short word where the choice's does not fit the label cell
+                            let mut m = d.mbps as f32;
+                            if ui.add(crate::dial::Dial::new(&mut m, 0.2..=400.0).step(0.5).suffix(" Mbps").text(crate::i18n::tr_ctx("다이얼", "비트레이트"))).changed() {
+                                d.mbps = m as _;
+                            }
+                        } else {
                             let mut q = d.quality as f32;
                             if ui.add(crate::dial::Dial::new(&mut q, 0.0..=51.0).integer().text(crate::i18n::tr("품질"))).glass_tip(crate::i18n::tr("낮을수록 고화질")).changed() {
                                 d.quality = q.round() as _;

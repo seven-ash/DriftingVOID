@@ -506,6 +506,7 @@ T = {
     "혼합": ("Blend", "合成"),
     "복사: 아래 그림을 필터 결과로 바꿈": ("Replace: the picture below becomes the filtered one", "置換: 下の画像をフィルター結果に置き換え"),
     "혼합|복사": ("Replace", "置換"),
+    "다이얼|비트레이트": ("Bitrate", "レート"),
     # --- brush presets
     "연필": ("Pencil", "鉛筆"),
     "펜촉": ("Nib", "ペン先"),
