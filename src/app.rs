@@ -9823,19 +9823,17 @@ impl App {
                     theme::apply_visuals(ui.ctx());
                 }
                 // moved here from the tool card (Ash, 10-28)
-                // each language in its own words
-                ui.horizontal(|ui| {
-                    ui.label(crate::i18n::tr("언어"));
-                    let items: Vec<(crate::i18n::Lang, String, bool)> = crate::i18n::Lang::ALL.iter().map(|l| (*l, l.name().to_string(), true)).collect();
-                    let cur = crate::i18n::lang();
-                    if let (Some(l), _) = crate::kit::dropdown(ui, "ui_lang", cur.name(), 96.0, &items, Some(&cur)) {
-                        crate::i18n::set_lang(l);
-                        self.s.lang = Some(l.code().to_string());
-                        ui.ctx().set_fonts(theme::font_defs());
-                        self.egui_fonts.clear();
-                        self.save_prefs();
-                    }
-                });
+                // each language in its own words; a submenu, as a drop-down
+                // would close this menu (Ash, 10-29)
+                let items: Vec<(crate::i18n::Lang, String)> = crate::i18n::Lang::ALL.iter().map(|l| (*l, l.name().to_string())).collect();
+                let cur = crate::i18n::lang();
+                if let (Some(l), _) = crate::kit::submenu_choice(ui, crate::i18n::tr("언어"), cur.name(), &items, &cur) {
+                    crate::i18n::set_lang(l);
+                    self.s.lang = Some(l.code().to_string());
+                    ui.ctx().set_fonts(theme::font_defs());
+                    self.egui_fonts.clear();
+                    self.save_prefs();
+                }
                 if crate::kit::switch(ui, &mut self.s.touch_draw, crate::i18n::tr("손가락으로 그리기"))
                     .glass_tip(crate::i18n::tr("끄면: 손가락 하나 화면 이동 · 둘 확대/축소 · 펜은 항상 그리기"))
                     .changed()
@@ -12333,6 +12331,11 @@ fn fixed_width<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R 
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
     child.set_clip_rect(ui.clip_rect().intersect(Rect::from_x_y_ranges(rect.x_range(), egui::Rangef::EVERYTHING)));
     let out = add(&mut child);
+    // DV_LAYOUT_LOG=1: content wider than the card (a row that does not fit
+    // widens every row after it: Ash, 10-29, the Mask button pushed out)
+    if std::env::var_os("DV_LAYOUT_LOG").is_some() && child.min_rect().right() > rect.right() + 0.5 {
+        eprintln!("overflow: content to x {:.1}, card to {:.1} (+{:.1})", child.min_rect().right(), rect.right(), child.min_rect().right() - rect.right());
+    }
     let h = child.min_rect().height();
     ui.advance_cursor_after_rect(Rect::from_min_size(rect.min, vec2(w, h)));
     out
@@ -12424,7 +12427,9 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
         ui.label("Y");
         ch |= ui.add(crate::calc::drag(&mut y).speed(1.0).max_decimals(0)).changed();
     });
-    ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+    // wraps: a longer swap button (English) goes to the next line instead of
+    // widening the card (Ash, 10-29: it pushed the card's Mask button out)
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
         if let Some(m) = key {
             *key_hit |= crate::dial::key_button(ui, m);

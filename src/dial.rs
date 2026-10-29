@@ -104,7 +104,12 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
     let keyed = mark.is_some_and(|m| m != KeyMark::None);
     let nav = nav.filter(|_| keyed);
     let text_r = egui::Rect::from_min_max(lr.min, egui::pos2((lr.right() - SLOT_W).max(lr.left()), lr.bottom()));
-    ui.painter().with_clip_rect(text_r).text(lr.left_center(), Align2::LEFT_CENTER, text, crate::theme::field_font(), crate::theme::LABEL());
+    // a label longer than its room ends in "…" rather than being cut off
+    // unseen at the cell's edge (Ash, 10-29: "JPG quality" lost its y)
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), crate::theme::field_font(), crate::theme::LABEL());
+    job.wrap = egui::text::TextWrapping::truncate_at_width(text_r.width());
+    let g = ui.painter().layout_job(job);
+    ui.painter().with_clip_rect(text_r.expand2(vec2(0.0, 4.0))).galley(egui::pos2(lr.left(), lr.center().y - g.size().y * 0.5), g, crate::theme::LABEL());
     if let Some(mark) = mark {
         let kr = egui::Rect::from_center_size(egui::pos2(lr.right() - NAV_W - KEY_W * 0.5, lr.center().y), vec2(KEY_W, lr.height()));
         let kresp = ui.interact(kr, lresp.id.with("key"), Sense::click());

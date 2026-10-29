@@ -92,9 +92,25 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &s
 /// e.g. 내보낼 영역 while there is no export frame.
 pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str, bool)]) -> Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let pad = 10.0;
     let inset = 2.0;
-    let galleys: Vec<_> = opts.iter().map(|(_, s, _)| ui.painter().layout_no_wrap((*s).to_owned(), font.clone(), INK())).collect();
+    // the row's room: the padding gives way first (10 down to 3 a side),
+    // then the labels are cut with "…" (longer words in English and
+    // Japanese, Ash 10-29)
+    let room = ui.available_width() - inset * 2.0;
+    let n = opts.len().max(1) as f32;
+    let natural: Vec<f32> = opts.iter().map(|(_, s, _)| ui.painter().layout_no_wrap((*s).to_owned(), font.clone(), INK()).size().x).collect();
+    let text: f32 = natural.iter().sum();
+    let pad = ((room - text) / (2.0 * n)).clamp(3.0, 10.0);
+    let fits = text + pad * 2.0 * n <= room + 0.5;
+    let cap = if fits { f32::INFINITY } else { (room / n - pad * 2.0).max(8.0) };
+    let galleys: Vec<_> = opts
+        .iter()
+        .map(|(_, s, _)| {
+            let mut job = egui::text::LayoutJob::simple_singleline((*s).to_owned(), font.clone(), INK());
+            job.wrap = egui::text::TextWrapping::truncate_at_width(cap);
+            ui.painter().layout_job(job)
+        })
+        .collect();
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad * 2.0).collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let (r, mut resp) = ui.allocate_exact_size(vec2(total, ROW_H), Sense::hover());
@@ -353,6 +369,32 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, salt: impl egui::AsIdSalt + C
     (picked, r.response)
 }
 
+/// A choice inside a menu, as a submenu (`label  shown ⏵`, its options to
+/// the side). A drop-down cannot live in a menu: egui keeps one popup open,
+/// so opening the drop-down closed the menu (Ash, 10-29: the 언어 choice in
+/// 설정). Picking closes the menus.
+pub fn submenu_choice<T: PartialEq + Clone>(ui: &mut Ui, label: &str, shown: &str, items: &[(T, String)], current: &T) -> (Option<T>, Response) {
+    let mut pick = None;
+    let (resp, _) = egui::containers::menu::SubMenuButton::new(format!("{label}   {shown}"))
+        .config(egui::containers::menu::MenuConfig::new().style(theme::glass_popup_style(true)))
+        .ui(ui, |ui| {
+            theme::glass_popup(ui, |ui| {
+                let mut rects = Vec::new();
+                for (v, t) in items {
+                    let r = ui.add(egui::Button::selectable(v == current, t.as_str()));
+                    rects.push(r.rect);
+                    if r.clicked() {
+                        pick = Some(v.clone());
+                        ui.close();
+                    }
+                }
+                // the rows' places, for the headless tests
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("submenu_rows"), rects));
+            })
+        });
+    (pick, resp)
+}
+
 /// DV_OPEN_COMBO=<id salt>: that drop-down stays open (captures; drop-downs
 /// cannot be opened from outside). Call in the ui that makes the ComboBox.
 pub fn dbg_open_combo(ui: &Ui, salt: &str) {
@@ -564,6 +606,55 @@ mod tests {
 
     fn wheel(dy: f32) -> Event {
         Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, dy), phase: egui::TouchPhase::Move, modifiers: Default::default() }
+    }
+
+    /// A choice in a submenu of a menu: opening it keeps the menu, a click
+    /// on an option picks it (the drop-down there closed the menu, Ash 10-29).
+    #[test]
+    fn submenu_choice_in_a_menu() {
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut frame = |events: Vec<Event>| -> (Option<u8>, Rect, Rect, Vec<Rect>) {
+            t += 0.016;
+            let input = RawInput { time: Some(t), screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+            let mut out = (None, Rect::NOTHING, Rect::NOTHING, Vec::new());
+            let o = &mut out;
+            let full = ctx.run_ui(input, |ui| {
+                let (r, _) = egui::containers::menu::MenuButton::new("menu").config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, |ui| {
+                    ui.label("other row");
+                    let items = vec![(0u8, "A".to_string()), (1, "B".to_string()), (2, "C".to_string())];
+                    let (p, sr) = submenu_choice(ui, "lang", "A", &items, &0);
+                    o.0 = p;
+                    o.2 = sr.rect;
+                });
+                o.1 = r.rect;
+                o.3 = ui.data(|d| d.get_temp::<Vec<Rect>>(egui::Id::new("submenu_rows"))).unwrap_or_default();
+            });
+            full.drop_without_applying_deltas();
+            out
+        };
+        let (_, menu, _, _) = frame(vec![]);
+        frame(vec![mv(menu.center())]);
+        frame(vec![btn(menu.center(), true)]);
+        frame(vec![btn(menu.center(), false)]);
+        let mut sub = Rect::NOTHING;
+        for _ in 0..4 {
+            sub = frame(vec![]).2;
+        }
+        assert!(sub.is_positive(), "the menu is open, its submenu row shown");
+        // hover the submenu row: the options open beside it
+        let mut rows = Vec::new();
+        frame(vec![mv(sub.center())]);
+        for _ in 0..30 {
+            rows = frame(vec![]).3;
+        }
+        assert_eq!(rows.len(), 3, "the options are shown");
+        let c = rows[2].center();
+        frame(vec![mv(pos2(sub.right() - 2.0, sub.center().y))]);
+        frame(vec![mv(c)]);
+        frame(vec![btn(c, true)]);
+        let (p, _, _, _) = frame(vec![btn(c, false)]);
+        assert_eq!(p, Some(2), "C picked from the submenu");
     }
 
     #[test]

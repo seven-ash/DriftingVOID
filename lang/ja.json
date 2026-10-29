@@ -37,7 +37,7 @@
  "ProRes 4444 (mov, 투명)": "ProRes 4444（mov、透明）",
  "Shift: 수평·수직·45° / 정사각·정원 · Ctrl+끌기: 굵기 (선택한 도형에도 적용)": "Shift: 水平・垂直・45° / 正方形・正円 · Ctrl+ドラッグ: 太さ（選択中の図形にも適用）",
  "UI 숨기기": "UI を隠す",
- "UI 크기": "UI サイズ",
+ "UI 크기": "UI 倍率",
  "UI 크기 {}% · Ctrl+Alt+0: 100%": "UI サイズ {}% · Ctrl+Alt+0: 100%",
  "VP9 (webm, 투명)": "VP9（webm、透明）",
  "ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg": "ffmpeg が見つかりません · Setup.cmd を再実行するか winget install Gyan.FFmpeg",
