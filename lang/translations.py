@@ -150,7 +150,7 @@ T = {
     "영역 → 카메라": ("Area → camera", "範囲 → カメラ"),
     "카메라 → 영역": ("Camera → area", "カメラ → 範囲"),
     "카메라 삭제": ("Delete camera", "カメラを削除"),
-    "객체 중심에": ("On an object's centre", "オブジェクトの中心に"),
+    "중심": ("Centre", "中心"),
     "맞추기…": ("Fit…", "合わせる…"),
     "선택": ("Select", "選択"),
     "선택한 객체 중심으로": ("To the selected object's centre", "選択したオブジェクトの中心へ"),

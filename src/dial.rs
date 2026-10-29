@@ -79,9 +79,10 @@ pub fn label_cell(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut bool
 }
 
 /// A dial row's width, and where its parts sit along it: the ring starts at
-/// LABEL_SLOT (after the label, key mark and navigator), the number box
-/// (BOX_W, room for "-99999.99") and the reset pin's room (PIN_W) end the
-/// row, GAP apart.
+/// LABEL_SLOT (after the label, key mark and navigator); the number box
+/// (BOX_W, room for "-99999.99") ends the row flush with the card's right
+/// edge, as every right-anchored part does; the reset pin's room (PIN_W)
+/// sits between ring and box, PIN_GAP from each.
 pub const ROW_W: f32 = crate::theme::COL_W;
 /// Where the ring starts: after the label cell and a gap.
 const LABEL_SLOT: f32 = LABEL_CELL + crate::theme::SPACE_XS;
@@ -89,7 +90,7 @@ const LABEL_SLOT: f32 = LABEL_CELL + crate::theme::SPACE_XS;
 pub const RING_X: f32 = LABEL_SLOT;
 const BOX_W: f32 = 72.0;
 const PIN_W: f32 = 16.0;
-const GAP: f32 = 8.0;
+const PIN_GAP: f32 = 4.0;
 
 /// Width of a < or > beside the key mark.
 const NAV_W: f32 = 6.0;
@@ -295,21 +296,22 @@ impl Widget for Dial<'_> {
 
         let decimals = if dt >= 0.999 { 0 } else if dt >= 0.0999 { 1 } else { 2 };
         // the row's parts sit at fixed places along it (Ash, 10-22): label and
-        // key from the left, the ring from LABEL_SLOT, the number box and the
-        // reset pin's room at the right end, each with a margin; the row is
-        // ROW_W wide (less only where the room is narrower), and nothing in it
-        // can push it wider
+        // key from the left, the ring from LABEL_SLOT; from the right, the
+        // number box flush with the row's end (the card's right edge, where
+        // every right-anchored part ends: Ash, 10-29), then the reset pin's
+        // room; the row is ROW_W wide (less only where the room is narrower),
+        // and nothing in it can push it wider
         let row_w = ROW_W.min(ui.available_width());
         // the row is as tall as a number box, so ring, label and box share one centre
         let row_h = ui.spacing().interact_size.y.max(24.0);
         let (row, _) = ui.allocate_exact_size(vec2(row_w, row_h), Sense::hover());
         let label_w = label_width(&text, key.is_some());
         let box_w = BOX_W + if suffix.is_empty() { 0.0 } else { 14.0 };
-        let pin_r = egui::Rect::from_min_max(egui::pos2(row.right() - PIN_W, row.top()), row.max);
         let box_h = ui.spacing().interact_size.y;
-        let box_r = egui::Rect::from_center_size(egui::pos2(pin_r.left() - GAP - box_w * 0.5, row.center().y), vec2(box_w, box_h));
+        let box_r = egui::Rect::from_center_size(egui::pos2(row.right() - box_w * 0.5, row.center().y), vec2(box_w, box_h));
+        let pin_r = egui::Rect::from_min_max(egui::pos2(box_r.left() - PIN_GAP - PIN_W, row.top()), egui::pos2(box_r.left() - PIN_GAP, row.bottom()));
         let ring_x0 = if label_w > 0.0 { row.left() + LABEL_SLOT } else { row.left() };
-        let r = egui::Rect::from_min_max(egui::pos2(ring_x0, row.top() + 2.0), egui::pos2((box_r.left() - GAP).max(ring_x0 + 30.0), row.bottom() - 2.0));
+        let r = egui::Rect::from_min_max(egui::pos2(ring_x0, row.top() + 2.0), egui::pos2((pin_r.left() - PIN_GAP).max(ring_x0 + 30.0), row.bottom() - 2.0));
         let mut out = {
             {
                 if label_w > 0.0 {

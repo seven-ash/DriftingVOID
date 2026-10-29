@@ -82,7 +82,9 @@ pub fn switch_mixed(ui: &mut Ui, on: &mut bool, text: &str, mixed: bool) -> Resp
 
 /// One of 2–5 short options in a capsule (replaces radio dots and chip rows,
 /// Ash 10-27). The chosen segment is filled with the accent; its corners are
-/// concentric with the capsule's (Ash, 10-27).
+/// concentric with the capsule's (Ash, 10-27). It spans the room it is given,
+/// up to the card's right edge (Ash, 10-29: left and right ends anchored);
+/// a widget that follows it in a row goes first in a right-to-left layout.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str)]) -> Response {
     let opts: Vec<(T, &str, bool)> = opts.iter().map(|(v, s)| (*v, *s, true)).collect();
     segmented_en(ui, value, &opts)
@@ -93,16 +95,28 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &s
 pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str, bool)]) -> Response {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let inset = 2.0;
-    // the row's room: the padding gives way first (10 down to 3 a side),
-    // then the labels are cut with "…" (longer words in English and
-    // Japanese, Ash 10-29)
+    // the row's room, all of it: the padding takes what the labels leave,
+    // down to 3 a side, then the labels are cut with "…" (longer words in
+    // English and Japanese, Ash 10-29)
     let room = ui.available_width() - inset * 2.0;
     let n = opts.len().max(1) as f32;
     let natural: Vec<f32> = opts.iter().map(|(_, s, _)| ui.painter().layout_no_wrap((*s).to_owned(), font.clone(), INK()).size().x).collect();
     let text: f32 = natural.iter().sum();
-    let pad = ((room - text) / (2.0 * n)).clamp(3.0, 10.0);
+    let pad = ((room - text) / (2.0 * n)).max(3.0);
     let fits = text + pad * 2.0 * n <= room + 0.5;
-    let cap = if fits { f32::INFINITY } else { (room / n - pad * 2.0).max(8.0) };
+    // too long: cut only the longest labels, to one width that fills the row
+    // exactly (short labels keep their words)
+    let cap = if fits {
+        f32::INFINITY
+    } else {
+        let budget = room - pad * 2.0 * n;
+        let (mut lo, mut hi) = (8.0f32, natural.iter().cloned().fold(8.0, f32::max));
+        for _ in 0..24 {
+            let mid = (lo + hi) * 0.5;
+            if natural.iter().map(|w| w.min(mid)).sum::<f32>() > budget { hi = mid } else { lo = mid }
+        }
+        lo
+    };
     let galleys: Vec<_> = opts
         .iter()
         .map(|(_, s, _)| {
@@ -111,7 +125,9 @@ pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T,
             ui.painter().layout_job(job)
         })
         .collect();
-    let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + pad * 2.0).collect();
+    // a cut label keeps the whole cut width (its "…" may end short of it),
+    // so the segments add up to the row
+    let widths: Vec<f32> = galleys.iter().zip(&natural).map(|(g, w)| g.size().x.max(w.min(cap)) + pad * 2.0).collect();
     let total = widths.iter().sum::<f32>() + inset * 2.0;
     let (r, mut resp) = ui.allocate_exact_size(vec2(total, ROW_H), Sense::hover());
     let enabled = ui.is_enabled();
@@ -330,11 +346,17 @@ pub fn dd_button(ui: &Ui, salt: impl egui::AsIdSalt + Clone, resp: &Response) ->
     0
 }
 
+/// A drop-down width: the rest of the row, to the card's right edge (a value
+/// control in a labelled row; Ash, 10-29).
+pub const FILL: f32 = f32::INFINITY;
+
 /// A drop-down of plain options (`items`: value, label, enabled), the
 /// current one `current` (None: mixed or none), shown as `shown`. Returns
 /// the option picked by a click, the wheel or a press-drag-release, and the
 /// box's response (for a tip).
 pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, salt: impl egui::AsIdSalt + Clone, shown: impl Into<egui::WidgetText>, width: f32, items: &[(T, String, bool)], current: Option<&T>) -> (Option<T>, Response) {
+    // never wider than the room (FILL: all of it, to the card's right edge)
+    let width = width.min(ui.available_width());
     let drag = dd_dragging(ui, salt.clone());
     let mut picked = None;
     let r = egui::ComboBox::from_id_salt(salt.clone())
@@ -730,4 +752,4 @@ mod tests {
         let (_, open) = h.settle();
         assert_eq!((picked, open.is_some()), (None, true), "released on the box: the list stays");
     }
-}
+}
