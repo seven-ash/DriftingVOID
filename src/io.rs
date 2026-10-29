@@ -370,6 +370,15 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
         doc.layers.push(Layer { id: fl.id, name: fl.name, visible: fl.visible, locked: fl.locked, opacity: fl.opacity, kind, place: fl.place, anim: fl.anim, mask_of: fl.mask_of, mask_anchor: fl.mask_anchor, mask_pose: fl.mask_pose, mask_invert: fl.mask_invert, mask_res: fl.mask_res });
     }
     clips_to_layers(&mut doc, old_audio);
+    // one key per value (files before 0.97.0 held several in one)
+    for l in &mut doc.layers {
+        if let Some(a) = l.anim.as_mut() {
+            a.split_channels();
+        }
+    }
+    for c in &mut doc.cameras {
+        c.anim.split_channels();
+    }
     crate::persp::to_eye_level(&mut doc);
     Ok(doc)
 }

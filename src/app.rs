@@ -308,11 +308,56 @@ struct Playback {
     shown: Option<u64>,
 }
 
-/// A row of the timeline: a layer or a canvas camera.
+/// A row of the timeline: a layer's or a canvas camera's head row (channel
+/// 0: name, span or clip), or one of its key rows (one value's channel,
+/// `anim::ch`): each family of keys on a row of its own (Ash, 10-29).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum TlRow {
-    Layer(LayerId),
-    Cam(u64),
+    Layer(LayerId, u16),
+    Cam(u64, u16),
+}
+
+impl TlRow {
+    /// The channel whose keys the row holds (0: the head row, no keys).
+    fn ch(self) -> u16 {
+        match self {
+            TlRow::Layer(_, c) | TlRow::Cam(_, c) => c,
+        }
+    }
+
+    /// The head row of the same layer or camera.
+    fn head(self) -> TlRow {
+        match self {
+            TlRow::Layer(id, _) => TlRow::Layer(id, 0),
+            TlRow::Cam(id, _) => TlRow::Cam(id, 0),
+        }
+    }
+}
+
+/// A key row's label: the value it keys (an FX layer's own names for its values).
+fn ch_label(l: Option<&Layer>, c: u16) -> String {
+    use crate::anim::ch;
+    if let Some(i) = ch::FX.iter().position(|&f| f == c) {
+        let name = l.and_then(|l| match &l.kind {
+            LayerKind::Fx(fx) => fx.filter.params().get(i).map(|p| p.name),
+            _ => None,
+        });
+        return name.unwrap_or("필터 값").to_string();
+    }
+    match c {
+        ch::POS => "위치",
+        ch::SIZE => "크기",
+        ch::ROT => "회전",
+        ch::OPA => "불투명도",
+        ch::P_POS => "3D 위치",
+        ch::P_ROT => "3D 회전",
+        ch::P_SCALE => "3D 배율",
+        ch::P_THICK => "두께",
+        ch::FOLLOW => "따라가기",
+        ch::VOL => "볼륨",
+        _ => "값",
+    }
+    .to_string()
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1043,6 +1088,8 @@ pub struct App {
     /// Scissors outline in progress.
     scissor: Option<Scissor>,
     tl_drag: Option<TlDrag>,
+    /// The timeline's rows scrolled by this many points.
+    tl_scroll: f32,
     cam_sel: Option<u64>,
     /// Sound output (opened on first use), decoded audio by file path (None while
     /// decoding), and the selected audio clip.
@@ -1328,6 +1375,7 @@ impl App {
             play_stats: None,
             tl_key: None,
             tl_sel: Vec::new(),
+            tl_scroll: 0.0,
             mask_rect: None,
             wand: None,
             wand_mode: 0,
@@ -1930,7 +1978,7 @@ impl App {
                     let prev = self.committed.cameras.iter().find(|c| c.id == id).map(|c| c.key(t));
                     if let Some(c) = self.doc.cameras.iter_mut().find(|c| c.id == id) {
                         let mut k = c.key(t);
-                        k.ch = prev.map_or(crate::anim::ch::ALL, |p| crate::anim::diff_ch(&p, &k));
+                        k.ch = prev.map_or(k.ch, |p| crate::anim::diff_ch(&p, &k) & k.ch);
                         if k.ch != 0 {
                             c.anim.set_key(k);
                         }
@@ -1941,7 +1989,7 @@ impl App {
                 let prev = self.committed.get(id).map(|l| crate::anim::key_of(l, t));
                 if let Some(l) = self.doc.get_mut(id) {
                     let mut key = crate::anim::key_of(l, t);
-                    key.ch = prev.map_or(crate::anim::ch::ALL, |p| crate::anim::diff_ch(&p, &key));
+                    key.ch = prev.map_or(key.ch, |p| crate::anim::diff_ch(&p, &key) & key.ch);
                     if key.ch != 0 {
                         l.anim.get_or_insert_with(Default::default).set_key(key);
                     }
@@ -3438,8 +3486,9 @@ impl App {
         let sel = std::mem::take(&mut self.tl_sel);
         let n = sel.len();
         for (row, t) in sel {
+            let c = row.ch();
             if let Some(a) = self.row_anim_mut(row) {
-                a.keys.retain(|k| (k.t - t).abs() >= 1e-6);
+                a.keys.retain(|k| k.ch & c == 0 || (k.t - t).abs() >= 1e-6);
             }
         }
         self.tl_key = None;
@@ -3473,15 +3522,15 @@ impl App {
 
     fn row_anim(&self, row: TlRow) -> Option<&crate::anim::Anim> {
         match row {
-            TlRow::Layer(id) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
-            TlRow::Cam(id) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
+            TlRow::Layer(id, _) => self.doc.get(id).and_then(|l| l.anim.as_ref()),
+            TlRow::Cam(id, _) => self.doc.cameras.iter().find(|c| c.id == id).map(|c| &c.anim),
         }
     }
 
     fn row_anim_mut(&mut self, row: TlRow) -> Option<&mut crate::anim::Anim> {
         match row {
-            TlRow::Layer(id) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
-            TlRow::Cam(id) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
+            TlRow::Layer(id, _) => self.doc.get_mut(id).map(|l| l.anim.get_or_insert_with(Default::default)),
+            TlRow::Cam(id, _) => self.doc.cameras.iter_mut().find(|c| c.id == id).map(|c| &mut c.anim),
         }
     }
 
@@ -3654,6 +3703,11 @@ impl App {
     }
 
     fn timeline_body(&mut self, ui: &mut egui::Ui, width: f32) {
+        // one key per value, whatever made them (old code paths, debug flags):
+        // a key row then never moves another value's key
+        for a in self.doc.layers.iter_mut().filter_map(|l| l.anim.as_mut()).chain(self.doc.cameras.iter_mut().map(|c| &mut c.anim)) {
+            a.split_channels();
+        }
         let playing = self.tl_play.is_some();
         let mut act_play = false;
         let mut new_time: Option<f64> = None;
@@ -3702,7 +3756,7 @@ impl App {
         });
         // selected key: easing
         if let Some((row, kt)) = self.tl_key {
-            let ease = self.row_anim(row).and_then(|a| a.keys.iter().find(|k| (k.t - kt).abs() < 1e-6)).map(|k| k.ease);
+            let ease = self.row_anim(row).and_then(|a| a.keys.iter().find(|k| k.ch & row.ch() != 0 && (k.t - kt).abs() < 1e-6)).map(|k| k.ease);
             match ease {
                 Some(e) => {
                     let mut pick = None;
@@ -3725,7 +3779,8 @@ impl App {
                             targets.push((row, kt));
                         }
                         for (rw, t) in targets {
-                            if let Some(k) = self.row_anim_mut(rw).and_then(|a| a.keys.iter_mut().find(|k| (k.t - t).abs() < 1e-6)) {
+                            let c = rw.ch();
+                            if let Some(k) = self.row_anim_mut(rw).and_then(|a| a.keys.iter_mut().find(|k| k.ch & c != 0 && (k.t - t).abs() < 1e-6)) {
                                 k.ease = o;
                                 changed = true;
                             }
@@ -3735,29 +3790,49 @@ impl App {
                 None => self.tl_key = None,
             }
         }
-        // rows: cameras, then layers with keys or a span, then the selection
+        // rows: cameras, then layers with keys or a span, then the selection;
+        // each a box of its head row and one row per value it has keys of
         let sel = self.selected_ids();
-        let mut rows: Vec<(TlRow, String, bool)> = self.doc.cameras.iter().map(|c| (TlRow::Cam(c.id), c.name.clone(), true)).collect();
-        for l in self.doc.layers.iter().rev() {
-            // sound layers always have a row (their clip and volume keys)
-            if matches!(l.kind, LayerKind::Audio(_)) {
-                rows.push((TlRow::Layer(l.id), l.display_name(), false));
-                continue;
+        // the values it has keys of, among those it has at all (older files
+        // keyed everything: keys of values a layer lacks stay, unshown)
+        let key_rows = |anim: Option<&crate::anim::Anim>, has: u16| -> Vec<u16> {
+            let mut m = 0u16;
+            for k in anim.map_or(&[][..], |a| &a.keys[..]) {
+                m |= k.ch;
             }
+            (0..crate::anim::ch::COUNT).map(|b| 1u16 << b).filter(|c| m & has & c != 0).collect()
+        };
+        let mut rows: Vec<(TlRow, String, bool)> = Vec::new();
+        for c in &self.doc.cameras {
+            rows.push((TlRow::Cam(c.id, 0), c.name.clone(), true));
+            for b in key_rows(Some(&c.anim), crate::anim::ch::CAMERA) {
+                rows.push((TlRow::Cam(c.id, b), ch_label(None, b), true));
+            }
+        }
+        for l in self.doc.layers.iter().rev() {
             let recorded = match &l.kind {
                 LayerKind::Vector(v) => v.strokes.iter().any(|s| s.rec.is_some()),
                 LayerKind::Raster(r) => !r.recs.is_empty(),
                 _ => false,
             };
-            if recorded || l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
-                rows.push((TlRow::Layer(l.id), l.display_name(), false));
+            // sound layers always have a row (their clip and volume keys)
+            let sound = matches!(l.kind, LayerKind::Audio(_));
+            if sound || recorded || l.anim.as_ref().is_some_and(|a| !a.keys.is_empty() || a.span.is_some()) || sel.contains(&l.id) {
+                rows.push((TlRow::Layer(l.id, 0), l.display_name(), false));
+                for b in key_rows(l.anim.as_ref(), crate::anim::channels_of(l)) {
+                    rows.push((TlRow::Layer(l.id, b), ch_label(Some(l), b), false));
+                }
             }
         }
-        let shown = rows.len().min(8);
         let row_h = 22.0;
+        let key_h = 18.0;
         let ruler_h = 20.0;
         let label_w = 140.0;
-        let h = ruler_h + row_h * shown.max(1) as f32 + 4.0;
+        let h_of = |r: &TlRow| if r.ch() == 0 { row_h } else { key_h };
+        let total: f32 = rows.iter().map(|r| h_of(&r.0)).sum();
+        // at most eight head rows tall; more scrolls (the wheel over the rows)
+        let view_h = total.clamp(row_h, row_h * 8.0);
+        let h = ruler_h + view_h + 4.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click_and_drag());
         let p = ui.painter().with_clip_rect(rect);
         let tl = self.doc.timeline.clone();
@@ -3802,28 +3877,101 @@ impl App {
             p.text(pos2(x + 3.0, rect.top() + 1.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), theme::LABEL());
             t += step;
         }
-        // rows
+        // rows, scrolled by the wheel when they do not fit
+        let rows_r = Rect::from_min_max(pos2(rect.left(), rect.top() + ruler_h), pos2(rect.right(), rect.top() + ruler_h + view_h));
+        if total > view_h && resp.hovered() {
+            let dy = ui.input(|i| i.smooth_scroll_delta.y);
+            if dy != 0.0 {
+                self.tl_scroll -= dy;
+                ui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            }
+        }
+        self.tl_scroll = self.tl_scroll.clamp(0.0, (total - view_h).max(0.0));
+        let p = p.with_clip_rect(rows_r);
         let mut hit_rows: Vec<(TlRow, Rect)> = Vec::new();
-        for (i, (row, name, cam)) in rows.iter().take(shown).enumerate() {
-            let y0 = rect.top() + ruler_h + i as f32 * row_h;
-            let rr = Rect::from_min_max(pos2(rect.left(), y0), pos2(rect.right(), y0 + row_h));
-            hit_rows.push((*row, rr));
-            let selected = match row {
-                TlRow::Layer(id) => sel.contains(id),
-                TlRow::Cam(id) => self.cam_sel == Some(*id),
+        // each layer's or camera's box: its head row and its key rows
+        let mut y = rows_r.top() - self.tl_scroll;
+        let mut boxes: Vec<(TlRow, Rect)> = Vec::new();
+        for (row, _, _) in &rows {
+            let rr = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), y + h_of(row)));
+            match boxes.last_mut() {
+                Some((b, r)) if *b == row.head() => *r = r.union(rr),
+                _ => boxes.push((row.head(), rr)),
+            }
+            y += h_of(row);
+        }
+        for (b, r) in &boxes {
+            let selected = match b {
+                TlRow::Layer(id, _) => sel.contains(id),
+                TlRow::Cam(id, _) => self.cam_sel == Some(*id),
             };
+            let r = r.shrink2(vec2(0.0, 1.0));
+            if selected {
+                p.rect_filled(r, 6.0, FILL_1());
+            }
+            p.rect_stroke(r, 6.0, Stroke::new(1.0, FILL_2()), StrokeKind::Inside);
+        }
+        let mut y = rows_r.top() - self.tl_scroll;
+        for (row, name, cam) in rows.iter() {
+            let y0 = y;
+            y += h_of(row);
+            let rr = Rect::from_min_max(pos2(rect.left(), y0), pos2(rect.right(), y0 + h_of(row)));
+            if rr.bottom() < rows_r.top() || rr.top() > rows_r.bottom() {
+                continue;
+            }
+            // a press is matched only where the row shows
+            hit_rows.push((*row, rr.intersect(rows_r)));
+            if row.ch() != 0 {
+                // a key row: its value's name, a faint line, its keys
+                let col = if *cam { CAM_COLOR } else { theme::LABEL() };
+                let g = p.layout_job(elided(name.to_string(), FontId::proportional(theme::TEXT_SMALL - 0.5), col.gamma_multiply(0.9), label_w - 26.0));
+                p.galley(pos2(rr.left() + 18.0, rr.center().y - g.size().y * 0.5), g, col);
+                let cy = rr.center().y;
+                p.line_segment([pos2(tr.left(), cy), pos2(tr.right(), cy)], Stroke::new(1.0, col.gamma_multiply(0.18)));
+                if let Some(a) = self.row_anim(*row) {
+                    let c = row.ch();
+                    let ks: Vec<&crate::anim::Key> = a.keys.iter().filter(|k| k.ch & c != 0).collect();
+                    // the curve between keys shows how it eases: straight, S-shaped or a step
+                    for w2 in ks.windows(2) {
+                        let (x0, x1) = (x_of(w2[0].t), x_of(w2[1].t));
+                        if x1 - x0 < 6.0 {
+                            continue;
+                        }
+                        let (y0, y1) = (cy + 3.5, cy - 3.5);
+                        let pts: Vec<Pos2> = match w2[0].ease {
+                            crate::anim::Ease::Linear => vec![pos2(x0, y0), pos2(x1, y1)],
+                            crate::anim::Ease::Hold => vec![pos2(x0, y0), pos2(x1, y0), pos2(x1, y1)],
+                            crate::anim::Ease::Smooth => (0..=16)
+                                .map(|i| {
+                                    let u = i as f32 / 16.0;
+                                    pos2(x0 + (x1 - x0) * u, y0 + (y1 - y0) * u * u * (3.0 - 2.0 * u))
+                                })
+                                .collect(),
+                        };
+                        p.add(Shape::line(pts, Stroke::new(1.0, col.gamma_multiply(0.45))));
+                    }
+                    for k in ks {
+                        let kc = pos2(x_of(k.t), cy);
+                        let on = self.tl_sel.iter().any(|(r, t)| r == row && (t - k.t).abs() < 1e-6) || self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
+                        let fill = if on { ACCENT } else { INK() };
+                        key_icon(&p, kc, k.ease, fill, Stroke::new(1.0, Color32::from_black_alpha(170)));
+                    }
+                }
+                continue;
+            }
             let sound = match row {
-                TlRow::Layer(id) => self.doc.get(*id).and_then(|l| match &l.kind {
+                TlRow::Layer(id, _) => self.doc.get(*id).and_then(|l| match &l.kind {
                     LayerKind::Audio(a) => Some((a.clone(), l.anim.as_ref().and_then(|an| an.span).unwrap_or([0.0, 0.0]), l.anim.as_ref().map_or(0.0, |an| an.video_start))),
                     _ => None,
                 }),
                 _ => None,
             };
-            if selected {
-                p.rect_filled(rr, 6.0, FILL_1());
-            }
+            let selected = match row {
+                TlRow::Layer(id, _) => sel.contains(id),
+                TlRow::Cam(id, _) => self.cam_sel == Some(*id),
+            };
             let video = match row {
-                TlRow::Layer(id) => self.video_clip(*id),
+                TlRow::Layer(id, _) => self.video_clip(*id),
                 _ => None,
             };
             let col = if *cam {
@@ -3871,7 +4019,7 @@ impl App {
                     // a graph of the video frame cache: dark where frames are
                     // still to be decoded, the clip's colour where they are held
                     p.rect_filled(live, 3.0, VIDEO_COLOR.gamma_multiply(0.09));
-                    if let TlRow::Layer(id) = row {
+                    if let TlRow::Layer(id, _) = row {
                         if let Some(v) = self.video_of(*id) {
                             let (held, fps) = crate::vcache::ranges(&v.path);
                             let speed = v.speed.max(1e-3);
@@ -3887,7 +4035,7 @@ impl App {
                     }
                 }
                 // (after the end a looping clip starts over: no still there)
-                let looping = matches!(row, TlRow::Layer(id) if self.video_of(*id).is_some_and(|v| v.looping));
+                let looping = matches!(row, TlRow::Layer(id, _) if self.video_of(*id).is_some_and(|v| v.looping));
                 for (a, b) in [(s0, m0.min(e0)), (m1.max(s0), e0)] {
                     if b <= a || (looping && a >= m1.max(s0)) {
                         continue;
@@ -3904,7 +4052,7 @@ impl App {
                     p.rect_stroke(bar, 3.0, Stroke::new(1.2, VIDEO_COLOR), StrokeKind::Inside);
                 }
             }
-            if let TlRow::Layer(lid) = row {
+            if let TlRow::Layer(lid, _) = row {
                 // recorded strokes: thin red marks along the bottom of the row
                 for (a, b) in self.rec_spans(*lid) {
                     let x0 = x_of(a);
@@ -3928,37 +4076,12 @@ impl App {
                 }
                 None => {}
             }
-            if let Some(a) = anim {
-                // the curve between keys shows how it eases: straight, S-shaped or a step
-                for w2 in a.keys.windows(2) {
-                    let (x0, x1) = (x_of(w2[0].t), x_of(w2[1].t));
-                    if x1 - x0 < 6.0 {
-                        continue;
-                    }
-                    let (y0, y1) = (cy + 4.0, cy - 4.0);
-                    let pts: Vec<Pos2> = match w2[0].ease {
-                        crate::anim::Ease::Linear => vec![pos2(x0, y0), pos2(x1, y1)],
-                        crate::anim::Ease::Hold => vec![pos2(x0, y0), pos2(x1, y0), pos2(x1, y1)],
-                        crate::anim::Ease::Smooth => (0..=16)
-                            .map(|i| {
-                                let u = i as f32 / 16.0;
-                                pos2(x0 + (x1 - x0) * u, y0 + (y1 - y0) * u * u * (3.0 - 2.0 * u))
-                            })
-                            .collect(),
-                    };
-                    p.add(Shape::line(pts, Stroke::new(1.0, col.gamma_multiply(0.45))));
-                }
-                for k in &a.keys {
-                    let c = pos2(x_of(k.t), cy);
-                    let on = self.tl_sel.iter().any(|(r, t)| r == row && (t - k.t).abs() < 1e-6) || self.tl_key.is_some_and(|(r, t)| r == *row && (t - k.t).abs() < 1e-6);
-                    let fill = if on { ACCENT } else { INK() };
-                    let edge = Stroke::new(1.0, Color32::from_black_alpha(170));
-                    key_icon(&p, c, k.ease, fill, edge);
-                }
-            }
         }
-        if rows.len() > shown {
-            p.text(pos2(rect.left() + 6.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("+{}개 더", rows.len() - shown), FontId::proportional(10.0), theme::LABEL());
+        if total > view_h {
+            // where the view is in the rows: a thin bar at the right
+            let k = view_h / total;
+            let bar = Rect::from_min_size(pos2(rect.right() - 3.0, rows_r.top() + self.tl_scroll * k), vec2(2.0, view_h * k));
+            p.rect_filled(bar, 1.0, INK_3());
         }
         // playhead
         let px = x_of(tl.time);
@@ -3984,11 +4107,11 @@ impl App {
                 } else if pp.y > rect.top() + ruler_h {
                     if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
                         let anim = self.row_anim(row);
-                        let key = anim.and_then(|a| a.keys.iter().find(|k| (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
+                        let key = anim.and_then(|a| a.keys.iter().find(|k| k.ch & row.ch() != 0 && (x_of(k.t) - pp.x).abs() <= 6.0)).map(|k| k.t);
                         let span = anim.and_then(|a| a.span);
                         let sound_id = match row {
-                            TlRow::Layer(id) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) => Some(id),
-                            TlRow::Layer(id) if self.video_clip(id).is_some() => Some(id),
+                            TlRow::Layer(id, _) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))) => Some(id),
+                            TlRow::Layer(id, _) if self.video_clip(id).is_some() => Some(id),
                             _ => None,
                         };
                         // a video clip without a span yet: its span is the video's length
@@ -4036,8 +4159,8 @@ impl App {
                         } else if pp.x < tr.left() {
                             // the label selects the layer or camera
                             match row {
-                                TlRow::Layer(id) => self.select_only(Some(id)),
-                                TlRow::Cam(id) => {
+                                TlRow::Layer(id, _) => self.select_only(Some(id)),
+                                TlRow::Cam(id, _) => {
                                     self.cam_sel = Some(id);
                                     self.tool = Tool::Frame;
                                 }
@@ -4066,8 +4189,9 @@ impl App {
                         let sel = self.tl_sel.clone();
                         let mut moved = Vec::new();
                         for (row, kt) in sel {
+                            let c = row.ch();
                             if let Some(a) = self.row_anim_mut(row) {
-                                if let Some(k) = a.keys.iter_mut().find(|k| (k.t - kt).abs() < 1e-6) {
+                                if let Some(k) = a.keys.iter_mut().find(|k| k.ch & c != 0 && (k.t - kt).abs() < 1e-6) {
                                     k.t = (kt + dlt).max(0.0);
                                     moved.push((row, k.t));
                                 }
@@ -4091,8 +4215,8 @@ impl App {
                         let raw = t_of(pp.x);
                         let near = hit_rows
                             .iter()
-                            .filter_map(|(row, _)| self.row_anim(*row))
-                            .flat_map(|a| a.keys.iter().map(|k| k.t))
+                            .filter_map(|(row, _)| self.row_anim(*row).map(|a| (row.ch(), a)))
+                            .flat_map(|(c, a)| a.keys.iter().filter(move |k| k.ch & c != 0).map(|k| k.t))
                             .filter(|kt| (kt - raw).abs() <= reach)
                             .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()));
                         if let Some(kt) = near {
@@ -4105,9 +4229,11 @@ impl App {
                 }
                 TlDrag::Key { row, from } => {
                     if (t - from).abs() > 1e-9 {
+                        let c = row.ch();
                         if let Some(a) = self.row_anim_mut(row) {
-                            if !a.keys.iter().any(|k| (k.t - t).abs() < 1e-6) {
-                                if let Some(k) = a.keys.iter_mut().find(|k| (k.t - from).abs() < 1e-6) {
+                            // only its own value's keys are in the way
+                            if !a.keys.iter().any(|k| k.ch & c != 0 && (k.t - t).abs() < 1e-6) {
+                                if let Some(k) = a.keys.iter_mut().find(|k| k.ch & c != 0 && (k.t - from).abs() < 1e-6) {
                                     k.t = t;
                                 }
                                 a.sort();
@@ -4198,7 +4324,7 @@ impl App {
                         continue;
                     }
                     if let Some(a) = self.row_anim(*row) {
-                        for k in &a.keys {
+                        for k in a.keys.iter().filter(|k| k.ch & row.ch() != 0) {
                             if mr.contains(pos2(x_of(k.t), rr.center().y)) {
                                 picked.push((*row, k.t));
                             }
@@ -4218,7 +4344,7 @@ impl App {
         if resp.secondary_clicked() {
             if let Some(pp) = pointer.or(resp.hover_pos()) {
                 if let Some((row, _)) = hit_rows.iter().find(|(_, rr)| rr.contains(pp)).copied() {
-                    let sound = matches!(row, TlRow::Layer(id) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))));
+                    let sound = matches!(row, TlRow::Layer(id, _) if self.doc.get(id).is_some_and(|l| matches!(l.kind, LayerKind::Audio(_))));
                     if pp.x >= tr.left() && !sound {
                         let t = tl.snap(t_of(pp.x));
                         if let Some(a) = self.row_anim_mut(row) {

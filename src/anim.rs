@@ -65,8 +65,11 @@ pub mod ch {
     pub const VOL: u16 = 512;
     /// An FX layer's values, one channel each (`FxLayer::v`).
     pub const FX: [u16; 4] = [1024, 2048, 4096, 8192];
-    pub const FX_ALL: u16 = 1024 | 2048 | 4096 | 8192;
+    /// Every value (keys are made of what a layer has: `channels_of`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const ALL: u16 = 16383;
+    /// What a canvas camera has to key.
+    pub const CAMERA: u16 = POS | SIZE | ROT | FOLLOW;
     /// Everything a key held before volume existed (older files).
     pub const OLD_ALL: u16 = 511;
     /// Number of value bits.
@@ -261,22 +264,51 @@ impl Anim {
 
     /// Adds a key, replacing one at (nearly) the same time.
     /// A key at an existing key's time merges into it (only the values it holds).
+    /// Keys `k`'s values, one key per value (Ash, 10-29: each family of keys
+    /// stands on its own; a key holds one channel): into that channel's key
+    /// at the same time, else a new one.
     pub fn set_key(&mut self, k: Key) {
-        if let Some(old) = self.keys.iter_mut().find(|o| (o.t - k.t).abs() < 1e-6) {
-            copy_ch(old, &k, k.ch);
-            old.ch |= k.ch;
-            return;
+        for bit in 0..ch::COUNT {
+            let c = 1u16 << bit;
+            if k.ch & c == 0 {
+                continue;
+            }
+            if let Some(old) = self.keys.iter_mut().find(|o| o.ch == c && (o.t - k.t).abs() < 1e-6) {
+                copy_ch(old, &k, c);
+                continue;
+            }
+            let at = self.keys.partition_point(|o| o.t <= k.t);
+            self.keys.insert(at, Key { ch: c, ..k });
         }
-        let at = self.keys.partition_point(|o| o.t < k.t);
-        self.keys.insert(at, k);
     }
 
-    /// Removes the key nearest to `t` within `tol`; true if one went.
+    /// One key per channel: keys holding several (files before 0.97.0) are
+    /// split, each part with the same time, values and easing. True if any was.
+    pub fn split_channels(&mut self) -> bool {
+        if self.keys.iter().all(|k| k.ch.count_ones() <= 1) {
+            return false;
+        }
+        let mut out = Vec::with_capacity(self.keys.len() * 4);
+        for k in &self.keys {
+            for bit in 0..ch::COUNT {
+                let c = 1u16 << bit;
+                if k.ch & c != 0 {
+                    out.push(Key { ch: c, ..*k });
+                }
+            }
+        }
+        self.keys = out;
+        self.sort();
+        true
+    }
+
+    /// Removes the keys at the time nearest to `t` within `tol` (every
+    /// channel's); true if any went.
     pub fn remove_near(&mut self, t: f64, tol: f64) -> bool {
-        let best = self.keys.iter().enumerate().min_by(|a, b| (a.1.t - t).abs().partial_cmp(&(b.1.t - t).abs()).unwrap()).map(|(i, k)| (i, (k.t - t).abs()));
+        let best = self.keys.iter().map(|k| k.t).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()));
         match best {
-            Some((i, d)) if d <= tol => {
-                self.keys.remove(i);
+            Some(kt) if (kt - t).abs() <= tol => {
+                self.keys.retain(|k| (k.t - kt).abs() >= 1e-6);
                 true
             }
             _ => false,
@@ -419,7 +451,7 @@ pub struct Follow {
 impl CanvasCam {
     pub fn key(&self, t: f64) -> Key {
         let c = self.rect.center();
-        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::ALL & !ch::VOL & !ch::FX_ALL, vol: 1.0, fx: [0.0; 4] }
+        Key { t, center: [c.x, c.y], ext: [self.rect.width(), self.rect.height()], rot: self.rot, opacity: 1.0, place: None, ease: Ease::default(), follow: Some(self.follow), ch: ch::CAMERA, vol: 1.0, fx: [0.0; 4] }
     }
 
     pub fn apply(&mut self, k: &Key) {
@@ -512,11 +544,30 @@ pub fn key_of(l: &Layer, t: f64) -> Key {
         ease: Ease::default(),
         follow: None,
         // only video and sound layers have a volume to key
-        // volume only on video and sound layers, filter values only on FX layers
-        ch: ch::ALL & (if sound_vol(l).is_some() { !0 } else { !ch::VOL }) & (if fx.is_some() { !0 } else { !ch::FX_ALL }),
+        ch: channels_of(l),
         vol: sound_vol(l).unwrap_or(1.0),
         fx: fx.unwrap_or_default(),
     }
+}
+
+/// The values a layer has to key (Ash, 10-29: a key row per value it has):
+/// a sound only its volume; an FX layer its opacity and its filter's
+/// values; pictures their place, opacity, and size and turn where they have
+/// them; a layer in a space its 3D values; a video its volume too.
+pub fn channels_of(l: &Layer) -> u16 {
+    let mut c = match &l.kind {
+        LayerKind::Audio(_) => 0,
+        LayerKind::Fx(fx) => ch::OPA | ch::FX.iter().take(fx.filter.params().len()).fold(0, |a, b| a | b),
+        LayerKind::Image(_) | LayerKind::Text(_) | LayerKind::Shape(_) => ch::POS | ch::SIZE | ch::ROT | ch::OPA,
+        LayerKind::Vector(_) | LayerKind::Raster(_) => ch::POS | ch::OPA,
+    };
+    if l.place.is_some() {
+        c |= ch::P_POS | ch::P_ROT | ch::P_SCALE | ch::P_THICK;
+    }
+    if sound_vol(l).is_some() {
+        c |= ch::VOL;
+    }
+    c
 }
 
 /// A video or sound layer's volume.
@@ -675,25 +726,57 @@ mod tests {
         Key { t, center: [x, 0.0], ext: [1.0, 0.0], rot: 0.0, opacity: 1.0, place: None, ease: Ease::Linear, follow: None, ch: ch::ALL, vol: 1.0, fx: [0.0; 4] }
     }
 
+    /// The position channel's keys (every value has its own key).
+    fn pos_keys(a: &mut Anim) -> Vec<&mut Key> {
+        a.keys.iter_mut().filter(|k| k.ch == ch::POS).collect()
+    }
+
+    /// Keys are made only of the values a layer or camera has (one timeline
+    /// row each): no 3D rows on a flat photo, no opacity on a camera.
+    #[test]
+    fn keys_hold_what_a_layer_has() {
+        use crate::doc::{Document, Filter, FxLayer, LayerKind};
+        let mut doc = Document::default();
+        let shape = crate::doc::ShapeLayer { kind: crate::doc::ShapeKind::Rect, a: Pos2::ZERO, b: pos2(10.0, 10.0), color: egui::Color32::RED, fill: None, width: 1.0, rotation: 0.0 };
+        let s = doc.insert("s".into(), LayerKind::Shape(shape), None);
+        let f = doc.insert("f".into(), LayerKind::Fx(FxLayer::new(Filter::Unsharp)), None);
+        let pen = doc.insert("p".into(), LayerKind::Vector(crate::doc::VectorLayer { offset: Vec2::ZERO, strokes: Vec::new() }), None);
+        let c = |id| key_of(doc.get(id).unwrap(), 0.0).ch;
+        assert_eq!(c(s), ch::POS | ch::SIZE | ch::ROT | ch::OPA);
+        assert_eq!(c(f), ch::OPA | ch::FX[0] | ch::FX[1] | ch::FX[2], "unsharp has three values");
+        assert_eq!(c(pen), ch::POS | ch::OPA);
+        let mut a = Anim::default();
+        a.set_key(key_of(doc.get(s).unwrap(), 1.0));
+        assert_eq!(a.keys.len(), 4, "one key per value");
+        let cam = CanvasCam { id: 1, name: "c".into(), rect: egui::Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)), anim: Anim::default(), rot: 0.0, follow: None };
+        assert_eq!(cam.key(0.0).ch, ch::CAMERA);
+    }
+
     #[test]
     fn sampling_and_easing() {
         let mut a = Anim::default();
         a.set_key(k(2.0, 100.0));
         a.set_key(k(0.0, 0.0));
         assert_eq!(a.keys[0].t, 0.0);
+        // one key per value: every channel keyed holds a key of its own
+        assert!(a.keys.iter().all(|k| k.ch.count_ones() == 1));
         assert_eq!(a.sample(1.0).unwrap().center[0], 50.0);
         assert_eq!(a.sample(-1.0).unwrap().center[0], 0.0);
         assert_eq!(a.sample(5.0).unwrap().center[0], 100.0);
-        a.keys[0].ease = Ease::Hold;
+        pos_keys(&mut a)[0].ease = Ease::Hold;
         assert_eq!(a.sample(1.9).unwrap().center[0], 0.0);
-        a.keys[0].ease = Ease::Smooth;
+        pos_keys(&mut a)[0].ease = Ease::Smooth;
         let s = a.sample(0.5).unwrap().center[0];
         assert!(s < 25.0 && s > 0.0, "{s}");
         // replacing keeps the ease
+        let n = a.keys.len();
         a.set_key(k(0.0, 10.0));
-        assert_eq!((a.keys.len(), a.keys[0].ease, a.keys[0].center[0]), (2, Ease::Smooth, 10.0));
+        let p = pos_keys(&mut a);
+        assert_eq!((p.len(), p[0].ease, p[0].center[0]), (2, Ease::Smooth, 10.0));
+        assert_eq!(a.keys.len(), n);
+        // Alt+I: every value's key at that time goes
         assert!(a.remove_near(2.02, 0.05));
-        assert_eq!(a.keys.len(), 1);
+        assert!(a.keys.iter().all(|k| k.t == 0.0));
     }
 
     #[test]
@@ -841,14 +924,25 @@ mod tests {
         let v = a.sample_on(0.0, &base).unwrap();
         assert_eq!(v.center[0], 300.0);
         assert_eq!(v.opacity, 0.0);
-        // a key at the same time merges, keeping the other values
+        // a key of another value at the same time is a key of its own (Ash,
+        // 10-29: families of keys apart); the position's stays as it was
         let mut k1b = k(1.0, 0.0);
         k1b.opacity = 0.25;
         k1b.ch = ch::OPA;
         a.set_key(k1b);
-        let m = a.keys.iter().find(|k| k.t == 1.0).unwrap();
-        assert_eq!(m.ch, ch::POS | ch::OPA);
-        assert_eq!(m.center[0], 300.0);
-        assert_eq!(m.opacity, 0.25);
+        let at1: Vec<&Key> = a.keys.iter().filter(|k| k.t == 1.0).collect();
+        assert_eq!(at1.len(), 2);
+        assert!(at1.iter().any(|k| k.ch == ch::POS && k.center[0] == 300.0));
+        assert!(at1.iter().any(|k| k.ch == ch::OPA && k.opacity == 0.25));
+        let v = a.sample_on(1.0, &base).unwrap();
+        assert_eq!((v.center[0], v.opacity), (300.0, 0.25));
+        // old keys holding several values split into one per value, same sampling
+        let mut old = Anim::default();
+        old.keys = vec![k(0.0, 0.0), k(2.0, 100.0)];
+        let before = old.sample(0.7).unwrap();
+        assert!(old.split_channels());
+        assert!(old.keys.iter().all(|k| k.ch.count_ones() == 1));
+        let after = old.sample(0.7).unwrap();
+        assert_eq!((before.center, before.opacity, before.ext), (after.center, after.opacity, after.ext));
     }
 }

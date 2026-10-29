@@ -983,4 +983,5 @@ fn fx_look_filters() {
         }
     }
     let (m, sd) = (s / 1e4, (s2 / 1e4 - (s / 1e4).powi(2)).sqrt());
+    assert!((m - 200.0).abs() < 4.0 && sd > 10.0, "노이즈: mean {m:.1}, sd {sd:.1}");
 }
