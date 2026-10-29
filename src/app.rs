@@ -3554,19 +3554,10 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_XS;
             ui.label("객체 중심에");
-            egui::ComboBox::from_id_salt(("cam_snap", self.doc.cameras[i].id)).truncate()
-                .selected_text("맞추기…")
-                .width(84.0)
-                .popup_style(theme::glass_popup_style(false))
-                .show_ui(ui, |ui| {
-                    theme::glass_popup(ui, |ui| {
-                        for (id, name) in &targets {
-                            if ui.selectable_label(false, name.as_str()).clicked() {
-                                snap_to = Some(*id);
-                            }
-                        }
-                    })
-                });
+            let items: Vec<(LayerId, String, bool)> = targets.iter().map(|(id, n)| (*id, n.clone(), true)).collect();
+            if let (Some(id), _) = crate::kit::dropdown(ui, ("cam_snap", self.doc.cameras[i].id), "맞추기…", 84.0, &items, None) {
+                snap_to = Some(id);
+            }
             if ui.add_enabled(picked.is_some(), egui::Button::new("선택")).glass_tip("선택한 객체 중심으로").clicked() {
                 snap_to = picked;
             }
@@ -3578,22 +3569,11 @@ impl App {
             }
             ui.label("따라가기");
             let shown = follow.and_then(|f| targets.iter().find(|t| t.0 == f.layer)).map_or("없음".to_string(), |t| t.1.clone());
-            egui::ComboBox::from_id_salt(("cam_follow", self.doc.cameras[i].id)).truncate()
-                .selected_text(shown)
-                .width(ui.available_width() - 24.0)
-                .popup_style(theme::glass_popup_style(false))
-                .show_ui(ui, |ui| {
-                    theme::glass_popup(ui, |ui| {
-                        if ui.selectable_label(follow.is_none(), "없음").clicked() {
-                            new_follow = None;
-                        }
-                        for (id, name) in &targets {
-                            if ui.selectable_label(follow.is_some_and(|f| f.layer == *id), name.as_str()).clicked() {
-                                new_follow = Some(crate::anim::Follow { layer: *id, pos: true, rot: false, offset: [0.0, 0.0], rot_offset: 0.0 });
-                            }
-                        }
-                    })
-                });
+            let items: Vec<(Option<LayerId>, String, bool)> = std::iter::once((None, "없음".to_string(), true)).chain(targets.iter().map(|(id, n)| (Some(*id), n.clone(), true))).collect();
+            let cur = follow.map(|f| f.layer);
+            if let (Some(pick), _) = crate::kit::dropdown(ui, ("cam_follow", self.doc.cameras[i].id), shown, ui.available_width() - 24.0, &items, Some(&cur)) {
+                new_follow = pick.map(|layer| crate::anim::Follow { layer, pos: true, rot: false, offset: [0.0, 0.0], rot_offset: 0.0 });
+            }
         });
         let bind = picked.filter(|p| follow.is_none_or(|f| f.layer != *p));
         if ui.add_enabled(bind.is_some(), egui::Button::new("선택한 객체 따라가기")).glass_tip("위치 따라가기로 묶기").clicked() {
@@ -4622,17 +4602,10 @@ impl App {
                     }
                     ui.add_space(SPACE_SM);
                     crate::kit::row(ui, "형식", |ui| {
-                        egui::ComboBox::from_id_salt("vcodec").truncate()
-                            .selected_text(d.codec.label())
-                            .width(200.0)
-                            .popup_style(theme::glass_popup_style(false))
-                            .show_ui(ui, |ui| {
-                                theme::glass_popup(ui, |ui| {
-                                    for c in Codec::ALL {
-                                        ui.selectable_value(&mut d.codec, c, c.label());
-                                    }
-                                })
-                            });
+                        let items: Vec<(Codec, String, bool)> = Codec::ALL.iter().map(|c| (*c, c.label().to_string(), true)).collect();
+                        if let (Some(c), _) = crate::kit::dropdown(ui, "vcodec", d.codec.label(), 200.0, &items, Some(&d.codec)) {
+                            d.codec = c;
+                        }
                     });
                     if d.codec.has_quality() {
                         crate::kit::row(ui, "화질 기준", |ui| {
@@ -8937,31 +8910,19 @@ impl App {
                 };
                 ui.horizontal(|ui| {
                     ui.label("3D 공간");
-                    egui::ComboBox::from_id_salt(("space_of", id)).truncate()
-                        .selected_text(shown)
-                        .width(120.0)
-                        .popup_style(theme::glass_popup_style(false))
-                        .show_ui(ui, |ui| {
-                            theme::glass_popup(ui, |ui| {
-                                if ui.selectable_label(cur.is_none(), "없음").clicked() && cur.is_some() {
-                                    space_req = Some(None);
-                                }
-                                for (sid, name, ok, walls) in &spaces {
-                                    ui.add_enabled_ui(*ok, |ui| {
-                                        let here = Some((*sid, None));
-                                        if ui.selectable_label(cur == here, name.as_str()).clicked() && cur != here {
-                                            space_req = Some(here);
-                                        }
-                                        for (wid, wn) in walls {
-                                            let here = Some((*sid, Some(*wid)));
-                                            if ui.selectable_label(cur == here, format!("   {name} › {wn}")).clicked() && cur != here {
-                                                space_req = Some(here);
-                                            }
-                                        }
-                                    });
-                                }
-                            })
-                        });
+                    // a space, or a wall in it (spaces without a camera unavailable)
+                    let mut items: Vec<(Option<(u64, Option<u64>)>, String, bool)> = vec![(None, "없음".to_string(), true)];
+                    for (sid, name, ok, walls) in &spaces {
+                        items.push((Some((*sid, None)), name.clone(), *ok));
+                        for (wid, wn) in walls {
+                            items.push((Some((*sid, Some(*wid))), format!("   {name} › {wn}"), *ok));
+                        }
+                    }
+                    if let (Some(here), _) = crate::kit::dropdown(ui, ("space_of", id), shown, 120.0, &items, Some(&cur)) {
+                        if here != cur {
+                            space_req = Some(here);
+                        }
+                    }
                 });
                 if let Some(pl) = &mut l.place {
                     for (i, ax) in ["X", "Y", "Z"].iter().enumerate() {
@@ -9179,18 +9140,10 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("따라가기");
             let shown = anchor.and_then(|a| names.iter().find(|n| n.0 == a)).map_or("없음".to_string(), |n| n.1.clone());
-            egui::ComboBox::from_id_salt(("mask_anchor", id)).truncate().selected_text(shown).width(ui.available_width() - 24.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| {
-                theme::glass_popup(ui, |ui| {
-                    if ui.selectable_label(anchor.is_none(), "없음").clicked() {
-                        pick = Some(None);
-                    }
-                    for (lid, n) in &names {
-                        if ui.selectable_label(anchor == Some(*lid), n.as_str()).clicked() {
-                            pick = Some(Some(*lid));
-                        }
-                    }
-                })
-            });
+            let items: Vec<(Option<LayerId>, String, bool)> = std::iter::once((None, "없음".to_string(), true)).chain(names.iter().map(|(lid, n)| (Some(*lid), n.clone(), true))).collect();
+            if let (Some(p), _) = crate::kit::dropdown(ui, ("mask_anchor", id), shown, ui.available_width() - 24.0, &items, Some(&anchor)) {
+                pick = Some(p);
+            }
         });
         let mut clear = false;
         let armed = self.wand == Some(id);
@@ -11630,7 +11583,8 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
             Some(fam) => egui::RichText::new(shown).family(fam).size(theme::TEXT_BODY + 1.0).into(),
             None => shown.into(),
         };
-        egui::ComboBox::from_id_salt(id).truncate().selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
+        let drag = crate::kit::dd_dragging(ui, id);
+        let combo = egui::ComboBox::from_id_salt(id).truncate().selected_text(shown).width(170.0).height(360.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
             let Some(fams) = &fams else {
                 ui.label("설치된 글꼴 읽는 중…");
                 return;
@@ -11681,7 +11635,7 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
                         ui.painter().text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, &fam.name, FontId::proportional(theme::TEXT_BODY), INK_2());
                     }
                 }
-                if resp.clicked() {
+                if resp.clicked() || crate::kit::dd_row_picked(ui, drag, &resp) {
                     *family = fam.name.clone();
                     *style = fam.regular().style.clone();
                     changed = true;
@@ -11689,6 +11643,24 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
                 }
             }
         }));
+        // the wheel over the closed box: the family before / after (the
+        // default first, then the installed ones in order)
+        let step = crate::kit::dd_button(ui, id, &combo.response);
+        if let (true, Some(fams)) = (step != 0 && !mixed_family, &fams) {
+            let at = if family.is_empty() { Some(0) } else { fams.iter().position(|f| f.name == *family).map(|i| i + 1) };
+            if let Some(i) = at {
+                let j = i as i32 + step;
+                if j == 0 {
+                    family.clear();
+                    *style = "Regular".into();
+                    changed = true;
+                } else if let Some(f) = fams.get(j as usize - 1).filter(|_| j > 0) {
+                    *family = f.name.clone();
+                    *style = f.regular().style.clone();
+                    changed = true;
+                }
+            }
+        }
     });
     let styles: Vec<String> = if family.is_empty() {
         vec!["Regular".into(), "Bold".into()]
@@ -11703,14 +11675,12 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
             ui.label("스타일");
             let mx = mixed_family || mixed_style;
             let shown = if mx { crate::dial::MIXED.to_string() } else { style.clone() };
-            egui::ComboBox::from_id_salt((id, "style")).truncate().selected_text(shown).width(170.0).popup_style(theme::glass_popup_style(false)).show_ui(ui, |ui| theme::glass_popup(ui, |ui| {
-                for s in styles {
-                    if ui.selectable_label(!mx && *style == s, &s).clicked() {
-                        *style = s;
-                        changed = true;
-                    }
-                }
-            }));
+            let items: Vec<(String, String, bool)> = styles.iter().map(|s| (s.clone(), s.clone(), true)).collect();
+            let now = (!mx).then(|| style.clone());
+            if let (Some(s), _) = crate::kit::dropdown(ui, (id, "style"), shown, 170.0, &items, now.as_ref()) {
+                *style = s;
+                changed = true;
+            }
         });
     }
     changed
@@ -12194,11 +12164,11 @@ fn camera_region_picker(ui: &mut egui::Ui, region: &mut ExportRegion, cams: &[cr
         crate::kit::segmented(ui, region, &opts);
     } else {
         let cur = cams.iter().find(|c| ExportRegion::Camera(c.id) == *region).map(|c| c.name.as_str()).unwrap_or("—");
-        egui::ComboBox::from_id_salt("cam_region").selected_text(cur).show_ui(ui, |ui| {
-            for c in cams {
-                ui.selectable_value(region, ExportRegion::Camera(c.id), c.name.as_str());
-            }
-        });
+        let items: Vec<(ExportRegion, String, bool)> = cams.iter().map(|c| (ExportRegion::Camera(c.id), c.name.clone(), true)).collect();
+        let now = *region;
+        if let (Some(r), _) = crate::kit::dropdown(ui, "cam_region", cur, 140.0, &items, Some(&now)) {
+            *region = r;
+        }
     }
 }
 
@@ -12333,15 +12303,11 @@ fn rect_fields(ui: &mut egui::Ui, r: &mut Rect, salt: &str, key: Option<crate::d
     let cur = sizes.iter().find(|(pw, ph)| (w - pw).abs() < 0.5 && (h - ph).abs() < 0.5).map(|(pw, ph)| format!("{pw:.0}×{ph:.0}")).unwrap_or_else(|| "직접".into());
     let mut pick = None;
     crate::kit::row(ui, "크기 프리셋", |ui| {
-        egui::ComboBox::from_id_salt((salt, "size_preset")).selected_text(cur).show_ui(ui, |ui| {
-            for &(pw, ph) in &sizes {
-                if ui.selectable_label((w - pw).abs() < 0.5 && (h - ph).abs() < 0.5, format!("{pw:.0}×{ph:.0}")).clicked() {
-                    pick = Some((pw, ph));
-                }
-            }
-        })
-        .response
-        .glass_tip("가운데 유지");
+        let items: Vec<(usize, String, bool)> = sizes.iter().enumerate().map(|(i, (pw, ph))| (i, format!("{pw:.0}×{ph:.0}"), true)).collect();
+        let now = sizes.iter().position(|(pw, ph)| (w - pw).abs() < 0.5 && (h - ph).abs() < 0.5);
+        let (p, resp) = crate::kit::dropdown(ui, (salt, "size_preset"), cur, 110.0, &items, now.as_ref());
+        resp.glass_tip("가운데 유지");
+        pick = p.map(|i| sizes[i]);
     });
     if let Some((pw, ph)) = pick {
         let c = pos2(x + w * 0.5, y + h * 0.5);
@@ -12751,44 +12717,25 @@ fn fx_props(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("필터");
-        egui::ComboBox::from_id_salt("fx_filter")
-            .truncate()
-            .selected_text(fx.filter.label())
-            .width(150.0)
-            .popup_style(theme::glass_popup_style(false))
-            .show_ui(ui, |ui| {
-                theme::glass_popup(ui, |ui| {
-                    for f in crate::doc::Filter::ALL {
-                        if ui.selectable_label(fx.filter == f, f.label()).clicked() && fx.filter != f {
-                            *fx = crate::doc::FxLayer { blend: fx.blend, ..crate::doc::FxLayer::new(f) };
-                            changed = true;
-                        }
-                    }
-                })
-            });
+        let items: Vec<(crate::doc::Filter, String, bool)> = crate::doc::Filter::ALL.iter().map(|f| (*f, f.label().to_string(), true)).collect();
+        if let (Some(f), _) = crate::kit::dropdown(ui, "fx_filter", fx.filter.label(), 150.0, &items, Some(&fx.filter)) {
+            if f != fx.filter {
+                *fx = crate::doc::FxLayer { blend: fx.blend, colors: fx.colors, ..crate::doc::FxLayer::new(f) };
+                changed = true;
+            }
+        }
     });
     ui.horizontal(|ui| {
         ui.label("혼합");
         crate::kit::dbg_open_combo(ui, "fx_blend");
-        egui::ComboBox::from_id_salt("fx_blend")
-            .truncate()
-            .selected_text(fx.blend.map_or("복사", |b| b.label()))
-            .width(110.0)
-            .popup_style(theme::glass_popup_style(false))
-            .show_ui(ui, |ui| {
-                theme::glass_popup(ui, |ui| {
-                    if ui.selectable_label(fx.blend.is_none(), "복사").glass_tip("아래 그림을 필터 결과로 바꿈").clicked() {
-                        changed |= fx.blend.is_some();
-                        fx.blend = None;
-                    }
-                    for x in Blend::ALL.into_iter().filter(|b| *b != Blend::Erase) {
-                        if ui.selectable_label(fx.blend == Some(x), x.label()).clicked() {
-                            changed |= fx.blend != Some(x);
-                            fx.blend = Some(x);
-                        }
-                    }
-                })
-            });
+        // 복사 replaces what is below with the filtered picture; a mode lays it over
+        let items: Vec<(Option<Blend>, String, bool)> = std::iter::once((None, "복사".to_string(), true)).chain(Blend::ALL.into_iter().filter(|b| *b != Blend::Erase).map(|b| (Some(b), b.label().to_string(), true))).collect();
+        let (pick, resp) = crate::kit::dropdown(ui, "fx_blend", fx.blend.map_or("복사", |b| b.label()), 110.0, &items, Some(&fx.blend));
+        resp.glass_tip("복사: 아래 그림을 필터 결과로 바꿈");
+        if let Some(b) = pick {
+            changed |= fx.blend != b;
+            fx.blend = b;
+        }
     });
     changed
 }
@@ -12798,21 +12745,12 @@ fn blend_row(ui: &mut egui::Ui, id: &str, b: &mut Blend, mixed: bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("혼합");
-        egui::ComboBox::from_id_salt(id)
-            .truncate()
-            .selected_text(if mixed { crate::dial::MIXED } else { b.label() })
-            .width(110.0)
-            .popup_style(theme::glass_popup_style(false))
-            .show_ui(ui, |ui| {
-                theme::glass_popup(ui, |ui| {
-                    for x in Blend::ALL {
-                        if ui.selectable_label(!mixed && *b == x, x.label()).clicked() {
-                            *b = x;
-                            changed = true;
-                        }
-                    }
-                })
-            });
+        let items: Vec<(Blend, String, bool)> = Blend::ALL.iter().map(|x| (*x, x.label().to_string(), true)).collect();
+        let now = (!mixed).then_some(*b);
+        if let (Some(x), _) = crate::kit::dropdown(ui, id, if mixed { crate::dial::MIXED } else { b.label() }, 110.0, &items, now.as_ref()) {
+            *b = x;
+            changed = true;
+        }
     });
     changed
 }

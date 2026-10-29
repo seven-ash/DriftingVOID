@@ -203,6 +203,155 @@ fn draw_icon(p: &egui::Painter, icon: Icon, c: Pos2, col: Color32) {
     }
 }
 
+// ---------------------------------------------------------------- drop-downs
+//
+// Every drop-down (Ash, 10-28): the wheel over a closed one steps to the
+// option before or after and applies it at once; pressing and holding it
+// (0.25 s, or moving 6 px) opens the list, and releasing on an option picks
+// it (elsewhere: nothing; on the box: the list stays open); a plain click
+// opens the list as before.
+
+/// Seconds a press is held before the list opens under it.
+const HOLD_OPEN: f64 = 0.25;
+/// Wheel travel (points) per option step; a mouse notch is 50.
+const WHEEL_STEP: f32 = 40.0;
+
+fn dd_ids(ui: &Ui, salt: impl egui::AsIdSalt) -> (egui::Id, egui::Id) {
+    let button = ui.make_persistent_id(egui::IdSalt::new(salt));
+    (button.with("popup"), button.with("press_drag"))
+}
+
+/// The press-drag state of the drop-down `salt` (read inside its list).
+pub fn dd_dragging(ui: &Ui, salt: impl egui::AsIdSalt) -> egui::Id {
+    dd_ids(ui, salt).1
+}
+
+/// A row of an open list: true when a press-drag from the box is released
+/// on it (`drag` from `dd_dragging`, taken before the ComboBox). Lit while
+/// the pointer is over it (other widgets get no hover during a drag).
+pub fn dd_row_picked(ui: &Ui, drag: egui::Id, row: &Response) -> bool {
+    if !ui.data(|d| d.get_temp::<bool>(drag)).unwrap_or(false) {
+        return false;
+    }
+    let (pos, released) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_released()));
+    let over = pos.is_some_and(|p| row.rect.contains(p));
+    if over {
+        ui.painter().rect_filled(row.rect, CornerRadius::same(theme::inner(theme::radius_card(), SPACE_SM)), FILL_2());
+    }
+    over && released
+}
+
+/// After a ComboBox (its button `resp`): the wheel step (−1 before, +1
+/// after) when it turns over the closed box, and the press-and-hold list.
+pub fn dd_button(ui: &Ui, salt: impl egui::AsIdSalt + Clone, resp: &Response) -> i32 {
+    let (popup, drag) = dd_ids(ui, salt);
+    let ctx = ui.ctx();
+    let open = egui::Popup::is_id_open(ctx, popup);
+    let dragging = ui.data(|d| d.get_temp::<bool>(drag)).unwrap_or(false);
+    // press and hold (or press and move) on the box: the list opens under it
+    if !open && !dragging && resp.is_pointer_button_down_on() {
+        let (held, moved) = ui.input(|i| {
+            let t = i.pointer.press_start_time().map_or(0.0, |t0| i.time - t0);
+            let d = match (i.pointer.press_origin(), i.pointer.latest_pos()) {
+                (Some(a), Some(b)) => (b - a).length(),
+                _ => 0.0,
+            };
+            (t, d)
+        });
+        if held >= HOLD_OPEN || moved >= 6.0 {
+            egui::Popup::open_id(ctx, popup);
+            ui.data_mut(|d| d.insert_temp(drag, true));
+        } else {
+            ctx.request_repaint();
+        }
+    }
+    // the press that opened it ends: on the box the list stays, elsewhere it
+    // closes (a row under the pointer was picked in the list)
+    if dragging && ui.input(|i| i.pointer.primary_released()) {
+        ui.data_mut(|d| d.remove::<bool>(drag));
+        let on_box = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| resp.rect.contains(p));
+        if on_box {
+            egui::Popup::open_id(ctx, popup);
+        } else {
+            egui::Popup::close_id(ctx, popup);
+        }
+    }
+    // the wheel over the closed box steps the choice
+    if !open && resp.hovered() {
+        // this frame's wheel events (egui smooths what it passes on)
+        let dy: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .map(|e| match e {
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        let k = match unit {
+                            egui::MouseWheelUnit::Point => 1.0,
+                            egui::MouseWheelUnit::Line => 50.0,
+                            egui::MouseWheelUnit::Page => 500.0,
+                        };
+                        (delta.y + delta.x) * k
+                    }
+                    _ => 0.0,
+                })
+                .sum()
+        });
+        // the panel under it does not scroll too (nor later, from the smoothing)
+        ctx.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        if dy != 0.0 {
+            let acc_id = drag.with("wheel");
+            let mut acc = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(0.0) + dy;
+            let mut step = 0;
+            // a mouse notch is one step; a touchpad's small deltas add up
+            if acc.abs() >= WHEEL_STEP || (acc.abs() > 0.0 && dy.abs() >= WHEEL_STEP * 0.5) {
+                step = if acc < 0.0 { 1 } else { -1 };
+                acc = 0.0;
+            }
+            ui.data_mut(|d| d.insert_temp(acc_id, acc));
+            return step;
+        }
+    }
+    0
+}
+
+/// A drop-down of plain options (`items`: value, label, enabled), the
+/// current one `current` (None: mixed or none), shown as `shown`. Returns
+/// the option picked by a click, the wheel or a press-drag-release, and the
+/// box's response (for a tip).
+pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, salt: impl egui::AsIdSalt + Clone, shown: impl Into<egui::WidgetText>, width: f32, items: &[(T, String, bool)], current: Option<&T>) -> (Option<T>, Response) {
+    let drag = dd_dragging(ui, salt.clone());
+    let mut picked = None;
+    let r = egui::ComboBox::from_id_salt(salt.clone())
+        .truncate()
+        .selected_text(shown)
+        .width(width)
+        .popup_style(theme::glass_popup_style(false))
+        .show_ui(ui, |ui| {
+            theme::glass_popup(ui, |ui| {
+                for (v, label, on) in items {
+                    let row = ui.add_enabled(*on, egui::Button::selectable(current == Some(v), label.as_str()));
+                    if row.clicked() || (*on && dd_row_picked(ui, drag, &row)) {
+                        picked = Some(v.clone());
+                        ui.close();
+                    }
+                }
+            })
+        });
+    let step = dd_button(ui, salt, &r.response);
+    if step != 0 && picked.is_none() {
+        // the next enabled option that way, from the current one
+        if let Some(i) = current.and_then(|c| items.iter().position(|x| &x.0 == c)) {
+            let mut j = i as i32 + step;
+            while (0..items.len() as i32).contains(&j) && !items[j as usize].2 {
+                j += step;
+            }
+            if (0..items.len() as i32).contains(&j) {
+                picked = Some(items[j as usize].0.clone());
+            }
+        }
+    }
+    (picked, r.response)
+}
+
 /// DV_OPEN_COMBO=<id salt>: that drop-down stays open (captures; drop-downs
 /// cannot be opened from outside). Call in the ui that makes the ComboBox.
 pub fn dbg_open_combo(ui: &Ui, salt: &str) {
@@ -348,4 +497,139 @@ pub fn demo(ctx: &egui::Context) {
         });
     });
     ctx.data_mut(|d| d.insert_temp(id, s));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, PointerButton, RawInput};
+
+    /// A headless egui with one drop-down of three options (current B):
+    /// each `frame` feeds the events at time `t` and returns what it picked,
+    /// the box's rect and the open list's rect.
+    struct Harness {
+        ctx: egui::Context,
+        t: f64,
+        cur: u8,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Harness { ctx: egui::Context::default(), t: 0.0, cur: 1 }
+        }
+
+        fn frame(&mut self, dt: f64, events: Vec<Event>) -> (Option<u8>, Rect, Option<Rect>) {
+            self.t += dt;
+            let input = RawInput { time: Some(self.t), screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+            let mut out = (None, Rect::NOTHING, None);
+            let cur = self.cur;
+            let ctx = self.ctx.clone();
+            let out_ref = &mut out;
+            let full = self.ctx.run_ui(input, |ui| {
+                {
+                    let out = &mut *out_ref;
+                    let items: Vec<(u8, String, bool)> = (0..3).map(|i| (i, ["A", "B", "C"][i as usize].to_string(), true)).collect();
+                    let (picked, _) = dropdown(ui, "dd", ["A", "B", "C"][cur as usize], 120.0, &items, Some(&cur));
+                    let popup = ui.make_persistent_id(egui::IdSalt::new("dd")).with("popup");
+                    let open = egui::Popup::is_id_open(&ctx, popup).then(|| ctx.memory(|m| m.area_rect(popup))).flatten();
+                    let button = ui.make_persistent_id(egui::IdSalt::new("dd"));
+                    let rect = ctx.read_response(button).map_or(Rect::NOTHING, |r| r.rect);
+                    *out = (picked, rect, open);
+                }
+            });
+            full.drop_without_applying_deltas();
+            if let Some(p) = out.0 {
+                self.cur = p;
+            }
+            out
+        }
+
+        fn settle(&mut self) -> (Rect, Option<Rect>) {
+            let mut r = self.frame(0.016, vec![]);
+            for _ in 0..3 {
+                r = self.frame(0.016, vec![]);
+            }
+            (r.1, r.2)
+        }
+    }
+
+    fn mv(p: Pos2) -> Event {
+        Event::PointerMoved(p)
+    }
+
+    fn btn(p: Pos2, pressed: bool) -> Event {
+        Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn wheel(dy: f32) -> Event {
+        Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, dy), phase: egui::TouchPhase::Move, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn wheel_steps_the_choice() {
+        let mut h = Harness::new();
+        let (b, _) = h.settle();
+        h.frame(0.016, vec![mv(b.center())]);
+        let (p, _, open) = h.frame(0.016, vec![wheel(-1.0)]);
+        assert_eq!((p, open.is_some()), (Some(2), false), "wheel down: the next option, list closed");
+        h.frame(0.016, vec![]);
+        let (p, _, _) = h.frame(0.016, vec![wheel(1.0)]);
+        assert_eq!(p, Some(1), "wheel up: back");
+        let (p, _, _) = h.frame(0.016, vec![wheel(1.0)]);
+        assert_eq!(p, Some(0));
+        let (p, _, _) = h.frame(0.016, vec![wheel(1.0)]);
+        assert_eq!(p, None, "past the first: stays");
+    }
+
+    #[test]
+    fn plain_click_only_opens() {
+        let mut h = Harness::new();
+        let (b, _) = h.settle();
+        h.frame(0.016, vec![mv(b.center())]);
+        h.frame(0.016, vec![btn(b.center(), true)]);
+        let (p, _, _) = h.frame(0.05, vec![btn(b.center(), false)]);
+        let (_, open) = h.settle();
+        assert_eq!((p, open.is_some()), (None, true), "a click opens the list and picks nothing");
+    }
+
+    /// Press and hold on the box: the list opens; returns its rect.
+    fn hold_open(h: &mut Harness) -> (Rect, Rect) {
+        let (b, _) = h.settle();
+        h.frame(0.016, vec![mv(b.center())]);
+        h.frame(0.016, vec![btn(b.center(), true)]);
+        for _ in 0..20 {
+            h.frame(0.02, vec![]);
+        }
+        let (_, open) = h.settle();
+        (b, open.expect("held: the list is open"))
+    }
+
+    #[test]
+    fn press_drag_release_picks() {
+        let mut h = Harness::new();
+        let (_, list) = hold_open(&mut h);
+        // the third row: rows are spread evenly down the list's inside
+        let p = pos2(list.center().x, list.top() + list.height() * (2.5 / 3.0));
+        h.frame(0.016, vec![mv(p)]);
+        let (picked, _, _) = h.frame(0.016, vec![btn(p, false)]);
+        let (_, open) = h.settle();
+        assert_eq!((picked, open.is_some()), (Some(2), false), "released on C: picked, list closed");
+    }
+
+    #[test]
+    fn release_outside_or_on_box() {
+        let mut h = Harness::new();
+        let (_, list) = hold_open(&mut h);
+        let away = pos2(list.right() + 200.0, list.bottom() + 100.0);
+        h.frame(0.016, vec![mv(away)]);
+        let (picked, _, _) = h.frame(0.016, vec![btn(away, false)]);
+        let (_, open) = h.settle();
+        assert_eq!((picked, open.is_some()), (None, false), "released away: nothing, closed");
+
+        let mut h = Harness::new();
+        let (b, _) = hold_open(&mut h);
+        let (picked, _, _) = h.frame(0.016, vec![btn(b.center(), false)]);
+        let (_, open) = h.settle();
+        assert_eq!((picked, open.is_some()), (None, true), "released on the box: the list stays");
+    }
 }
