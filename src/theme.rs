@@ -363,6 +363,14 @@ const UI_FACES: &[(&str, &str, &str)] = &[
 ];
 
 /// Builds egui font definitions; called again once the system font scan lands.
+/// A bundled face: `fonts\` beside the exe (the package), else the
+/// repository's `assets/fonts` (builds run from the tree).
+fn jp_face(file: &str) -> Option<Vec<u8>> {
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("fonts").join(file)));
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("fonts").join(file);
+    beside.into_iter().chain(std::iter::once(repo)).find_map(|p| std::fs::read(p).ok())
+}
+
 pub fn font_defs() -> egui::FontDefinitions {
     let f = crate::text::fonts();
     let mut defs = egui::FontDefinitions::default();
@@ -383,6 +391,16 @@ pub fn font_defs() -> egui::FontDefinitions {
                 ui_bold_name = "ui_bold".into();
                 break;
             }
+        }
+    }
+    // Japanese: Pretendard JP, the UI face's own design with kana and kanji
+    // (and Hangul and Latin), shipped beside the exe (Ash, 10-29)
+    if crate::i18n::lang() == crate::i18n::Lang::Ja {
+        if let (Some(r), Some(b)) = (jp_face("PretendardJP-Regular.ttf"), jp_face("PretendardJP-SemiBold.ttf")) {
+            defs.font_data.insert("ui".into(), std::sync::Arc::new(egui::FontData::from_owned(r)));
+            defs.font_data.insert("ui_bold".into(), std::sync::Arc::new(egui::FontData::from_owned(b)));
+            ui_regular = "ui".into();
+            ui_bold_name = "ui_bold".into();
         }
     }
     let prop = defs.families.entry(FontFamily::Proportional).or_default();

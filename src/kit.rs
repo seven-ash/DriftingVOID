@@ -155,7 +155,7 @@ pub fn dialog_header(ui: &mut Ui, title: &str) -> bool {
     ui.horizontal(|ui| {
         ui.label(dialog_title(title));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            close = ui.small_button("닫기").clicked();
+            close = ui.small_button(crate::i18n::tr("닫기")).clicked();
         });
     });
     ui.add_space(SPACE_SM);
@@ -456,45 +456,45 @@ pub fn demo(ctx: &egui::Context) {
                 ui.add_space(SPACE_SM);
                 ui.label(theme::section_title(t));
             };
-            head(ui, "스위치");
-            switch(ui, &mut s.sw[0], "꺼짐");
-            switch(ui, &mut s.sw[1], "켜짐");
+            head(ui, crate::i18n::tr("스위치"));
+            switch(ui, &mut s.sw[0], crate::i18n::tr("꺼짐"));
+            switch(ui, &mut s.sw[1], crate::i18n::tr("켜짐"));
             ui.add_enabled_ui(false, |ui| {
                 let (mut a, mut b) = (false, true);
-                switch(ui, &mut a, "사용 불가 · 꺼짐");
-                switch(ui, &mut b, "사용 불가 · 켜짐");
+                switch(ui, &mut a, crate::i18n::tr("사용 불가 · 꺼짐"));
+                switch(ui, &mut b, crate::i18n::tr("사용 불가 · 켜짐"));
             });
-            head(ui, "세그먼트");
-            segmented(ui, &mut s.seg3, &[(0, "연필"), (1, "펜촉"), (2, "마커")]);
-            segmented(ui, &mut s.seg2, &[(0, "가로 기준"), (1, "세로 기준")]);
-            ui.add_enabled_ui(false, |ui| segmented(ui, &mut s.seg2, &[(0, "선명"), (1, "사진 흐림")]));
-            head(ui, "아이콘 버튼");
+            head(ui, crate::i18n::tr("세그먼트"));
+            segmented(ui, &mut s.seg3, &[(0, crate::i18n::tr("연필")), (1, crate::i18n::tr("펜촉")), (2, crate::i18n::tr("마커"))]);
+            segmented(ui, &mut s.seg2, &[(0, crate::i18n::tr("가로 기준")), (1, crate::i18n::tr("세로 기준"))]);
+            ui.add_enabled_ui(false, |ui| segmented(ui, &mut s.seg2, &[(0, crate::i18n::tr("선명")), (1, crate::i18n::tr("사진 흐림"))]));
+            head(ui, crate::i18n::tr("아이콘 버튼"));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
-                icon_button(ui, Icon::Up, "위로", false);
-                icon_button(ui, Icon::Down, "아래로", false);
-                icon_button(ui, Icon::Duplicate, "복제 · Ctrl+D", true);
-                ui.add_enabled_ui(false, |ui| icon_button(ui, Icon::Delete, "삭제 · Backspace", false));
+                icon_button(ui, Icon::Up, crate::i18n::tr("위로"), false);
+                icon_button(ui, Icon::Down, crate::i18n::tr("아래로"), false);
+                icon_button(ui, Icon::Duplicate, crate::i18n::tr("복제 · Ctrl+D"), true);
+                ui.add_enabled_ui(false, |ui| icon_button(ui, Icon::Delete, crate::i18n::tr("삭제 · Backspace"), false));
             });
-            head(ui, "메뉴 줄");
-            menu_row(ui, "전체 보기", "Ctrl+0");
+            head(ui, crate::i18n::tr("메뉴 줄"));
+            menu_row(ui, crate::i18n::tr("전체 보기"), "Ctrl+0");
             menu_row(ui, "100%", "Ctrl+1");
-            ui.add_enabled_ui(false, |ui| menu_row(ui, "UI 숨기기", "Ctrl+H"));
-            head(ui, "줄 격자");
+            ui.add_enabled_ui(false, |ui| menu_row(ui, crate::i18n::tr("UI 숨기기"), "Ctrl+H"));
+            head(ui, crate::i18n::tr("줄 격자"));
             let (mut h, mut g) = (false, 0i8);
-            ui.add(crate::dial::Dial::new(&mut s.v[0], 0.0..=1.0).text("불투명도").default(1.0));
-            ui.add(crate::dial::Dial::new(&mut s.v[1], 0.0..=100.0).text("손떨림 보정").key(Some(crate::dial::KeyMark::None), &mut h));
+            ui.add(crate::dial::Dial::new(&mut s.v[0], 0.0..=1.0).text(crate::i18n::tr("불투명도")).default(1.0));
+            ui.add(crate::dial::Dial::new(&mut s.v[1], 0.0..=100.0).text(crate::i18n::tr("손떨림 보정")).key(Some(crate::dial::KeyMark::None), &mut h));
             let (mut h2, mut g2) = (false, 0i8);
-            ui.add(crate::dial::Dial::new(&mut s.v[2], 0.0..=1.0).text("크기 %").key(Some(crate::dial::KeyMark::Here), &mut h2).nav(crate::dial::KeyNav { prev: true, next: true }, &mut g2));
+            ui.add(crate::dial::Dial::new(&mut s.v[2], 0.0..=1.0).text(crate::i18n::tr("크기 %")).key(Some(crate::dial::KeyMark::Here), &mut h2).nav(crate::dial::KeyNav { prev: true, next: true }, &mut g2));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
-                crate::dial::label_cell_nav(ui, "위치", Some(crate::dial::KeyMark::Keyed), &mut h, Some((crate::dial::KeyNav { prev: true, next: false }, &mut g)));
+                crate::dial::label_cell_nav(ui, crate::i18n::tr("위치"), Some(crate::dial::KeyMark::Keyed), &mut h, Some((crate::dial::KeyNav { prev: true, next: false }, &mut g)));
                 ui.label("X");
                 ui.add_sized(vec2(56.0, ROW_H), egui::DragValue::new(&mut s.xy[0]));
                 ui.label("Y");
                 ui.add_sized(vec2(56.0, ROW_H), egui::DragValue::new(&mut s.xy[1]));
             });
-            row(ui, "정렬", |ui| segmented(ui, &mut s.seg3, &[(0, "왼쪽"), (1, "가운데"), (2, "오른쪽")]));
+            row(ui, crate::i18n::tr("정렬"), |ui| segmented(ui, &mut s.seg3, &[(0, crate::i18n::tr("왼쪽")), (1, crate::i18n::tr("가운데")), (2, crate::i18n::tr("오른쪽"))]));
         });
     });
     ctx.data_mut(|d| d.insert_temp(id, s));

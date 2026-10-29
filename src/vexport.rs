@@ -31,10 +31,10 @@ impl Codec {
             Codec::H264 => "H.264 (mp4)",
             Codec::Hevc => "H.265/HEVC (mp4)",
             Codec::Av1 => "AV1 (mp4)",
-            Codec::ProRes => "ProRes 4444 (mov, 투명)",
-            Codec::Vp9 => "VP9 (webm, 투명)",
+            Codec::ProRes => crate::i18n::tr("ProRes 4444 (mov, 투명)"),
+            Codec::Vp9 => crate::i18n::tr("VP9 (webm, 투명)"),
             Codec::Gif => "GIF",
-            Codec::Png => "PNG 연속 이미지 (투명)",
+            Codec::Png => crate::i18n::tr("PNG 연속 이미지 (투명)"),
         }
     }
 
@@ -350,11 +350,11 @@ fn write_wav(path: &Path, voices: &[crate::audio::Voice], t0: f64, t1: f64) -> s
 
 fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     let (w, h) = job.size;
-    let tools = crate::video::tools().ok_or(crate::video::MISSING)?;
+    let tools = crate::video::tools().ok_or_else(crate::video::missing)?;
     // sound first (a temp WAV the encoder muxes in)
     let wav = (job.codec.audio() && !job.audio.is_empty()).then(|| std::env::temp_dir().join(format!("dv_export_{}.wav", next_rev())));
     if let Some(p) = &wav {
-        write_wav(p, &job.audio, job.t0, job.t1).map_err(|e| format!("소리 준비 실패: {e}"))?;
+        write_wav(p, &job.audio, job.t0, job.t1).map_err(|e| crate::i18n::trf("소리 준비 실패: {}", &[format!("{e}")]))?;
     }
     let cleanup = || {
         if let Some(p) = &wav {
@@ -410,7 +410,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
                     spent += t.elapsed().as_secs_f64();
                     continue;
                 }
-                crate::gpu::Frame::Nv12(..) => return Err("프레임 크기 오류".into()),
+                crate::gpu::Frame::Nv12(..) => return Err(crate::i18n::tr("프레임 크기 오류").into()),
                 crate::gpu::Frame::Rgba(pm) => pm,
             };
             if nv12 {
@@ -419,7 +419,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
                     pm
                 } else {
                     let rgba = image::imageops::resize(&crate::export::to_rgba(&pm), w, h, image::imageops::FilterType::Triangle);
-                    let mut q = tiny_skia::Pixmap::new(w, h).ok_or("크기 오류")?;
+                    let mut q = tiny_skia::Pixmap::new(w, h).ok_or(crate::i18n::tr("크기 오류"))?;
                     for (d, s) in q.pixels_mut().iter_mut().zip(rgba.pixels()) {
                         *d = tiny_skia::ColorU8::from_rgba(s[0], s[1], s[2], s[3]).premultiply();
                     }
@@ -453,7 +453,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             let mut e = e;
             let _ = e.read_to_string(&mut err);
         }
-        format!("인코더 중단: {}", err.lines().last().unwrap_or("").trim())
+        crate::i18n::trf("인코더 중단: {}", &[format!("{}", err.lines().last().unwrap_or("").trim())])
     };
     // DV_TIMING=1: time spent per stage, printed at the end (prepare, render; the
     // writer thread's convert + write overlap the rendering)
@@ -477,7 +477,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         if pr.cancel.load(Ordering::Relaxed) {
             drop(tx);
             let _ = writer.join();
-            return fail(&mut child, "취소됨".into());
+            return fail(&mut child, crate::i18n::tr("취소됨").into());
         }
         let t = job.t0 + i as f64 / job.fps;
         // video frames at full resolution
@@ -485,7 +485,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
                 Some(c) => (c.rect, c.rot),
-                None => return fail(&mut child, "카메라 없음".into()),
+                None => return fail(&mut child, crate::i18n::tr("카메라 없음").into()),
             },
             Region::Fixed(r) => (r, 0.0),
         };
@@ -520,7 +520,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             match crate::gpu::with_gpu(|g| g.finish(p)) {
                 Some(Ok(f)) => frames.push_back((j, f)),
                 Some(Err(e)) => return fail(&mut child, e),
-                None => return fail(&mut child, "GPU 오류".into()),
+                None => return fail(&mut child, crate::i18n::tr("GPU 오류").into()),
             }
         }
         frames.extend(done_cpu.drain(..));
@@ -542,7 +542,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let f = match crate::gpu::with_gpu(|g| g.finish(p)) {
             Some(Ok(f)) => f,
             Some(Err(e)) => return fail(&mut child, e),
-            None => return fail(&mut child, "GPU 오류".into()),
+            None => return fail(&mut child, crate::i18n::tr("GPU 오류").into()),
         };
         if tx.send((j, f)).is_err() {
             let msg = match writer.join() {
@@ -561,7 +561,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             let msg = if e == "pipe" { encoder_err(&mut child) } else { e };
             return fail(&mut child, msg);
         }
-        Err(_) => return fail(&mut child, "내보내기 스레드 오류".into()),
+        Err(_) => return fail(&mut child, crate::i18n::tr("내보내기 스레드 오류").into()),
     };
     if timing {
         eprintln!("export timing (s): prepare {:.2} render {:.2} (convert + write {:.2}, overlapped) for {total} frames", tm[0], tm[1], spent);
@@ -575,12 +575,12 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let out = c.wait_with_output().map_err(|e| e.to_string())?;
         cleanup();
         if !out.status.success() {
-            return Err(format!("인코딩 실패: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim()));
+            return Err(crate::i18n::trf("인코딩 실패: {}", &[format!("{}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim())]));
         }
     } else {
         cleanup();
     }
-    Ok(format!("영상 내보냄: {} ({w}×{h}, {total}프레임)", job.out.file_name().and_then(|n| n.to_str()).unwrap_or("")))
+    Ok(crate::i18n::trf("영상 내보냄: {} ({}×{}, {}프레임)", &[format!("{}", job.out.file_name().and_then(|n| n.to_str()).unwrap_or("")), format!("{w}"), format!("{h}"), format!("{total}")]))
 }
 
 #[cfg(test)]

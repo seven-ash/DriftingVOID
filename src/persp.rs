@@ -767,15 +767,12 @@ const TUKEY: f64 = 0.035; // ≈ 2°
 pub fn solve(space: &Space) -> Result<Camera, String> {
     let fr = space.frame;
     if fr.width() < 4.0 || fr.height() < 4.0 {
-        return Err("공간 영역이 너무 작음".into());
+        return Err(crate::i18n::tr("공간 영역이 너무 작음").into());
     }
     let counts = [space.count(0), space.count(1), space.count(2)];
     let usable: Vec<usize> = (0..3).filter(|&a| counts[a] >= 2).collect();
     if usable.len() < 2 {
-        return Err(format!(
-            "두 축에 선 2개씩 필요 · X {} · Y {} · Z {}",
-            counts[0], counts[1], counts[2]
-        ));
+        return Err(crate::i18n::trf("두 축에 선 2개씩 필요 · X {} · Y {} · Z {}", &[format!("{}", counts[0]), format!("{}", counts[1]), format!("{}", counts[2])]));
     }
 
     // normalised image coordinates: centre of the frame, half the long side = 1
@@ -1039,7 +1036,7 @@ pub fn solve(space: &Space) -> Result<Camera, String> {
 
     let (f, c, r) = unpack(&x);
     if !f.is_finite() || f <= 0.0 {
-        return Err("카메라 계산 불가 · 선 배치 확인".into());
+        return Err(crate::i18n::tr("카메라 계산 불가 · 선 배치 확인").into());
     }
     let mut line_err = vec![f64::NAN; space.lines.len()];
     let (mut se, mut sw) = (0.0, 0.0);

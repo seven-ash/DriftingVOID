@@ -27,9 +27,9 @@ impl Ease {
 
     pub fn label(self) -> &'static str {
         match self {
-            Ease::Linear => "직선",
-            Ease::Smooth => "부드럽게",
-            Ease::Hold => "멈춤",
+            Ease::Linear => crate::i18n::tr("직선"),
+            Ease::Smooth => crate::i18n::tr("부드럽게"),
+            Ease::Hold => crate::i18n::tr("멈춤"),
         }
     }
 

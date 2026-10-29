@@ -805,7 +805,7 @@ impl Gpu {
         }
         let (s, full, (tw, th), big) = geom(k);
         if tw > self.max_side || th > self.max_side {
-            return Err(format!("GPU 한도 초과: {tw}×{th}px"));
+            return Err(crate::i18n::trf("GPU 한도 초과: {}×{}px", &[format!("{tw}"), format!("{th}")]));
         }
         let (fw, fh) = (big.0 / k, big.1 / k);
         if !self.aside {
@@ -1053,7 +1053,7 @@ impl Gpu {
                     for row in m.chunks(bpr as usize).take(h as usize) {
                         data.extend_from_slice(&row[..(w * 4) as usize]);
                     }
-                    Frame::Rgba(Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h).ok_or("크기 오류")?).ok_or("이미지 버퍼를 만들 수 없음")?)
+                    Frame::Rgba(Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h).ok_or(crate::i18n::tr("크기 오류"))?).ok_or(crate::i18n::tr("이미지 버퍼를 만들 수 없음"))?)
                 }
                 Kind::Nv12 { bpr, uv_off } => {
                     let mut data = Vec::with_capacity((w * h * 3 / 2) as usize);

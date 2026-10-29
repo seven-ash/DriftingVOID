@@ -20,6 +20,9 @@ Copy-Item "target\release\DriftingVOID.exe" $out
 Copy-Item "dist\Setup.cmd" $out
 Copy-Item "dist\setup" (Join-Path $out "setup") -Recurse
 Copy-Item "dist\manual" (Join-Path $out "manual") -Recurse
+# Japanese UI face (SIL OFL 1.1, its licence beside it)
+New-Item -ItemType Directory -Force (Join-Path $out "fonts") | Out-Null
+Copy-Item "assetsonts\PretendardJP-*.ttf", "assetsonts\OFL-PretendardJP.txt" (Join-Path $out "fonts")
 Copy-Item "dist\README.txt" $out
 
 $zip = "$out.zip"

@@ -136,7 +136,7 @@ fn render_band(scene: &Scene, region: Rect, scale: f32, bg: Option<Color32>, y0:
         flat,
         side_cache,
     };
-    let mut out = Pixmap::new(w, h).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let mut out = Pixmap::new(w, h).ok_or(crate::i18n::tr("이미지 버퍼를 만들 수 없음"))?;
     if let Some(bg) = bg {
         let [r, g, b, a] = bg.to_srgba_unmultiplied();
         out.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
@@ -164,7 +164,7 @@ struct Band<'a> {
 
 impl Band<'_> {
     fn blank(&self) -> Result<Pixmap, String> {
-        Pixmap::new(self.w, self.h).ok_or_else(|| "임시 버퍼를 만들 수 없음".into())
+        Pixmap::new(self.w, self.h).ok_or_else(|| crate::i18n::tr("임시 버퍼를 만들 수 없음").into())
     }
 }
 
@@ -476,7 +476,7 @@ pub(crate) fn fill_sides(out: &mut Pixmap, sides: &[crate::extrude::Side], opaci
 pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> Result<Pixmap, String> {
     let (w, h) = output_size(region, scale);
     if w > MAX_SIDE || h > MAX_SIDE || w as u64 * h as u64 > MAX_PIXELS {
-        return Err(format!("너무 큼: {w}×{h}px"));
+        return Err(crate::i18n::trf("너무 큼: {}×{}px", &[format!("{w}"), format!("{h}")]));
     }
     let scene = crate::scene::build(doc);
     let scene = &scene;
@@ -509,7 +509,7 @@ pub fn render(doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> 
             });
         }
     });
-    let mut out = Pixmap::new(w, h).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let mut out = Pixmap::new(w, h).ok_or(crate::i18n::tr("이미지 버퍼를 만들 수 없음"))?;
     let stride = w as usize * 4;
     for (y0, r) in bands.into_inner().unwrap() {
         let pm = r?;
@@ -558,7 +558,7 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
     SS_K.with(|c| c.set(1.0));
     let big = big?;
     let (w, h) = (big.width() / k, big.height() / k);
-    let mut out = Pixmap::new(w.max(1), h.max(1)).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let mut out = Pixmap::new(w.max(1), h.max(1)).ok_or(crate::i18n::tr("이미지 버퍼를 만들 수 없음"))?;
     let (bw, src) = (big.width() as usize, big.data());
     // average in linear light (premultiplied), then back to sRGB; both ways by
     // table (the way back: 16-bit linear steps, well under an 8-bit level)
@@ -637,7 +637,7 @@ pub fn render_rotated(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, 
     let bb = Rect::from_center_size(center, ext * 2.0 + vec2(4.0, 4.0) / scale);
     let src = render(doc, bb, scale, bg)?;
     let (w, hh) = ((size.x * scale).round().max(1.0) as u32, (size.y * scale).round().max(1.0) as u32);
-    let mut out = Pixmap::new(w, hh).ok_or("이미지 버퍼를 만들 수 없음")?;
+    let mut out = Pixmap::new(w, hh).ok_or(crate::i18n::tr("이미지 버퍼를 만들 수 없음"))?;
     let ts = Transform::from_translate((bb.min.x - center.x) * scale, (bb.min.y - center.y) * scale)
         .post_rotate(-rot.to_degrees())
         .post_translate(w as f32 * 0.5, hh as f32 * 0.5);

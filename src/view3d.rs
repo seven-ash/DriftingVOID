@@ -813,16 +813,16 @@ impl Modal {
 
     pub fn label(&self) -> String {
         let op = match self.op {
-            Op::Grab => "이동",
-            Op::Rotate => "회전",
-            Op::Scale => "크기",
+            Op::Grab => crate::i18n::tr("이동"),
+            Op::Rotate => crate::i18n::tr("회전"),
+            Op::Scale => crate::i18n::tr("크기"),
         };
         let axis = match self.axis {
-            Some(a) => format!(" · {} 축{}", persp::AXIS_NAMES[a], if self.local { " (로컬)" } else { "" }),
+            Some(a) => crate::i18n::trf(" · {} 축{}", &[format!("{}", persp::AXIS_NAMES[a]), format!("{}", if self.local { crate::i18n::tr(" (로컬)") } else { "" })]),
             None => String::new(),
         };
         let typed = if self.typed.is_empty() { String::new() } else { format!(" · {}", self.typed) };
-        format!("{op}{axis}{typed}   X/Y/Z 축 · 숫자 입력 · Ctrl 스냅 · Shift 정밀 · Enter/클릭 확정 · Esc/우클릭 취소")
+        crate::i18n::trf("{}{}{}   X/Y/Z 축 · 숫자 입력 · Ctrl 스냅 · Shift 정밀 · Enter/클릭 확정 · Esc/우클릭 취소", &[format!("{op}"), format!("{axis}"), format!("{typed}")])
     }
 }
 

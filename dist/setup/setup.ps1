@@ -54,6 +54,12 @@ if ($running) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item $exeSrc (Join-Path $InstallDir $exeName) -Force
 Copy-Item (Join-Path $PSScriptRoot "uninstall.ps1") (Join-Path $InstallDir "uninstall.ps1") -Force
+$fontsSrc = Join-Path $src "fonts"
+if (Test-Path $fontsSrc) {
+    $fontsDst = Join-Path $InstallDir "fonts"
+    New-Item -ItemType Directory -Force $fontsDst | Out-Null
+    Copy-Item (Join-Path $fontsSrc "*") $fontsDst -Force
+}
 $manualSrc = Join-Path $src "manual"
 if (Test-Path $manualSrc) {
     $manualDst = Join-Path $InstallDir "manual"

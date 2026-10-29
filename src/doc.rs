@@ -340,9 +340,9 @@ impl TextAlign {
 
     pub fn label(self) -> &'static str {
         match self {
-            TextAlign::Left => "왼쪽 정렬",
-            TextAlign::Center => "가운데 정렬",
-            TextAlign::Right => "오른쪽 정렬",
+            TextAlign::Left => crate::i18n::tr("왼쪽 정렬"),
+            TextAlign::Center => crate::i18n::tr("가운데 정렬"),
+            TextAlign::Right => crate::i18n::tr("오른쪽 정렬"),
         }
     }
 }
@@ -382,13 +382,13 @@ impl Blend {
 
     pub fn label(self) -> &'static str {
         match self {
-            Blend::Normal => "보통",
-            Blend::Add => "더하기",
-            Blend::Subtract => "빼기",
-            Blend::Multiply => "곱하기",
-            Blend::Divide => "나누기",
-            Blend::Difference => "차이",
-            Blend::Erase => "지우기",
+            Blend::Normal => crate::i18n::tr("보통"),
+            Blend::Add => crate::i18n::tr("더하기"),
+            Blend::Subtract => crate::i18n::tr("빼기"),
+            Blend::Multiply => crate::i18n::tr("곱하기"),
+            Blend::Divide => crate::i18n::tr("나누기"),
+            Blend::Difference => crate::i18n::tr("차이"),
+            Blend::Erase => crate::i18n::tr("지우기"),
         }
     }
 
@@ -557,24 +557,24 @@ impl Filter {
 
     pub fn label(self) -> &'static str {
         match self {
-            Filter::Blur => "가우시안 흐림",
-            Filter::MotionBlur => "동작 흐림",
-            Filter::Unsharp => "언샤프 마스크",
-            Filter::BrightContrast => "밝기/대비",
-            Filter::Hsl => "색조/채도/명도",
-            Filter::Levels => "레벨",
-            Filter::Curves => "커브",
-            Filter::Desaturate => "흑백",
-            Filter::Invert => "반전",
-            Filter::Posterize => "포스터화",
-            Filter::Threshold => "임계값",
-            Filter::GradientMap => "그라디언트 맵",
-            Filter::Grain => "노이즈",
-            Filter::Vignette => "비네트",
-            Filter::Aberration => "색수차",
-            Filter::Pixelate => "픽셀화",
-            Filter::Halftone => "하프톤",
-            Filter::Glow => "글로우",
+            Filter::Blur => crate::i18n::tr("가우시안 흐림"),
+            Filter::MotionBlur => crate::i18n::tr("동작 흐림"),
+            Filter::Unsharp => crate::i18n::tr("언샤프 마스크"),
+            Filter::BrightContrast => crate::i18n::tr("밝기/대비"),
+            Filter::Hsl => crate::i18n::tr("색조/채도/명도"),
+            Filter::Levels => crate::i18n::tr("레벨"),
+            Filter::Curves => crate::i18n::tr("커브"),
+            Filter::Desaturate => crate::i18n::tr("흑백"),
+            Filter::Invert => crate::i18n::tr("반전"),
+            Filter::Posterize => crate::i18n::tr("포스터화"),
+            Filter::Threshold => crate::i18n::tr("임계값"),
+            Filter::GradientMap => crate::i18n::tr("그라디언트 맵"),
+            Filter::Grain => crate::i18n::tr("노이즈"),
+            Filter::Vignette => crate::i18n::tr("비네트"),
+            Filter::Aberration => crate::i18n::tr("색수차"),
+            Filter::Pixelate => crate::i18n::tr("픽셀화"),
+            Filter::Halftone => crate::i18n::tr("하프톤"),
+            Filter::Glow => crate::i18n::tr("글로우"),
         }
     }
 
@@ -599,71 +599,71 @@ impl Filter {
     /// canvas pixels so every zoom and export scale agree).
     pub fn params(self) -> &'static [FxParam] {
         match self {
-            Filter::Blur => &[FxParam { name: "반경", lo: 0.0, hi: 200.0, default: 8.0, step: 0.5, suffix: " px" }],
+            Filter::Blur => &[FxParam { name: crate::i18n::k!("반경"), lo: 0.0, hi: 200.0, default: 8.0, step: 0.5, suffix: " px" }],
             Filter::MotionBlur => &[
-                FxParam { name: "거리", lo: 0.0, hi: 400.0, default: 20.0, step: 1.0, suffix: " px" },
-                FxParam { name: "각도", lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
+                FxParam { name: crate::i18n::k!("거리"), lo: 0.0, hi: 400.0, default: 20.0, step: 1.0, suffix: " px" },
+                FxParam { name: crate::i18n::k!("각도"), lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
             ],
             // result = original + amount × (original − blurred), where they
             // differ by more than the threshold
             Filter::Unsharp => &[
-                FxParam { name: "반경", lo: 0.1, hi: 50.0, default: 2.0, step: 0.1, suffix: " px" },
-                FxParam { name: "양", lo: 0.0, hi: 5.0, default: 1.0, step: 0.05, suffix: "" },
-                FxParam { name: "임계값", lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("반경"), lo: 0.1, hi: 50.0, default: 2.0, step: 0.1, suffix: " px" },
+                FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 5.0, default: 1.0, step: 0.05, suffix: "" },
+                FxParam { name: crate::i18n::k!("임계값"), lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
             ],
             Filter::BrightContrast => &[
-                FxParam { name: "밝기", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
-                FxParam { name: "대비", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("밝기"), lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("대비"), lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
             Filter::Hsl => &[
-                FxParam { name: "색조", lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
-                FxParam { name: "채도", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
-                FxParam { name: "명도", lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("색조"), lo: -180.0, hi: 180.0, default: 0.0, step: 1.0, suffix: "°" },
+                FxParam { name: crate::i18n::k!("채도"), lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("명도"), lo: -1.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
             Filter::Levels => &[
-                FxParam { name: "검정점", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
-                FxParam { name: "감마", lo: 0.1, hi: 4.0, default: 1.0, step: 0.01, suffix: "" },
-                FxParam { name: "흰점", lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" },
-                FxParam { name: "출력 검정", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("검정점"), lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("감마"), lo: 0.1, hi: 4.0, default: 1.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("흰점"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("출력 검정"), lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
             // three points of a monotone curve through (0, 0) and (1, 1)
             Filter::Curves => &[
-                FxParam { name: "어두운 곳", lo: 0.0, hi: 1.0, default: 0.25, step: 0.01, suffix: "" },
-                FxParam { name: "중간", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
-                FxParam { name: "밝은 곳", lo: 0.0, hi: 1.0, default: 0.75, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("어두운 곳"), lo: 0.0, hi: 1.0, default: 0.25, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("중간"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("밝은 곳"), lo: 0.0, hi: 1.0, default: 0.75, step: 0.01, suffix: "" },
             ],
-            Filter::Desaturate => &[FxParam { name: "양", lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
+            Filter::Desaturate => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
             Filter::Invert | Filter::GradientMap => &[],
-            Filter::Posterize => &[FxParam { name: "단계", lo: 2.0, hi: 32.0, default: 4.0, step: 1.0, suffix: "" }],
+            Filter::Posterize => &[FxParam { name: crate::i18n::k!("단계"), lo: 2.0, hi: 32.0, default: 4.0, step: 1.0, suffix: "" }],
             Filter::Threshold => &[
-                FxParam { name: "기준", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
-                FxParam { name: "부드러움", lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("기준"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("부드러움"), lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
             ],
             // grain fixed to the canvas (cells of 크기 canvas px), mono to colour
             Filter::Grain => &[
-                FxParam { name: "양", lo: 0.0, hi: 1.0, default: 0.15, step: 0.01, suffix: "" },
-                FxParam { name: "크기", lo: 0.5, hi: 20.0, default: 1.0, step: 0.5, suffix: " px" },
-                FxParam { name: "색", lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 0.15, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("크기"), lo: 0.5, hi: 20.0, default: 1.0, step: 0.5, suffix: " px" },
+                FxParam { name: crate::i18n::k!("색"), lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
             // about the frame (export frame, else the content): 크기 1 reaches
             // the middle of its sides
             Filter::Vignette => &[
-                FxParam { name: "양", lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
-                FxParam { name: "크기", lo: 0.0, hi: 1.5, default: 0.8, step: 0.01, suffix: "" },
-                FxParam { name: "부드러움", lo: 0.01, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("크기"), lo: 0.0, hi: 1.5, default: 0.8, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("부드러움"), lo: 0.01, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
             ],
             // red out, blue in, by 양 canvas px at the frame's edge
-            Filter::Aberration => &[FxParam { name: "양", lo: 0.0, hi: 50.0, default: 4.0, step: 0.5, suffix: " px" }],
-            Filter::Pixelate => &[FxParam { name: "크기", lo: 2.0, hi: 200.0, default: 16.0, step: 1.0, suffix: " px" }],
+            Filter::Aberration => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 50.0, default: 4.0, step: 0.5, suffix: " px" }],
+            Filter::Pixelate => &[FxParam { name: crate::i18n::k!("크기"), lo: 2.0, hi: 200.0, default: 16.0, step: 1.0, suffix: " px" }],
             Filter::Halftone => &[
-                FxParam { name: "크기", lo: 2.0, hi: 100.0, default: 8.0, step: 0.5, suffix: " px" },
-                FxParam { name: "각도", lo: -90.0, hi: 90.0, default: 45.0, step: 1.0, suffix: "°" },
+                FxParam { name: crate::i18n::k!("크기"), lo: 2.0, hi: 100.0, default: 8.0, step: 0.5, suffix: " px" },
+                FxParam { name: crate::i18n::k!("각도"), lo: -90.0, hi: 90.0, default: 45.0, step: 1.0, suffix: "°" },
             ],
             // what is brighter than 기준, blurred by 반경 and added
             Filter::Glow => &[
-                FxParam { name: "반경", lo: 1.0, hi: 200.0, default: 20.0, step: 0.5, suffix: " px" },
-                FxParam { name: "강도", lo: 0.0, hi: 3.0, default: 1.0, step: 0.05, suffix: "" },
-                FxParam { name: "기준", lo: 0.0, hi: 1.0, default: 0.6, step: 0.01, suffix: "" },
+                FxParam { name: crate::i18n::k!("반경"), lo: 1.0, hi: 200.0, default: 20.0, step: 0.5, suffix: " px" },
+                FxParam { name: crate::i18n::k!("강도"), lo: 0.0, hi: 3.0, default: 1.0, step: 0.05, suffix: "" },
+                FxParam { name: crate::i18n::k!("기준"), lo: 0.0, hi: 1.0, default: 0.6, step: 0.01, suffix: "" },
             ],
         }
     }
@@ -831,12 +831,12 @@ impl Layer {
 
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
-            LayerKind::Image(_) => "사진",
-            LayerKind::Text(_) => "글",
-            LayerKind::Shape(_) => "도형",
-            LayerKind::Vector(_) => "펜",
-            LayerKind::Raster(_) => "브러시",
-            LayerKind::Audio(_) => "소리",
+            LayerKind::Image(_) => crate::i18n::tr("사진"),
+            LayerKind::Text(_) => crate::i18n::tr("글"),
+            LayerKind::Shape(_) => crate::i18n::tr("도형"),
+            LayerKind::Vector(_) => crate::i18n::tr("펜"),
+            LayerKind::Raster(_) => crate::i18n::tr("브러시"),
+            LayerKind::Audio(_) => crate::i18n::tr("소리"),
             LayerKind::Fx(_) => "FX",
         }
     }

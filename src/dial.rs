@@ -112,7 +112,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
             ui.painter().circle_filled(kr.center(), 8.0, FILL_1());
         }
         draw_key(ui.painter(), kr.center(), mark);
-        if kresp.glass_tip("키 기록").clicked() {
+        if kresp.glass_tip(crate::i18n::tr("키 기록")).clicked() {
             *hit = true;
         }
         if let Some((kn, go)) = nav {
@@ -126,7 +126,7 @@ pub fn label_cell_nav(ui: &mut Ui, text: &str, mark: Option<KeyMark>, hit: &mut 
                 let c = r.center();
                 let (dx, h) = (2.2 * dir as f32, 3.6);
                 ui.painter().add(Shape::line(vec![c + vec2(-dx, -h), c + vec2(dx, 0.0), c + vec2(-dx, h)], Stroke::new(1.4, col)));
-                let tip = if dir < 0 { "이전 키로" } else { "다음 키로" };
+                let tip = if dir < 0 { crate::i18n::tr("이전 키로") } else { crate::i18n::tr("다음 키로") };
                 if on && resp.glass_tip(tip).clicked() {
                     *go = dir;
                 }
@@ -142,7 +142,7 @@ pub fn key_button(ui: &mut Ui, mark: KeyMark) -> bool {
         ui.painter().circle_filled(r.center(), 8.0, FILL_1());
     }
     draw_key(ui.painter(), r.center(), mark);
-    resp.glass_tip("키 기록").clicked()
+    resp.glass_tip(crate::i18n::tr("키 기록")).clicked()
 }
 
 impl<'a> Dial<'a> {
@@ -428,7 +428,7 @@ impl Widget for Dial<'_> {
                             ui.painter().circle_filled(pr.center(), 8.5, FILL_1());
                         }
                         reset_icon(ui.painter(), pr.center(), col);
-                        if presp.glass_tip(format!("기본값으로 ({d})")).clicked() {
+                        if presp.glass_tip(crate::i18n::trf("기본값으로 ({})", &[format!("{d}")])).clicked() {
                             *value = d;
                         }
                     }
@@ -492,7 +492,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                         ui.painter().circle_filled(pr.center(), 7.0, FILL_1());
                     }
                     reset_icon(ui.painter(), pr.center(), INK());
-                    if presp.glass_tip(format!("기본값 ({dv})")).clicked() {
+                    if presp.glass_tip(crate::i18n::trf("기본값 ({})", &[format!("{dv}")])).clicked() {
                         *value = dv;
                     }
                 }

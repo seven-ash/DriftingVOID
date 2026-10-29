@@ -13,6 +13,7 @@ mod extrude;
 mod fontdb;
 mod glass;
 mod glass_gpu;
+mod i18n;
 mod gpu;
 mod gpu_paths;
 #[cfg(test)]

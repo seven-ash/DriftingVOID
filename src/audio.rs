@@ -52,7 +52,7 @@ impl AudioData {
 
 /// Decodes the audio of a file (an audio file or a video's soundtrack).
 pub fn decode(path: &Path, rate: u32) -> Result<AudioData, String> {
-    let t = crate::video::tools().ok_or(crate::video::MISSING)?;
+    let t = crate::video::tools().ok_or_else(crate::video::missing)?;
     let mut cmd = Command::new(&t.ffmpeg);
     cmd.args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
@@ -68,7 +68,7 @@ pub fn decode(path: &Path, rate: u32) -> Result<AudioData, String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if out.stdout.len() < 8 {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().last().unwrap_or("소리 트랙 없음").to_string());
+        return Err(err.lines().last().unwrap_or(crate::i18n::tr("소리 트랙 없음")).to_string());
     }
     let samples: Vec<f32> = out.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     Ok(AudioData::from_samples(rate, samples))
@@ -139,7 +139,7 @@ pub struct Output {
 impl Output {
     pub fn open() -> Result<Self, String> {
         let host = cpal::default_host();
-        let dev = host.default_output_device().ok_or("소리 출력 장치 없음")?;
+        let dev = host.default_output_device().ok_or(crate::i18n::tr("소리 출력 장치 없음"))?;
         let sup = dev.default_output_config().map_err(|e| e.to_string())?;
         let rate = sup.sample_rate();
         let ch = sup.channels() as usize;
@@ -150,7 +150,7 @@ impl Output {
             cpal::SampleFormat::I16 => build::<i16>(&dev, config, ch, rate, mix.clone()),
             cpal::SampleFormat::U16 => build::<u16>(&dev, config, ch, rate, mix.clone()),
             cpal::SampleFormat::I32 => build::<i32>(&dev, config, ch, rate, mix.clone()),
-            f => return Err(format!("지원하지 않는 소리 형식 {f:?}")),
+            f => return Err(crate::i18n::trf("지원하지 않는 소리 형식 {}", &[format!("{f:?}")])),
         }?;
         stream.play().map_err(|e| e.to_string())?;
         Ok(Self { _stream: stream, mix, rate })

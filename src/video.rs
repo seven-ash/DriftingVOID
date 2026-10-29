@@ -70,7 +70,7 @@ pub fn tools() -> Option<&'static Tools> {
 /// bytes go through a temporary one. An alpha plane, rare in photos, is not
 /// read.
 pub fn decode_heif(bytes: &[u8]) -> Result<image::RgbaImage, String> {
-    let t = tools().ok_or(MISSING)?;
+    let t = tools().ok_or_else(missing)?;
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("dv_heif_{}_{n}.heic", std::process::id()));
@@ -82,12 +82,15 @@ pub fn decode_heif(bytes: &[u8]) -> Result<image::RgbaImage, String> {
     let out = out.map_err(|e| e.to_string())?;
     if !out.status.success() || out.stdout.is_empty() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("HEIC 읽기 실패: {}", err.lines().next().unwrap_or("ffmpeg")));
+        return Err(crate::i18n::trf("HEIC 읽기 실패: {}", &[format!("{}", err.lines().next().unwrap_or("ffmpeg"))]));
     }
     image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png).map(|i| i.to_rgba8()).map_err(|e| e.to_string())
 }
 
-pub const MISSING: &str = "ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg";
+/// What to say when ffmpeg is not found.
+pub fn missing() -> &'static str {
+    crate::i18n::tr("ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg")
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -129,7 +132,7 @@ fn ratio(s: &str) -> Option<f64> {
 }
 
 pub fn probe(path: &Path) -> Result<VideoInfo, String> {
-    let t = tools().ok_or(MISSING)?;
+    let t = tools().ok_or_else(missing)?;
     let out = no_window(
         Command::new(&t.ffprobe)
             .args(["-v", "error", "-print_format", "json", "-show_streams", "-show_format"])
@@ -152,7 +155,7 @@ pub fn parse_probe(json: &str) -> Result<VideoInfo, String> {
     let vs = streams
         .iter()
         .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() != Some(1))
-        .ok_or("영상 트랙 없음")?;
+        .ok_or(crate::i18n::tr("영상 트랙 없음"))?;
     let (mut w, mut h) = (vs["width"].as_u64().unwrap_or(0) as u32, vs["height"].as_u64().unwrap_or(0) as u32);
     // rotation: side data (newer) or the "rotate" tag (older files)
     let rot = vs["side_data_list"]
@@ -224,7 +227,7 @@ fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &
 
 /// One frame at `t` seconds, `size` pixels.
 pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImage, String> {
-    let tl = tools().ok_or(MISSING)?;
+    let tl = tools().ok_or_else(missing)?;
     let mut args = decode_args(path, t, size, None);
     // a single frame: insert "-frames:v 1" before the output options
     let at = args.len() - 7;
@@ -244,11 +247,11 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
             }
             return frame_at(path, (t - 0.25).max(0.0), size);
         }
-        return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("프레임 읽기 실패").to_string());
+        return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or(crate::i18n::tr("프레임 읽기 실패")).to_string());
     }
     let mut px = out.stdout;
     px.truncate(need);
-    image::RgbaImage::from_raw(size.0, size.1, px).ok_or_else(|| "프레임 크기 불일치".into())
+    image::RgbaImage::from_raw(size.0, size.1, px).ok_or_else(|| crate::i18n::tr("프레임 크기 불일치").into())
 }
 
 /// The video's very last frame, at `size`.
@@ -305,11 +308,11 @@ impl Player<Vec<u8>> {
 
 impl<T: Send + 'static> Player<T> {
     fn spawn(args: Vec<std::ffi::OsString>, n: usize, t0: f64, fps: f64, wrap: impl Fn(Vec<u8>) -> Option<T> + Send + 'static) -> Result<Self, String> {
-        let tl = tools().ok_or(MISSING)?;
+        let tl = tools().ok_or_else(missing)?;
         let mut child = no_window(Command::new(&tl.ffmpeg).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()))
             .spawn()
             .map_err(|e| e.to_string())?;
-        let mut out = child.stdout.take().ok_or("ffmpeg 출력 없음")?;
+        let mut out = child.stdout.take().ok_or(crate::i18n::tr("ffmpeg 출력 없음"))?;
         // a few frames ahead: a pre-roll fills it, and a late frame doesn't stall
         let (tx, rx) = sync_channel(6);
         let stop = Arc::new(AtomicBool::new(false));
