@@ -203,6 +203,14 @@ pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(b)
 }
 
+/// A chip: an arm/disarm mode (기준 길이, 줄자, 선 찾기) or a pick in a row of
+/// names (공간, 축, 벽). Drawn like a selectable label, but with a button's
+/// resting fill, so an idle chip reads as a button rather than text (Ash,
+/// 11-01); on, it takes the selection fill.
+pub fn chip(ui: &mut Ui, on: bool, text: impl Into<egui::WidgetText>) -> Response {
+    ui.add(egui::Button::selectable(on, text.into()).frame_when_inactive(true))
+}
+
 /// Glyphs for icon buttons.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Icon {
@@ -752,4 +760,5 @@ mod tests {
         let (_, open) = h.settle();
         assert_eq!((picked, open.is_some()), (None, true), "released on the box: the list stays");
     }
-}
+}
+

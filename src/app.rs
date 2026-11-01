@@ -3605,7 +3605,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             for c in &self.doc.cameras {
-                if ui.selectable_label(self.cam_sel == Some(c.id), egui::RichText::new(&c.name).color(CAM_COLOR)).clicked() {
+                if crate::kit::chip(ui, self.cam_sel == Some(c.id), egui::RichText::new(&c.name).color(CAM_COLOR)).clicked() {
                     pick = Some(c.id);
                 }
             }
@@ -3792,8 +3792,7 @@ impl App {
             changed |= ui.add(crate::calc::drag(&mut tl.duration).range(0.1..=36000.0).speed(0.1).suffix(" s").max_decimals(2)).changed();
             changed |= crate::kit::switch(ui, &mut tl.autokey, crate::i18n::tr("자동 키")).glass_tip(crate::i18n::tr("선택 레이어 변경 시 자동으로 키")).changed();
             let rec_label = egui::RichText::new(crate::i18n::tr("● 녹화")).color(if self.rec_on { Color32::from_rgb(255, 90, 90) } else { theme::LABEL() });
-            if ui
-                .selectable_label(self.rec_on, rec_label)
+            if crate::kit::chip(ui, self.rec_on, rec_label)
                 .glass_tip(crate::i18n::tr("재생 헤드부터 그리는 과정 기록 · 끝나면 재생 헤드가 획 끝으로"))
                 .clicked()
             {
@@ -3829,7 +3828,7 @@ impl App {
                         for o in crate::anim::Ease::ALL {
                             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             key_icon(ui.painter(), ir.center(), o, if e == o { ACCENT } else { INK() }, Stroke::new(1.0, Color32::from_black_alpha(170)));
-                            if ui.selectable_label(e == o, o.label()).clicked() {
+                            if crate::kit::chip(ui, e == o, o.label()).clicked() {
                                 pick = Some(o);
                             }
                         }
@@ -6450,7 +6449,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_XS;
                         let Some(v) = self.view3d.as_mut() else { return };
-                        if ui.selectable_label(v.camera, crate::i18n::tr("카메라 0")).clicked() {
+                        if crate::kit::chip(ui, v.camera, crate::i18n::tr("카메라 0")).clicked() {
                             v.camera = true;
                         }
                         if ui.button(crate::i18n::tr("앞 1")).clicked() {
@@ -6462,7 +6461,7 @@ impl App {
                         if ui.button(crate::i18n::tr("위 7")).clicked() {
                             v.preset(7, false);
                         }
-                        if ui.selectable_label(v.ortho && !v.camera, crate::i18n::tr("직교 5")).clicked() {
+                        if crate::kit::chip(ui, v.ortho && !v.camera, crate::i18n::tr("직교 5")).clicked() {
                             v.ortho = !v.ortho;
                             v.camera = false;
                         }
@@ -9448,7 +9447,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_XS;
             for (m, label, tip) in [(0u8, crate::i18n::tr("자동 선택"), crate::i18n::tr("선택(V)·올가미(Q) 도구에서 · 클릭한 면을 가림 · Alt: 되살리기")), (1, crate::i18n::tr("그랩컷"), crate::i18n::tr("선택(V)·올가미(Q) 도구에서 · 상자로 끌기 · 안의 물체를 가림 · Alt: 되살리기")), (2, crate::i18n::tr("가위"), crate::i18n::tr("선택(V)·올가미(Q) 도구에서 · 끌기: 경계 따라 자동 · 클릭/우클릭: 앵커 · 첫 점/Enter: 닫기 · Shift: 그랩컷으로 다듬어 닫기 · Esc: 취소 · Alt: 되살리기"))] {
-                if ui.selectable_label(armed && self.wand_mode == m, label).glass_tip(tip).clicked() {
+                if crate::kit::chip(ui, armed && self.wand_mode == m, label).glass_tip(tip).clicked() {
                     pick_mode = Some(m);
                 }
             }
@@ -10899,11 +10898,11 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             for sp in &self.doc.spaces {
                 let name = elide(ui, sp.name.clone(), 150.0);
-                if ui.selectable_label(self.space_sel == Some(sp.id) && !self.space_new, name).clicked() {
+                if crate::kit::chip(ui, self.space_sel == Some(sp.id) && !self.space_new, name).clicked() {
                     pick = Some(sp.id);
                 }
             }
-            if ui.selectable_label(self.space_new, crate::i18n::tr("+ 새 공간")).clicked() {
+            if crate::kit::chip(ui, self.space_new, crate::i18n::tr("+ 새 공간")).clicked() {
                 new = true;
             }
         });
@@ -10928,7 +10927,7 @@ impl App {
             for ax in 0..3u8 {
                 let n = self.doc.spaces[i].count(ax);
                 let txt = egui::RichText::new(format!("{} · {n}", AXIS_NAMES[ax as usize])).color(AXIS_COLORS[ax as usize]);
-                if ui.selectable_label(self.space_axis == ax, txt).clicked() {
+                if crate::kit::chip(ui, self.space_axis == ax, txt).clicked() {
                     axis_pick = Some(ax);
                 }
             }
@@ -10941,7 +10940,7 @@ impl App {
         let (mut find, mut auto) = (false, false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_XS;
-            find = ui.selectable_label(shown, crate::i18n::tr("선 찾기")).glass_tip(crate::i18n::tr("사진의 직선 후보 · 클릭: 현재 축에 추가")).clicked();
+            find = crate::kit::chip(ui, shown, crate::i18n::tr("선 찾기")).glass_tip(crate::i18n::tr("사진의 직선 후보 · 클릭: 현재 축에 추가")).clicked();
             if shown {
                 auto = ui.button(crate::i18n::tr_ctx("선", "자동 선택")).glass_tip(crate::i18n::tr("후보에서 X·Y·Z 선 추가")).clicked();
             }
@@ -10980,7 +10979,7 @@ impl App {
                 let rl = self.doc.spaces[i].ref_line;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_XS;
-                    if ui.selectable_label(self.space_ref_draw, crate::i18n::tr("기준 길이")).glass_tip(crate::i18n::tr("수평면(바닥·탁자·창틀 등) 위 점에서 시작 · 수직: 높이, 수평: 그 면 위 길이 · 축 자동")).clicked() {
+                    if crate::kit::chip(ui, self.space_ref_draw, crate::i18n::tr("기준 길이")).glass_tip(crate::i18n::tr("수평면(바닥·탁자·창틀 등) 위 점에서 시작 · 수직: 높이, 수평: 그 면 위 길이 · 축 자동")).clicked() {
                         ref_toggle = true;
                     }
                     if let Some(mut r) = rl {
@@ -11017,7 +11016,7 @@ impl App {
                 let tape_m = self.doc.spaces[i].tape_metres(&cam);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_XS;
-                    if ui.selectable_label(self.space_tape_draw, crate::i18n::tr("줄자")).glass_tip(crate::i18n::tr("기준면 위 점에서 끌기 · 수평: 거리, 수직: 높이")).clicked() {
+                    if crate::kit::chip(ui, self.space_tape_draw, crate::i18n::tr("줄자")).glass_tip(crate::i18n::tr("기준면 위 점에서 끌기 · 수평: 거리, 수직: 높이")).clicked() {
                         tape_toggle = true;
                     }
                     if tape.is_some() {
@@ -11036,7 +11035,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = SPACE_XS;
                         for (lie, label) in [(false, crate::i18n::tr("바닥에 세우기")), (true, crate::i18n::tr("바닥에 눕히기"))] {
                             let armed = self.space_place == Some((lid, lie));
-                            if ui.selectable_label(armed, label).glass_tip(crate::i18n::tr("선택한 레이어 · 사진 속 바닥 클릭")).clicked() {
+                            if crate::kit::chip(ui, armed, label).glass_tip(crate::i18n::tr("선택한 레이어 · 사진 속 바닥 클릭")).clicked() {
                                 place_toggle = Some((lid, lie));
                             }
                         }
@@ -11089,8 +11088,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
             ui.label(if has_mask { crate::i18n::tr("마스크: 지정됨") } else { crate::i18n::tr("마스크: 공간 영역 전체") });
-            mask_draw = ui
-                .selectable_label(self.space_mask_draw, crate::i18n::tr("마스크 그리기"))
+            mask_draw = crate::kit::chip(ui, self.space_mask_draw, crate::i18n::tr("마스크 그리기"))
                 .glass_tip(crate::i18n::tr("공간이 보일 영역 (카메라 계산과 별개)"))
                 .clicked();
             mask_clear = ui.add_enabled(has_mask, egui::Button::new(crate::i18n::tr("마스크 해제"))).clicked();
@@ -11102,15 +11100,14 @@ impl App {
             ui.label(crate::i18n::tr("벽"));
             for (wid, name) in &walls {
                 let short = elide(ui, name.clone(), 150.0);
-                if ui.selectable_label(self.wall_sel == Some(*wid), short).clicked() {
+                if crate::kit::chip(ui, self.wall_sel == Some(*wid), short).clicked() {
                     wall_pick = Some(*wid);
                 }
             }
-            wall_add = ui
-                .selectable_label(self.wall_new, crate::i18n::tr("+ 벽"))
+            wall_add = crate::kit::chip(ui, self.wall_new, crate::i18n::tr("+ 벽"))
                 .glass_tip(crate::i18n::tr("끌어서 사각형 → 네 모서리를 사진 속 평면에 맞춤 · 넣은 레이어는 벽 좌표로 이동"))
                 .clicked();
-            wall_base = ui.selectable_label(self.wall_base_new, crate::i18n::tr("+ 밑선 벽")).glass_tip(crate::i18n::tr("바닥 위 벽 밑선을 끌기 → 그 선에 선 수직 벽")).clicked();
+            wall_base = crate::kit::chip(ui, self.wall_base_new, crate::i18n::tr("+ 밑선 벽")).glass_tip(crate::i18n::tr("바닥 위 벽 밑선을 끌기 → 그 선에 선 수직 벽")).clicked();
         });
         let mut wall_edit: Option<(f64, bool, bool)> = None;
         if let Some(w) = self.wall_sel.and_then(|id| sp.walls.iter().find(|w| w.id == id)) {
