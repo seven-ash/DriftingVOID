@@ -57,7 +57,11 @@ if ($Release) {
     if (git status --porcelain --untracked-files=no) { $commit += " (uncommitted changes)" }
     $log = Join-Path $root "docs\RELEASES.md"
     $row = "| $Release | $dev | $commit | $(Get-Date -Format yyyy-MM-dd) |"
-    $lines = [IO.File]::ReadAllLines($log, [Text.Encoding]::UTF8) | Where-Object { $_ -notmatch "^\| $([regex]::Escape($Release)) \|" }
-    [IO.File]::WriteAllLines($log, [string[]](@($lines) + $row), (New-Object Text.UTF8Encoding $false))
+    $lines = @([IO.File]::ReadAllLines($log, [Text.Encoding]::UTF8) | Where-Object { $_ -notmatch "^\| $([regex]::Escape($Release)) \|" })
+    # into the table, after its last row (notes below it stay below)
+    $last = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i].StartsWith("|")) { $last = $i } }
+    $lines = if ($last -ge 0) { @($lines[0..$last]) + $row + @($lines | Select-Object -Skip ($last + 1)) } else { $lines + $row }
+    [IO.File]::WriteAllLines($log, [string[]]$lines, (New-Object Text.UTF8Encoding $false))
     "logged: $row"
 }
