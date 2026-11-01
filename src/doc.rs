@@ -383,18 +383,27 @@ impl TextAlign {
 }
 
 impl TextLayer {
-    /// After the box changed size (typing, font, size...), keeps its anchor —
-    /// the top of the side the lines align to (left, middle or right) — where
-    /// it was, turned with the box, so the text grows away from it.
-    pub fn keep_corner(&mut self, old_size: Vec2) {
-        let new_size = crate::text::layout(self).size;
+    /// The box size and the room round the lines (padding or outline), for
+    /// `keep_corner` after a change.
+    pub fn frame(&self) -> (Vec2, Vec2) {
+        let lay = crate::text::layout(self);
+        (lay.size, lay.pad)
+    }
+
+    /// After the box changed size (typing, font, size, padding, outline...),
+    /// keeps its anchor — the top of the side the lines align to (left,
+    /// middle or right), on the lines themselves, not the box edge — where it
+    /// was, turned with the box, so the text grows away from it and the box
+    /// grows round the text.
+    pub fn keep_corner(&mut self, old: (Vec2, Vec2)) {
+        let new = self.frame();
         let f = self.align.factor();
-        // anchor = pos + size/2 + R·(L - size/2) with L = (f·w, 0)
+        // anchor = pos + size/2 + R·(L - size/2) with L = pad + (f·(w - 2 pad.x), 0)
         let (s, c) = self.rotation.sin_cos();
         let r = |v: Vec2| vec2(v.x * c - v.y * s, v.x * s + v.y * c);
-        let at = |pos: Pos2, size: Vec2| pos + size * 0.5 + r(vec2(f * size.x, 0.0) - size * 0.5);
-        let want = at(self.pos, old_size);
-        self.pos += want - at(self.pos, new_size);
+        let at = |pos: Pos2, (size, pad): (Vec2, Vec2)| pos + size * 0.5 + r(pad + vec2(f * (size.x - pad.x * 2.0), 0.0) - size * 0.5);
+        let want = at(self.pos, old);
+        self.pos += want - at(self.pos, new);
     }
 }
 
@@ -1103,7 +1112,7 @@ mod tests {
         let mut t = TextLayer { pos: pos2(100.0, 50.0), text: "ab".into(), size: 40.0, color: Color32::WHITE, family: String::new(), style: "Regular".into(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: TextAlign::Center, look: Default::default() };
         let mid = |t: &TextLayer| t.pos.x + crate::text::layout(t).size.x * 0.5;
         let before = mid(&t);
-        let s0 = crate::text::layout(&t).size;
+        let s0 = t.frame();
         t.text = "abcdef".into();
         t.keep_corner(s0);
         assert!((mid(&t) - before).abs() < 1e-3);
@@ -1111,10 +1120,35 @@ mod tests {
         t.align = TextAlign::Right;
         let right = |t: &TextLayer| t.pos.x + crate::text::layout(t).size.x;
         let r0 = right(&t);
-        let s0 = crate::text::layout(&t).size;
+        let s0 = t.frame();
         t.text = "a".into();
         t.keep_corner(s0);
         assert!((right(&t) - r0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn padding_and_outline_leave_the_letters_in_place() {
+        // the box grows round the lines; the glyphs stay where they are on the canvas
+        let mut t = TextLayer { pos: pos2(100.0, 50.0), text: "ab
+cde".into(), size: 40.0, color: Color32::WHITE, family: String::new(), style: "Regular".into(), bg: None, wrap: 0.0, rotation: 0.5, blend: Blend::Normal, align: TextAlign::Center, look: Default::default() };
+        let glyph = |t: &TextLayer| {
+            let lay = crate::text::layout(t);
+            let g = lay.glyphs[1];
+            rot_about(t.pos + lay.pad + vec2(g.1, g.2), t.pos + lay.size * 0.5, t.rotation)
+        };
+        let g0 = glyph(&t);
+        let steps: [fn(&mut TextLayer); 4] = [
+            |t| t.bg = Some(Color32::BLACK),
+            |t| t.look.pad_y = 1.5,
+            |t| t.look.pad_x = 0.1,
+            |t| t.look.stroke = Some(Color32::BLACK),
+        ];
+        for step in steps {
+            let s0 = t.frame();
+            step(&mut t);
+            t.keep_corner(s0);
+            assert!((glyph(&t) - g0).length() < 1e-3, "the letters moved");
+        }
     }
 
     #[test]
@@ -1138,7 +1172,7 @@ mod tests {
             rot_about(t.pos, t.pos + s * 0.5, t.rotation)
         };
         let before = corner(&t);
-        let s0 = crate::text::layout(&t).size;
+        let s0 = t.frame();
         t.text = "ab cd ef\nsecond line".into();
         t.keep_corner(s0);
         let after = corner(&t);

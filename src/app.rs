@@ -8752,7 +8752,7 @@ impl App {
             Tool::Text => {
                 ui.strong(crate::i18n::tr("글자"));
                 if let Some(LayerKind::Text(t)) = sel_text.map(|i| &mut self.doc.layers[i].kind) {
-                    let s0 = crate::text::layout(t).size;
+                    let s0 = t.frame();
                     layer_changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text(crate::i18n::tr("크기"))).changed();
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     layer_changed |= align_row(ui, &mut t.align, false);
@@ -9154,7 +9154,7 @@ impl App {
                     }
                 }
                 LayerKind::Text(t) => {
-                    let s0 = crate::text::layout(t).size;
+                    let s0 = t.frame();
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
                     changed |= r.changed();
                     if tool != Tool::Text {
@@ -11886,7 +11886,7 @@ impl App {
             });
         if text != t.text {
             if let Some(LayerKind::Text(tt)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                let s0 = crate::text::layout(tt).size;
+                let s0 = tt.frame();
                 tt.text = text;
                 tt.keep_corner(s0);
             }
@@ -13338,6 +13338,7 @@ impl Force {
             }
             return;
         }
+        let s0 = if let LayerKind::Text(t) = &l.kind { Some(t.frame()) } else { None };
         match (self, &mut l.kind) {
             (Force::TextColor(c), LayerKind::Text(t)) => t.color = *c,
             (Force::TextBg(c), LayerKind::Text(t)) => t.bg = *c,
@@ -13353,6 +13354,9 @@ impl Force {
             (Force::ShapeFill(c), LayerKind::Shape(s)) => s.fill = *c,
             (Force::RasterBlend(b), LayerKind::Raster(r)) => r.blend = *b,
             _ => {}
+        }
+        if let (Some(s0), LayerKind::Text(t)) = (s0, &mut l.kind) {
+            t.keep_corner(s0);
         }
     }
 }
@@ -13451,6 +13455,7 @@ fn copy_style(b: &LayerKind, a: &LayerKind, l: &mut LayerKind) {
     }
     match (b, a, l) {
         (LayerKind::Text(b), LayerKind::Text(a), LayerKind::Text(l)) => {
+            let s0 = l.frame();
             pass!(b.color, a.color, l.color);
             pass!(b.family, a.family, l.family);
             pass!(b.style, a.style, l.style);
@@ -13465,6 +13470,8 @@ fn copy_style(b: &LayerKind, a: &LayerKind, l: &mut LayerKind) {
             pass!(b.look.border_w, a.look.border_w, l.look.border_w);
             pass!(b.look.stroke, a.look.stroke, l.look.stroke);
             pass!(b.look.stroke_w, a.look.stroke_w, l.look.stroke_w);
+            // the letters stay put while the box changes round them
+            l.keep_corner(s0);
         }
         (LayerKind::Shape(b), LayerKind::Shape(a), LayerKind::Shape(l)) => {
             pass!(b.color, a.color, l.color);
