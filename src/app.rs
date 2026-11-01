@@ -1440,6 +1440,7 @@ impl App {
             show_log: false,
         };
         crate::penhook::install(cc);
+        crate::oledrop::install(cc, &cc.egui_ctx);
         if let Some(text) = prefs_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             if let Ok(pr) = serde_json::from_str::<PrefsIn>(&text) {
                 if let Some(st) = pr.settings {
@@ -2360,6 +2361,59 @@ impl App {
         } else {
             crate::i18n::trf("불러오기 실패: {}", &[format!("{}", errs.join(", "))])
         };
+    }
+
+    /// Something dropped through `oledrop`. Bytes without a file (a browser's
+    /// image) become a photo straight from memory: the .void keeps a photo's
+    /// own bytes, so no file is written. Only what a .void refers to by path
+    /// (video, sound, an animated GIF, a .void) is written, to
+    /// `%APPDATA%/DriftingVOID/drops`, and must stay there.
+    fn take_drop(&mut self, d: crate::oledrop::Dropped, at: Pos2) {
+        use crate::oledrop::Dropped;
+        match d {
+            Dropped::Paths(p) => self.import_paths(p, at),
+            Dropped::Bytes { name, bytes, url } => {
+                let path = std::path::Path::new(&name);
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or(crate::i18n::tr("사진")).to_string();
+                let needs_file = ext == "void" || ext == "gif" || crate::video::VIDEO_EXTS.contains(&ext.as_str()) || crate::audio::AUDIO_EXTS.contains(&ext.as_str());
+                if !needs_file {
+                    match crate::io::decode_image(bytes, Some(&ext)) {
+                        Ok(src) => {
+                            self.add_image(src, stem, at);
+                            self.status = crate::i18n::trf("{}개 불러옴", &[format!("1")]);
+                        }
+                        // a link to something that isn't a picture: the link as text
+                        Err(_) if url.is_some() => self.take_drop(Dropped::Text(url.unwrap()), at),
+                        Err(e) => self.status = crate::i18n::trf("불러오기 실패: {}", &[format!("{name}: {e}")]),
+                    }
+                    return;
+                }
+                let dir = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("DriftingVOID").join("drops"));
+                let saved = dir.and_then(|d| {
+                    std::fs::create_dir_all(&d).ok()?;
+                    let safe: String = name.chars().map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c }).collect();
+                    let p = d.join(format!("{}-{safe}", next_rev()));
+                    std::fs::write(&p, &bytes).ok().map(|_| p)
+                });
+                match saved {
+                    Some(p) => self.import_paths(vec![p], at),
+                    None => self.status = crate::i18n::trf("불러오기 실패: {}", &[name]),
+                }
+            }
+            Dropped::Text(t) => {
+                let t = t.replace("\r\n", "\n");
+                let id = self.new_text_layer(at, t);
+                self.sel = Some(id);
+                self.mark();
+                self.status = crate::i18n::tr("글자 붙여넣음").into();
+            }
+            Dropped::NoFetch { url, why } => {
+                self.take_drop(Dropped::Text(url), at);
+                self.status = crate::i18n::trf("링크를 받을 수 없음 ({}) · 글자로 넣음", &[why]);
+            }
+            Dropped::Failed(e) => self.status = crate::i18n::trf("불러오기 실패: {}", &[e]),
+        }
     }
 
     /// A video comes in as an image layer showing its first frame.
@@ -4944,6 +4998,13 @@ impl App {
             }
         }
         if let Ok(text) = cb.get_text() {
+            // a link (http, https, data:image): fetched and placed as a photo
+            // when it is one, else the link as text (`take_drop`)
+            if crate::oledrop::is_url(&text) {
+                crate::oledrop::fetch(text.trim().to_string(), None);
+                self.status = crate::i18n::tr("링크 받는 중…").into();
+                return;
+            }
             let text = text.replace("\r\n", "\n");
             if !text.trim().is_empty() {
                 let t = self.new_text_layer(at, text);
@@ -12780,7 +12841,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
         crate::glass::begin_pass(ctx.cumulative_pass_nr());
@@ -12833,6 +12894,19 @@ impl eframe::App for App {
                 .map(|p| self.xf().s2w(p))
                 .unwrap_or_else(|| self.view_center_world());
             self.import_paths(dropped, at);
+        }
+        // drops through our OLE target (oledrop): files, browser images, URLs, text
+        if std::env::var_os("DV_DROP_CLIPBOARD").is_some() && self.frames == 30 {
+            crate::oledrop::from_clipboard(frame);
+        }
+        // DV_PASTE=1: Ctrl+V once (URL paste captures)
+        if std::env::var_os("DV_PASTE").is_some() && self.frames == 30 {
+            self.paste();
+        }
+        for (d, at) in crate::oledrop::take() {
+            let ppp = ctx.pixels_per_point();
+            let at = at.map(|p| pos2(p[0] / ppp, p[1] / ppp)).filter(|p| self.canvas_rect.contains(*p)).map(|p| self.xf().s2w(p)).unwrap_or_else(|| self.view_center_world());
+            self.take_drop(d, at);
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -12965,7 +13039,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         // last: what the glass cards show through them (all layers are laid out)
-        if let Some(rs) = _frame.wgpu_render_state() {
+        if let Some(rs) = frame.wgpu_render_state() {
             crate::glass_gpu::backdrop(&ctx, rs);
         }
     }

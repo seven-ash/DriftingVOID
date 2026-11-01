@@ -26,6 +26,7 @@ mod theme;
 mod io;
 mod kit;
 mod lines;
+mod oledrop;
 mod raster;
 mod scene;
 mod segment;

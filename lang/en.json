@@ -178,6 +178,8 @@
  "레이어": "Layers",
  "레이어 {}": "Layers {}",
  "레이어 {}개 비움 · 삭제: Backspace": "{} layers emptied · delete: Backspace",
+ "링크 받는 중…": "Fetching link…",
+ "링크를 받을 수 없음 ({}) · 글자로 넣음": "Couldn't fetch the link ({}) · added as text",
  "마스크": "Mask",
  "마스크 · {}": "Mask · {}",
  "마스크 · 칠한 곳 가림 · 지우개: 되살리기 · 사각형: 가리기 (Alt: 되살리기)": "Mask · paint hides · eraser: restore · rectangle: hide (Alt: restore)",

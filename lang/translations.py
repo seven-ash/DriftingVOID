@@ -208,6 +208,8 @@ T = {
     "클립보드를 열 수 없음": ("Cannot open the clipboard", "クリップボードを開けません"),
     "클립보드 사진 붙여넣음": ("Pasted the clipboard's photo", "クリップボードの写真を貼り付け"),
     "글자 붙여넣음": ("Pasted text", "テキストを貼り付け"),
+    "링크 받는 중…": ("Fetching link…", "リンクを取得中…"),
+    "링크를 받을 수 없음 ({}) · 글자로 넣음": ("Couldn't fetch the link ({}) · added as text", "リンクを取得できません（{}） · テキストとして追加"),
     "비울 수 없는 레이어 · 삭제: Backspace": ("This layer cannot be emptied · delete: Backspace", "空にできないレイヤー · 削除: Backspace"),
     # --- spaces (status)
     "공간 카메라 계산 불가": ("Cannot work out the space's camera", "空間のカメラを計算できません"),
