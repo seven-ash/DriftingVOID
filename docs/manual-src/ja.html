@@ -1,0 +1,620 @@
+<main class="book" lang="ja" hidden>
+
+<!-- ============================================================ cover -->
+<section class="page cover" aria-label="表紙">
+  <div class="top"><span>ユーザーマニュアル</span><span>Windows</span></div>
+  <div class="mid">
+    <img class="mark" src="img/icon.png" alt="" width="112" height="112">
+    <h1>Drifting<span>VOID</span></h1>
+    <p class="sub">写真、絵、文字、動画を、果てのないキャンバスの上で。</p>
+  </div>
+  <div class="bottom">
+    <span>バージョン <strong>{VERSION}</strong> · Windows 10/11 · ペンタブレット推奨</span>
+    <span>2026年11月</span>
+  </div>
+</section>
+
+<!-- ============================================================ contents -->
+<section class="page" id="P-toc" aria-labelledby="P-toc-h">
+  <div class="running"><span>Drifting VOID</span><span>目次</span></div>
+  <h2 id="P-toc-h">目次</h2>
+  <p class="lede">はじめての方は 1 章と 2 章から読み、ほかは必要なときに引いてください。ショートカットは 13 章の 1 ページにまとめています。画面写真は英語表示で撮影しています。</p>
+  <ol class="toc">
+    <li><a href="#P-c1"><span class="n">01</span><span class="t">インストールと初回起動<span class="d">セットアップ、ffmpeg、削除、ファイルの場所</span></span><span class="p">3</span></a></li>
+    <li><a href="#P-c2"><span class="n">02</span><span class="t">画面の見かた<span class="d">メニュー、ツール、カード、レイヤー、設定メニュー</span></span><span class="p">4</span></a></li>
+    <li><a href="#P-c3"><span class="n">03</span><span class="t">キャンバスの操作<span class="d">移動、ズーム、ダイヤル、ドロップダウン、数値欄</span></span><span class="p">5</span></a></li>
+    <li><a href="#P-c4"><span class="n">04</span><span class="t">描画と色<span class="d">ブラシ、ペン、消しゴム、筆圧、手ぶれ補正、パレット</span></span><span class="p">6</span></a></li>
+    <li><a href="#P-c5"><span class="n">05</span><span class="t">写真、文字、図形<span class="d">読み込み、ブラウザーからのドラッグ、文字のボックスと縁取り</span></span><span class="p">7</span></a></li>
+    <li><a href="#P-c6"><span class="n">06</span><span class="t">選択と変形<span class="d">選択、なげなわ、まとめて変形、G/R/S</span></span><span class="p">8</span></a></li>
+    <li><a href="#P-c7"><span class="n">07</span><span class="t">マスク<span class="d">塗って隠す、自動選択、GrabCut、ハサミ</span></span><span class="p">9</span></a></li>
+    <li><a href="#P-c8"><span class="n">08</span><span class="t">FX レイヤー<span class="d">下のレイヤーにかける 18 種類のフィルター</span></span><span class="p">10</span></a></li>
+    <li><a href="#P-c9"><span class="n">09</span><span class="t">3D 空間<span class="d">消失線、線の検出、壁、厚み、彫り込み</span></span><span class="p">11</span></a></li>
+    <li><a href="#P-c10"><span class="n">10</span><span class="t">3D ワークスペース<span class="d">Tab、軌道回転、視点、Blender 式 G/R/S</span></span><span class="p">12</span></a></li>
+    <li><a href="#P-c11"><span class="n">11</span><span class="t">タイムライン、動画、音<span class="d">値ごとのキー、カメラ、録画、動画レイヤー</span></span><span class="p">13</span></a></li>
+    <li><a href="#P-c12"><span class="n">12</span><span class="t">書き出しと保存<span class="d">画像、動画、クリップボード、.void</span></span><span class="p">14</span></a></li>
+    <li><a href="#P-keys"><span class="n">13</span><span class="t">ショートカット一覧<span class="d">1 ページの早見表</span></span><span class="p">15</span></a></li>
+    <li><a href="#P-c14"><span class="n">14</span><span class="t">ヘルプとライセンス<span class="d">既知の制限、問題の報告、ffmpeg、フォント</span></span><span class="p">16</span></a></li>
+  </ol>
+  <div class="folio">2</div>
+</section>
+
+<!-- ============================================================ 1 install -->
+<section class="page" id="P-c1" aria-labelledby="P-c1-h">
+  <div class="running"><span>01</span><span>インストールと初回起動</span></div>
+  <div class="chapter-no">01</div>
+  <h2 id="P-c1-h">インストールと初回起動</h2>
+  <p class="lede">管理者権限なしで、自分のアカウントにだけインストールします。動画と音に使う ffmpeg は、セットアップ中に GitHub から取得します。</p>
+
+  <h3>セットアップ</h3>
+  <ol class="steps">
+    <li>受け取った zip を<strong>すべて展開</strong>します。zip の中から直接実行すると、セットアップがファイルを見つけられません。</li>
+    <li><strong>Setup.cmd</strong> をダブルクリックします。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
+    <li>セットアップは 3 段階で進みます: プログラムのコピー、ffmpeg、ショートカットと <code>.void</code> ファイルの関連付け。デスクトップのショートカットを作るか、すぐ起動するかを聞かれたら、<kbd>Enter</kbd> で既定(はい)を選べます。</li>
+  </ol>
+  <p>初回起動では Windows の表示言語に合わせて、韓国語、英語、日本語のいずれかで開きます。あとから <span class="ui">設定</span> › <span class="ui">言語</span> で変えられます。</p>
+
+  <h3>ffmpeg</h3>
+  <p>動画の読み込みと再生、音、動画の書き出しは、FFmpeg プロジェクトの ffmpeg を一緒に動かして処理します。写真、絵、文字、3D 空間、画像の書き出しは ffmpeg なしで使えます。</p>
+  <ul>
+    <li>すでに ffmpeg が入っていれば、それを使います (PATH、または <code>winget install Gyan.FFmpeg</code> で入れたもの)。</li>
+    <li>なければダウンロードするか聞きます。GitHub の <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の最新リリースビルド(約 80 MB)を取得し、SHA-256 チェックサムを確かめてから、インストール先の <code>ffmpeg</code> フォルダーにだけ置きます。</li>
+    <li>取得に失敗してもセットアップは最後まで進みます。あとで Setup.cmd をもう一度実行すれば、その段階だけやり直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
+  </ul>
+
+  <h3>更新と削除</h3>
+  <ul>
+    <li><strong>新しいバージョンへの更新:</strong> 新しい zip の Setup.cmd を実行すると、同じ場所に上書きします。設定とプロジェクトはそのまま残ります。</li>
+    <li><strong>削除:</strong> Windows の設定 › アプリ › インストールされているアプリ › Drifting VOID › アンインストール。設定ファイルも消すかは別に聞き、<code>.void</code> プロジェクトには触れません。</li>
+  </ul>
+
+  <h3>ファイルの場所</h3>
+  <table>
+    <tr><th>何</th><th>どこ</th></tr>
+    <tr><td>プログラム、ffmpeg、フォント、このマニュアル</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
+    <tr><td>設定 (ツール、最近の色、書き出し、表示)</td><td><code>%APPDATA%\DriftingVOID</code> の <code>prefs.json</code>、<code>settings.json</code></td></tr>
+    <tr><td>ブラウザーからドラッグした動画と音</td><td><code>%APPDATA%\DriftingVOID\drops</code></td></tr>
+    <tr><td>エラーログ</td><td><code>%APPDATA%\DriftingVOID\crash.log</code></td></tr>
+    <tr><td>プロジェクト</td><td>保存した場所の <code>.void</code> ファイル。写真と絵は中に保存され、動画と音は元のファイルを参照します。</td></tr>
+  </table>
+  <div class="folio">3</div>
+</section>
+
+<!-- ============================================================ 2 tour -->
+<section class="page" id="P-c2" aria-labelledby="P-c2-h">
+  <div class="running"><span>02</span><span>画面の見かた</span></div>
+  <div class="chapter-no">02</div>
+  <h2 id="P-c2-h">画面の見かた</h2>
+  <p class="lede">中央の暗い地が果てのないキャンバスで、ツールとプロパティはその上に浮かぶガラスのカードにあります。アクセント色(琥珀色)は、いまオンのものにだけ使います。</p>
+
+  <figure class="bleed compact">
+    <div class="callouts">
+    <img src="img/overview.jpg" alt="写真を 1 枚開いた Drifting VOID の画面。左にツールバー、右にプロパティカードとレイヤーカード。" width="1920" height="1080">
+    <span class="pin" style="left:16.8%;top:2.6%">1</span>
+    <span class="pin" style="left:5.2%;top:22%">2</span>
+    <span class="pin" style="left:5.2%;top:49.3%">3</span>
+    <span class="pin" style="left:30%;top:55%">4</span>
+    <span class="pin" style="left:75.2%;top:9%">5</span>
+    <span class="pin" style="left:94%;top:13%">6</span>
+    <span class="pin" style="left:39.8%;top:97.5%">7</span>
+    </div>
+    <figcaption>写真「room」を選択した状態。右のカードに写真のプロパティが出ます。</figcaption>
+  </figure>
+  <ul class="legend">
+    <li><i>1</i><span><strong>メニュー</strong> ファイル、編集、設定</span></li>
+    <li><i>2</i><span><strong>ツールバー</strong> ツールごとにショートカット 1 文字 (4 章の表)。マウスを乗せると使い方が出ます</span></li>
+    <li><i>3</i><span><strong>現在の色</strong> 押すとパレット</span></li>
+    <li><i>4</i><span><strong>キャンバス</strong> 果てがなく、写真は元の解像度で置かれます</span></li>
+    <li><i>5</i><span><strong>ツール · 選択中の項目</strong> いまのツールの設定と、選んだレイヤーのプロパティ</span></li>
+    <li><i>6</i><span><strong>レイヤー</strong> 上へ、下へ、複製、削除、FX レイヤーを追加のボタン。ドラッグで並べ替え、ダブルクリックで名前の変更</span></li>
+    <li><i>7</i><span><strong>ステータスバー</strong> 倍率、座標、直前の操作</span></li>
+  </ul>
+
+  <h3>カードとパネル</h3>
+  <p>カードの見出し(<span class="ui">▾ ツール</span>、<span class="ui">▾ 選択中の項目</span>)を押すと折りたためます。オン/オフの値はスイッチ、1 つを選ぶ値は並んだボタンです。マウスを乗せると短い説明が出る欄が多いので、はじめはゆっくり見て回ってください。</p>
+
+  <h3>設定メニュー</h3>
+  <div class="two">
+    <div>
+      <ul>
+        <li><span class="ui">ライト</span> · <span class="ui">ダーク</span> · <span class="ui">システム</span>: 画面のテーマ。</li>
+        <li><span class="ui">言語</span>: 한국어、English、日本語。</li>
+        <li><span class="ui">UI 倍率</span>: 90–150 %。<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd>/<kbd>−</kbd>/<kbd>0</kbd>。</li>
+        <li><span class="ui">ガラス効果</span>(オフで不透明なカード)、<span class="ui">パネルの影</span>、ガラスの<span class="ui">縁</span>の屈折の強さと<span class="ui">リム</span>の幅、カードの<span class="ui">角</span>と<span class="ui">滑らかさ</span>。</li>
+        <li><span class="ui">指で描く</span>、Tab の<span class="ui">待ち時間</span> (10 章)。</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>H</kbd> で UI をすべて隠し、もう一度押すと戻ります。</p>
+    </div>
+    <figure style="margin-top:0"><img src="img/light.jpg" alt="ライトテーマの同じ画面" width="1920" height="1080" loading="lazy"><figcaption>ライトテーマ</figcaption></figure>
+  </div>
+  <div class="folio">4</div>
+</section>
+
+<!-- ============================================================ 3 canvas -->
+<section class="page" id="P-c3" aria-labelledby="P-c3-h">
+  <div class="running"><span>03</span><span>キャンバスの操作</span></div>
+  <div class="chapter-no">03</div>
+  <h2 id="P-c3-h">キャンバスの操作</h2>
+  <p class="lede">マウス、ペンタブレット、タッチのどれでも使えます。ペンの筆圧は Windows Ink で読み取ります。</p>
+
+  <h3>表示の移動とズーム</h3>
+  <table>
+    <tr><th>入力</th><th>動作</th></tr>
+    <tr><td>ホイール</td><td>カーソル位置を中心にズーム</td></tr>
+    <tr><td>中ボタンドラッグ · ペンのサイドボタン · <kbd>Space</kbd>+ドラッグ · <kbd>H</kbd> ツール</td><td>表示の移動</td></tr>
+    <tr><td><kbd>Shift</kbd>+中ボタンドラッグ</td><td>ドラッグでズーム</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>Ctrl</kbd>+<kbd>1</kbd></td><td>全体表示 · 100 %</td></tr>
+    <tr><td>ステータスバーの倍率</td><td>押すと 100 %、<span class="ui">−</span> <span class="ui">+</span> で 1 段階ずつ</td></tr>
+    <tr><td>何かをドラッグ中に <kbd>Space</kbd></td><td>ドラッグ中のものをカーソルに付けたまま表示だけ移動</td></tr>
+  </table>
+  <div class="note"><b class="tag">タッチ</b><br>指 1 本で表示の移動、2 本でズームです。指でも描くには <span class="ui">設定</span> › <span class="ui">指で描く</span> をオンにします。ペンはいつでも描けます。</div>
+
+  <h3>ダイヤル</h3>
+  <p>ほとんどの値は目盛りのリング(ダイヤル)で変えます。左右にドラッグすると値が変わり、<kbd>Shift</kbd> で微調整、ホイールは 1 目盛りずつです。既定値のある値は、変えると <span class="ui">↺</span> が出て、押すと戻ります。1 回のドラッグや続けて回したホイールは、元に戻す 1 回で戻ります。</p>
+
+  <h3>ドロップダウン</h3>
+  <p>クリックで一覧が開きます。閉じたドロップダウンの上でホイールを回すと、前後の項目にすぐ切り替わります。押したまま下へドラッグすると一覧が開き、選びたい項目で離すとそれが選ばれます。</p>
+
+  <h3>数値欄</h3>
+  <p>数値欄には計算式をそのまま書けます: <code>40*1.5</code>、<code>2^3+1</code>、かっこも使えます。空のまま <kbd>Enter</kbd> を押すと 0 です。</p>
+
+  <h3>元に戻す</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。保存せずに閉じようとすると、先に確認します。</p>
+  <div class="folio">5</div>
+</section>
+
+<!-- ============================================================ 4 drawing -->
+<section class="page" id="P-c4" aria-labelledby="P-c4-h">
+  <div class="running"><span>04</span><span>描画と色</span></div>
+  <div class="chapter-no">04</div>
+  <h2 id="P-c4-h">描画と色</h2>
+  <p class="lede">ブラシはピクセル(ラスター)で、ペンはベクターのストロークで描きます。描き始めると描画レイヤーができ、空になると自動で消えます。</p>
+
+  <h3>ツール</h3>
+  <table>
+    <tr><th>ツール</th><th>キー</th><th>説明</th></tr>
+    <tr><td>選択 · なげなわ選択</td><td><kbd>V</kbd> · <kbd>Q</kbd></td><td>6 章</td></tr>
+    <tr><td>表示の移動</td><td><kbd>H</kbd></td><td>ドラッグで移動</td></tr>
+    <tr><td>ブラシ</td><td><kbd>B</kbd></td><td>鉛筆、ペン先、マーカー、エアブラシ、水彩</td></tr>
+    <tr><td>ペン (ベクター)</td><td><kbd>P</kbd></td><td>筆圧のあるベクターのストローク。1 本ずつ選んで動かせる</td></tr>
+    <tr><td>消しゴム</td><td><kbd>E</kbd></td><td>ブラシのピクセルとペンのストロークを消す</td></tr>
+    <tr><td>テキスト</td><td><kbd>T</kbd></td><td>5 章</td></tr>
+    <tr><td>線 · 矢印 · 四角形 · 楕円</td><td><kbd>L</kbd> · <kbd>A</kbd> · <kbd>R</kbd> · <kbd>O</kbd></td><td>図形レイヤー</td></tr>
+    <tr><td>写真の切り抜き</td><td><kbd>C</kbd></td><td>5 章</td></tr>
+    <tr><td>書き出し範囲 · 3D 空間</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>12 章 · 9 章</td></tr>
+    <tr><td>スポイト</td><td><kbd>I</kbd></td><td>画面の色を拾う</td></tr>
+  </table>
+
+  <h3>ブラシの設定</h3>
+  <ul>
+    <li>プリセットごとに既定の<span class="ui">硬さ</span>と<span class="ui">不透明度</span>があります。</li>
+    <li><span class="ui">筆圧 → サイズ</span>、<span class="ui">筆圧 → 濃度</span>: ペンを押す強さで太さや濃さが変わります。</li>
+    <li><span class="ui">手ぶれ補正</span>: 筆がペンをどれだけ遅れて追うか。大きいほど線がなめらかで、遅れて追います。ペンを止めると、筆がペンの下まで追いつきます。</li>
+    <li>サイズ: <kbd>Ctrl</kbd>+ドラッグ、または <kbd>[</kbd> <kbd>]</kbd>。ペン、消しゴム、図形の線の太さも <kbd>Ctrl</kbd>+ドラッグで変えます。</li>
+  </ul>
+
+  <h3>色</h3>
+  <div class="side">
+    <div>
+      <p>キャンバスのどこでも <kbd>Alt</kbd>+クリックで OKHSV パレットが開きます。人の目に均等に見えるよう整えた色空間なので、明るさを変えても色味がずれにくくなっています。</p>
+      <p><span class="ui">類似色マップ</span>をオンにすると、いまの色と明るさが同じ色、彩度が同じ色を 2 枚のマップで見せます。下の列はよく使う色です。色の欄にはどれも 16 進コードを書けて、<span class="ui">コピー</span>、<span class="ui">貼り付け</span>もできます。複数のレイヤーを選んだまま色を選ぶと、すべてに適用されます。</p>
+    </div>
+    <figure><img src="img/palette-card.jpg" alt="OKHSV パレットと 2 枚の類似色マップ" width="780" height="360" loading="lazy"><figcaption>パレットと類似色マップ</figcaption></figure>
+  </div>
+  <div class="folio">6</div>
+</section>
+
+<!-- ============================================================ 5 photos, text -->
+<section class="page" id="P-c5" aria-labelledby="P-c5-h">
+  <div class="running"><span>05</span><span>写真、文字、図形</span></div>
+  <div class="chapter-no">05</div>
+  <h2 id="P-c5-h">写真、文字、図形</h2>
+  <p class="lede">写真は元の解像度のまま入り、縮小しても元のピクセルは残っています。</p>
+
+  <h3>読み込み</h3>
+  <ul>
+    <li>ファイルをウィンドウにドロップ、<kbd>Ctrl</kbd>+<kbd>I</kbd>、または <kbd>Ctrl</kbd>+<kbd>V</kbd> で貼り付け。文字を貼り付けるとテキストレイヤーになります。</li>
+    <li><strong>ブラウザーから直接:</strong> Chrome や Edge の画像をウィンドウにドラッグすると写真として入ります。画像のアドレスをコピーして貼り付けても写真になります。画像でないリンクは文字として入ります。</li>
+    <li>PNG、JPEG、WebP、BMP、TIFF、GIF、スマートフォンの HEIC/HEIF。動く GIF は、くり返し再生される透明な動画レイヤーになります (ffmpeg が必要)。</li>
+    <li>動画(mp4、mov、mkv、webm など)と音(mp3、wav など)は 11 章を見てください。</li>
+  </ul>
+
+  <h3>写真のプロパティ</h3>
+  <table>
+    <tr><td><span class="ui">サイズ %</span> · <span class="ui">回転 °</span></td><td><span class="ui">元のサイズ</span>、<span class="ui">回転 0°</span> で一度に戻す</td></tr>
+    <tr><td><span class="ui">切り抜き…</span> (<kbd>C</kbd>)</td><td>切り抜いても元は残り、<span class="ui">切り抜き解除</span>で戻ります</td></tr>
+    <tr><td><span class="ui">補正</span></td><td>明るさ、コントラスト、彩度</td></tr>
+    <tr><td><span class="ui">クロマキー</span></td><td>選んだ色を透明に (グリーンバックの除去)</td></tr>
+    <tr><td><span class="ui">合成</span></td><td>描画モード</td></tr>
+  </table>
+
+  <h3>文字</h3>
+  <div class="side">
+    <div>
+      <ul>
+        <li><kbd>T</kbd> でキャンバスを押して入力します。ボックスは入力に合わせて広がり、<span class="ui">折り返し幅</span>をオンにするとその幅で改行します。</li>
+        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。</li>
+        <li><span class="ui">背景ボックス</span>をオンにすると、<span class="ui">左右余白</span>、<span class="ui">上下余白</span>、<span class="ui">角</span>、<span class="ui">ボックスの枠線</span>とその太さを決められます。</li>
+        <li><span class="ui">文字の縁取り</span>はボックスとは別にオンにでき、色と太さを決めます。</li>
+        <li>余白と太さは文字サイズに対する % なので、文字を大きくしても見た目が保たれます。変えても文字はその場から動かず、ボックスだけがまわりに広がります。</li>
+        <li>新しい文字は、最後に使った設定で始まります。</li>
+      </ul>
+    </div>
+    <figure><img src="img/text-card.jpg" alt="テキストツールのカード: サイズ、フォント、整列、背景ボックスと余白、角、ボックスの枠線、文字の縁取り" width="340" height="510" loading="lazy"><figcaption>テキストツールのカード</figcaption></figure>
+  </div>
+  <div class="note"><b class="tag">フォント</b><br>選んだフォントにない文字(Arial の日本語など)は、別のフォントで代わりに描かず、空の四角(□)で表示します。そのフォントが文章に合っていないという印なので、その文字を含むフォントを選んでください。</div>
+  <div class="folio">7</div>
+</section>
+
+<!-- ============================================================ 6 select -->
+<section class="page" id="P-c6" aria-labelledby="P-c6-h">
+  <div class="running"><span>06</span><span>選択と変形</span></div>
+  <div class="chapter-no">06</div>
+  <h2 id="P-c6-h">選択と変形</h2>
+  <p class="lede">レイヤーを丸ごと選ぶことも、ペンのストローク 1 本やブラシのピクセルの一部だけを選んで動かすこともできます。</p>
+
+  <h3>選択ツール <kbd>V</kbd></h3>
+  <table>
+    <tr><td>クリック · ドラッグ</td><td>選ぶ · 動かす</td></tr>
+    <tr><td><kbd>Shift</kbd>+ドラッグ</td><td>範囲選択。中心が範囲に入ったものを選びます (<kbd>Shift</kbd>+<kbd>Ctrl</kbd>: 完全に入ったものだけ)</td></tr>
+    <tr><td><kbd>Shift</kbd>+クリック</td><td>選択に追加、または除外</td></tr>
+    <tr><td>ペンのストローク · ブラシ</td><td>ペンは 1 本ずつ、ブラシは範囲内のピクセルだけを選びます</td></tr>
+    <tr><td>角 · 上の丸</td><td>サイズ · 回転</td></tr>
+  </table>
+  <p><kbd>Q</kbd>(なげなわ)は、自由に描いた形の内側を選びます。</p>
+
+  <h3>まとめて扱う</h3>
+  <ul>
+    <li>複数を選ぶとハンドルが 1 つにまとまり、共通の中心を基準にサイズを変えたり回したりします。</li>
+    <li>回転中に <kbd>Shift</kbd> か <kbd>Ctrl</kbd>: 始めの角度から 15° ずつ。<kbd>Alt</kbd>: 0° から 15° ずつ。</li>
+    <li>プロパティカードで値がそろわない欄は <span class="ui">—</span> と表示されます。そこに値を入れると、すべてがその値になります。ほかの欄を変えると、変えた値だけがすべてに入ります。</li>
+  </ul>
+
+  <h3>キーボードで変形 <kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></h3>
+  <p>選択ツールで <kbd>G</kbd> 移動、<kbd>R</kbd> 回転、<kbd>S</kbd> サイズ。マウスを動かして決め、クリックか <kbd>Enter</kbd> で確定、<kbd>Esc</kbd> か右クリックで取り消します。3D 空間の中のレイヤーは 3D の方式で動きます (10 章)。</p>
+
+  <h3>複製、削除、空にする</h3>
+  <table>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>複製</td></tr>
+    <tr><td><kbd>Backspace</kbd></td><td>選んだレイヤーを<strong>削除</strong></td></tr>
+    <tr><td><kbd>Delete</kbd></td><td>選んだブラシ・ペンレイヤーとマスクを<strong>空にする</strong> (レイヤーは残る)</td></tr>
+    <tr><td>ストロークやピクセルの一部を選んだとき</td><td>どちらのキーも選んだ部分だけを消します</td></tr>
+  </table>
+  <p>同じ操作は<span class="ui">編集</span>メニューと、レイヤーカードのアイコンボタンにもあります。目のアイコンで表示を切り替えます。</p>
+  <div class="folio">8</div>
+</section>
+
+<!-- ============================================================ 7 masks -->
+<section class="page" id="P-c7" aria-labelledby="P-c7-h">
+  <div class="running"><span>07</span><span>マスク</span></div>
+  <div class="chapter-no">07</div>
+  <h2 id="P-c7-h">マスク</h2>
+  <p class="lede">レイヤーの一部を、消さずに隠します。高解像度の写真から物をきれいに切り抜くことに合わせて作りました。</p>
+
+  <div class="side">
+    <div>
+      <h3>作成と塗り</h3>
+      <p>レイヤーの行やプロパティカードの<span class="ui">マスク</span>を押すと、そのレイヤーの下にマスクレイヤーができます。マスクを選んだまま:</p>
+      <ul>
+        <li>ブラシ、ペン、四角形で塗ったところが隠れます。隠れた部分はキャンバスで赤く見えます。</li>
+        <li>消しゴムで元に戻ります。<kbd>Alt</kbd> を押して四角形を描いても戻ります。</li>
+        <li><span class="ui">強さ</span>、<span class="ui">反転</span>で隠し方を変えます。</li>
+        <li><span class="ui">追従</span>: マスクがどのレイヤーに付いて動くか (ふつうはその写真)。</li>
+        <li><span class="ui">空にする</span>または <kbd>Delete</kbd>: マスクを空にします。</li>
+      </ul>
+    </div>
+    <figure><img src="img/mask-panel.jpg" alt="マスクを選んだカード: 強さ、反転、追従、自動選択、GrabCut、ハサミ、空にする、許容誤差、整える、境界の移動" width="340" height="630" loading="lazy"><figcaption>マスクを選んだカード</figcaption></figure>
+  </div>
+
+  <h3>自動で切り抜く</h3>
+  <p>3 つのモードは<strong>選択ツール(<kbd>V</kbd>、<kbd>Q</kbd>)でだけ</strong>動きます。モードをオンにすると選択ツールに切り替わり、ほかのツールを選ぶとそのツール本来の動作をします。どれも <kbd>Alt</kbd> を押すと、逆に元に戻します。</p>
+  <table>
+    <tr><td><span class="ui">自動選択</span></td><td>クリックした所と似た面を隠します。<span class="ui">許容誤差</span>で範囲を調整</td></tr>
+    <tr><td><span class="ui">GrabCut</span></td><td>四角くドラッグすると、その中で浮いて見える物を隠します</td></tr>
+    <tr><td><span class="ui">ハサミ</span></td><td>境界に沿って輪郭を描き、閉じます (下記)</td></tr>
+    <tr><td><span class="ui">整える</span> · <span class="ui">境界の移動</span></td><td>境界を絵に合わせてなめらかに (0: くっきり) · + は隠す範囲を広げてすき間を埋め、− は狭めます</td></tr>
+  </table>
+
+  <h3>ハサミ</h3>
+  <ul>
+    <li><strong>ドラッグ</strong>: カーソルを境界の近くで動かすと、線が境界に吸い付いて追い、アンカーが自動で置かれます。</li>
+    <li><strong>クリック · 右クリック</strong>: その場所にアンカーを置きます。近くのいちばんはっきりした境界に吸着します。</li>
+    <li><strong>閉じる</strong>: 最初の点を押すか <kbd>Enter</kbd>。<kbd>Shift</kbd> を押して閉じると、GrabCut でもう一度整えます。</li>
+    <li><kbd>Esc</kbd> 1 回で描きかけの輪郭を取り消し、もう 1 回でハサミのモードを終えます。</li>
+    <li><span class="ui">境界</span>: <span class="ui">シャープ</span>は境界線できれいに切り、<span class="ui">写真のぼけ</span>は写真の中の境界がぼけている分だけやわらかく切ります。</li>
+  </ul>
+  <div class="note"><b class="tag">写真のマスク</b><br>空のマスクで写真の上をはじめて切り抜くと、その写真の元のピクセル解像度で作られます。そのあと写真を動かしたり回したり縮めたりしても、マスクはそのまま付いていきます。</div>
+  <div class="folio">9</div>
+</section>
+
+<!-- ============================================================ 8 FX -->
+<section class="page" id="P-c8" aria-labelledby="P-c8-h">
+  <div class="running"><span>08</span><span>FX レイヤー</span></div>
+  <div class="chapter-no">08</div>
+  <h2 id="P-c8-h">FX レイヤー</h2>
+  <p class="lede">ピクセルの代わりにフィルターを 1 つ持つレイヤーです。一覧で自分より下にあるレイヤーすべてにフィルターをかけ、いちばん上に置けばすべてにかかります。元のレイヤーは変わりません。</p>
+
+  <figure class="bleed">
+    <img src="img/fx.jpg" alt="いちばん上の FX レイヤーがビネットで画面の端を暗くした様子。右のカードにフィルター、合成、量、サイズ、柔らかさ。" width="1920" height="1080" loading="lazy">
+    <figcaption>いちばん上の FX レイヤー(ビネット)が、下のすべてのレイヤーにかかった様子</figcaption>
+  </figure>
+
+  <h3>使い方</h3>
+  <ol class="steps">
+    <li>レイヤーカードのきらめきボタン、または<span class="ui">編集</span> › <span class="ui">FX レイヤーを追加</span>。選んだレイヤーの上にできます。</li>
+    <li>カードの<span class="ui">フィルター</span>で効果を選び、値をダイヤルで決めます。値ごとにタイムラインのキーを打てます。</li>
+    <li><span class="ui">合成</span>は最初<span class="ui">コピー</span>(下の絵をフィルターの結果に置き換え)です。ほかのモードで混ぜることもできます。</li>
+    <li>FX レイヤーにもマスクを付けて、一部にだけかけられます。レイヤーの順番を変えると、かかる範囲が変わります。</li>
+  </ol>
+
+  <h3>フィルター</h3>
+  <table>
+    <tr><th>種類</th><th>フィルター</th></tr>
+    <tr><td>ぼかしとシャープ</td><td>ガウスぼかし、モーションぼかし、アンシャープマスク</td></tr>
+    <tr><td>色</td><td>明るさ・コントラスト、色相・彩度・明度、レベル補正、トーンカーブ、白黒、反転、ポスタリゼーション、しきい値、グラデーションマップ</td></tr>
+    <tr><td>質感と画面</td><td>ノイズ、ビネット、色収差、モザイク、ハーフトーン、グロー</td></tr>
+  </table>
+  <p>ノイズ、モザイク、ハーフトーンはキャンバスに固定した格子を使うので、表示を動かしても模様がすべりません。ビネットと色収差は書き出し範囲(なければ内容全体)を基準にします。</p>
+  <div class="folio">10</div>
+</section>
+
+<!-- ============================================================ 9 spaces -->
+<section class="page" id="P-c9" aria-labelledby="P-c9-h">
+  <div class="running"><span>09</span><span>3D 空間</span></div>
+  <div class="chapter-no">09</div>
+  <h2 id="P-c9-h">3D 空間</h2>
+  <p class="lede">写真の中で平行な辺に沿って線を何本か引くと、その写真を撮ったカメラを割り出します。その空間に文字や絵を立てたり寝かせたりして、写真の遠近に合わせて置けます。</p>
+
+  <figure class="bleed compact">
+    <img src="img/space.jpg" alt="部屋の写真に 3D 空間を合わせた画面。箱の辺に軸ごとの消失線が引かれ、厚みを付けた青い文字が床に置かれている。" width="1920" height="1080" loading="lazy">
+    <figcaption>箱の辺で合わせた空間に、厚みを付けた文字が 2 つ。カードに焦点距離、画角、線の誤差が出ます。</figcaption>
+  </figure>
+
+  <h3>空間を作る <kbd>K</kbd></h3>
+  <ol class="steps">
+    <li>写真の上をドラッグして空間の範囲を決めるか、写真を押してその写真に合わせます。</li>
+    <li>現実で互いに平行な辺に沿って線を引きます。軸は <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> または <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> で切り替えます: <span class="ax x">X</span> <span class="ax y">Y</span> は床の方向、<span class="ax z">Z</span> は上。2 つの軸に 2 本ずつ、少なくとも 4 本必要です。</li>
+    <li>線の端をドラッグして整えます。ドラッグ中はルーペが出て、<kbd>Shift</kbd> で境界を強調して見せます。<kbd>Delete</kbd> か右クリックで線を消します。</li>
+    <li>カメラは線を引くたびにすぐ計算し直します。レイヤーをレイヤーカードの空間フォルダーにドラッグすると、見えているとおりの姿で空間に入ります。</li>
+  </ol>
+
+  <h3>線を検出と自動選択</h3>
+  <div class="side">
+    <div>
+      <p><span class="ui">線を検出</span>は写真の中のまっすぐな辺を探し、薄い色の候補として見せます。候補を押すといまの軸の線になり、そのままドラッグして端を整えられます。候補が勝手に軸を決めることはありません。</p>
+      <p><span class="ui">自動選択</span>を押すと、候補の中から互いに直角に合う 3 方向を選び、軸ごとに何本かずつ入れます。結果がおかしければ元に戻して、手で選んでください。</p>
+    </div>
+    <figure><img src="img/lines.jpg" alt="線を検出で、箱と床の辺に薄い候補線が表示された様子" width="1600" height="700" loading="lazy"><figcaption>線を検出の候補</figcaption></figure>
+  </div>
+
+  <h3>空間のカード</h3>
+  <table>
+    <tr><td><span class="ui">基準の長さ</span> · <span class="ui">メジャー</span></td><td>写真の中の 1 つの長さを実際のメートルで教えると、ほかの長さを測れます</td></tr>
+    <tr><td><span class="ui">+ 壁</span> · <span class="ui">+ 基線の壁</span></td><td>壁を作り、その上のレイヤーは壁を基準に動きます</td></tr>
+    <tr><td><span class="ui">マスクを描く</span></td><td>空間が見える範囲を決めます (手前の物の後ろに隠す)</td></tr>
+    <tr><td><span class="ui">照明</span></td><td>立体の面に光と陰を付けます (落ち影はなし)</td></tr>
+  </table>
+
+  <div class="folio">11</div>
+</section>
+
+<!-- ============================================================ 10 3D workspace -->
+<section class="page" id="P-c10" aria-labelledby="P-c10-h">
+  <div class="running"><span>10</span><span>3D ワークスペース</span></div>
+  <div class="chapter-no">10</div>
+  <h2 id="P-c10-h">3D ワークスペース</h2>
+  <p class="lede">空間を横や上から見ながらレイヤーを配置します。キーは Blender と同じです。</p>
+
+  <figure class="bleed">
+    <img src="img/ws3d.jpg" alt="3D ワークスペース。暗い地に軸、厚みを付けた文字、右に写真のカメラ、左に光のコンパス。" width="1920" height="1080" loading="lazy">
+    <figcaption>上のボタンで視点を、左のコンパスで光の向きを変えます。円すいが写真のカメラです。</figcaption>
+  </figure>
+
+  <h3>切り替え</h3>
+  <p><kbd>Tab</kbd> を短く押すと、2D キャンバスと 3D ワークスペースを行き来します。<strong>押したままにすると</strong>、切り替えずに反対側を少しのぞけます。のぞき見までの時間は<span class="ui">設定</span> › <span class="ui">待ち時間</span>で決めます。</p>
+
+  <div class="two">
+    <div>
+      <h3>視点</h3>
+      <table>
+        <tr><td>中ボタン · ペンのサイドボタン</td><td>軌道回転</td></tr>
+        <tr><td><kbd>Shift</kbd> · <kbd>Ctrl</kbd>+同じドラッグ</td><td>移動 · ズーム</td></tr>
+        <tr><td>ホイール</td><td>ズーム</td></tr>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd></td><td>前 · 右 · 上 (<kbd>Ctrl</kbd>: 反対側)</td></tr>
+        <tr><td><kbd>5</kbd></td><td>透視 ↔ 平行投影</td></tr>
+        <tr><td><kbd>0</kbd></td><td>写真のカメラから見る</td></tr>
+        <tr><td><kbd>.</kbd> · <kbd>Home</kbd></td><td>選んだものに合わせる · 最初の視点</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>動かす G/R/S</h3>
+      <table>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>移動 · 回転 · サイズ</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>その軸だけ。もう 1 回: レイヤー自身の軸、さらに 1 回: 解除</td></tr>
+        <tr><td>数値の入力</td><td>その値だけ</td></tr>
+        <tr><td><kbd>Ctrl</kbd> · <kbd>Shift</kbd></td><td>単位に合わせる · 微調整</td></tr>
+        <tr><td><kbd>Enter</kbd>·クリック / <kbd>Esc</kbd>·右クリック</td><td>確定 / 取り消し</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>値のリセット</td></tr>
+      </table>
+    </div>
+  </div>
+  <p>カードの<span class="ui">床に立てる</span>、<span class="ui">床に寝かせる</span>は、選んだレイヤーを床の上にまっすぐ立てたり寝かせたりします。高さ 0(グリッド)は床ではなく、カメラの目の高さです。</p>
+  
+  <h3>厚みと彫り込み</h3>
+  <p>文字、ペンのストローク、ブラシの絵の<span class="ui">厚み</span>を上げると立体になります。<span class="ui">セグメント</span>と<span class="ui">スムーズシェーディング</span>で側面を整え、<span class="ui">彫り込み</span>をオンにすると表面の内側へ彫り込みます。空間の中のレイヤーを <kbd>Alt</kbd> を押したままドラッグすると、床に沿ってすべります。</p>
+  <div class="folio">12</div>
+</section>
+
+<!-- ============================================================ 11 timeline -->
+<section class="page" id="P-c11" aria-labelledby="P-c11-h">
+  <div class="running"><span>11</span><span>タイムライン、動画、音</span></div>
+  <div class="chapter-no">11</div>
+  <h2 id="P-c11-h">タイムライン、動画、音</h2>
+  <p class="lede">キャンバスをそのまま動く絵にします。動画と音の機能には ffmpeg が必要です。</p>
+
+  <figure class="bleed">
+    <img src="img/timeline-bar.jpg" alt="タイムライン: 再生、先頭、時間、fps、長さ、自動キー、録画、キーを追加、キーを削除、動画を書き出し、そしてカメラの位置、サイズ、回転、追従の行" width="2480" height="220" loading="lazy">
+    <figcaption>タイムライン (<kbd>Ctrl</kbd>+<kbd>T</kbd>)。カメラの下に、キーのある値ごとに 1 行。</figcaption>
+  </figure>
+
+  <h3>キーアニメーション</h3>
+  <ul>
+    <li><kbd>Alt</kbd>+<kbd>A</kbd> で再生・停止、<kbd>,</kbd> <kbd>.</kbd> で 1 フレームずつ。</li>
+    <li><kbd>I</kbd> は選んだものの今の値をキーにし、<kbd>Alt</kbd>+<kbd>I</kbd> は再生ヘッド位置のキーをすべて消します。プロパティの行ごとにキーボタンがあり、値を 1 つずつキーにでき、<span class="ui">&lt;</span> <span class="ui">&gt;</span> で前後のキーへ飛びます。</li>
+    <li>各レイヤーの名前の行の下に、キーのある値(位置、サイズ、回転、不透明度、3D の位置、厚み、音量、FX の値など)が 1 行ずつ出ます。キーは自分の行でだけ選び、動かし、消します。</li>
+    <li><span class="ui">自動キー</span>をオンにすると、変えた値にだけキーが入ります。</li>
+    <li>キーはドラッグで動かし、<kbd>Shift</kbd>+ドラッグで複数選びます。再生ヘッドを <kbd>Shift</kbd> を押したままドラッグすると、近くのキーに吸着します。キーの形は補間(スムーズ、リニア、ホールド)を表します。</li>
+    <li>名前の行を右クリックすると、レイヤーが現れる時と消える時を決められます。</li>
+  </ul>
+
+  <h3>カメラと録画</h3>
+  <ul>
+    <li><kbd>F</kbd> ツールでキャンバスのカメラを作り、位置とサイズにキーを打って画面を動かします。</li>
+    <li><span class="ui">● 録画</span>をオンにして描くと、ペンとブラシのストロークが描いた順番と速さのまま再生されます。</li>
+    <li>再生時は描き終えたフレームをメモリーにためておく(再生キャッシュ)ので、重い場面もなめらかに再生できます。</li>
+  </ul>
+
+  <h3>動画と音のレイヤー</h3>
+  <ul>
+    <li>動画をドロップすると、タイムラインではクリップになります。動かしたり前後を切ったりでき、クリップの外では最初か最後のフレームで止まっています。</li>
+    <li>プロパティカードで、いまのフレームを写真レイヤーにできます。</li>
+    <li>音のファイルはキャンバスにスピーカーの印で置かれ、タイムラインで動かしたり切ったりできます。音量にもキーを打てます。</li>
+  </ul>
+  <div class="folio">13</div>
+</section>
+
+<!-- ============================================================ 12 export -->
+<section class="page" id="P-c12" aria-labelledby="P-c12-h">
+  <div class="running"><span>12</span><span>書き出しと保存</span></div>
+  <div class="chapter-no">12</div>
+  <h2 id="P-c12-h">書き出しと保存</h2>
+  <p class="lede">キャンバス全体ではなく、欲しい部分だけを欲しいサイズで書き出します。書き出しは画面と同じ GPU レンダラーで描きます。</p>
+
+  <h3>範囲を決める <kbd>F</kbd></h3>
+  <p><span class="ui">書き出し範囲</span>ツールで四角を描きます。何かを選んだまま使うと、それにぴったり合わせます。</p>
+
+  <h3>画像 <kbd>Ctrl</kbd>+<kbd>E</kbd></h3>
+  <p>PNG か JPEG で書き出します。<span class="ui">余白</span>は範囲の外に取る距離で、<span class="ui">サンプル数</span>を上げると大きく描いてから縮め、ふちがよりなめらかになります。背景は透明、白、選んだ色から決めます。<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> は範囲をそのままクリップボードへコピーします。</p>
+
+  <h3>動画 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></h3>
+  <div class="side">
+    <div>
+      <table>
+        <tr><td><span class="ui">範囲</span></td><td>書き出し範囲かカメラ、内容全体、いまの画面</td></tr>
+        <tr><td><span class="ui">サイズ</span></td><td>幅か高さを基準に。はじめは範囲の実際のピクセル数</td></tr>
+        <tr><td><span class="ui">形式</span></td><td>H.264、H.265、AV1、ProRes 4444(透明)、VP9(透明)、GIF、PNG 連番</td></tr>
+        <tr><td><span class="ui">画質の基準</span></td><td>品質の値(低いほど高画質)、またはビットレート</td></tr>
+        <tr><td><span class="ui">GPU エンコード</span></td><td>NVIDIA のグラフィックカードなら既定でオン (NVENC)</td></tr>
+        <tr><td><span class="ui">サンプル数</span> · <span class="ui">背景</span></td><td>1–4 倍 · 透明、白、色</td></tr>
+        <tr><td><span class="ui">音声を含む</span></td><td>タイムラインの音と動画の音を混ぜて入れます</td></tr>
+      </table>
+      <p>進み具合はウィンドウに出て、いつでも取り消せます。</p>
+    </div>
+    <figure><img src="img/vexport-card.jpg" alt="動画の書き出しウィンドウ: 範囲、サイズ、fps、形式、画質の基準、品質、GPU エンコード、サンプル数、背景、音声を含む" width="360" height="500" loading="lazy"><figcaption>動画の書き出しウィンドウ</figcaption></figure>
+  </div>
+
+  <h3>保存</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存、<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> 名前を付けて保存、<kbd>Ctrl</kbd>+<kbd>O</kbd> 開く、<kbd>Ctrl</kbd>+<kbd>N</kbd> 新規。<code>.void</code> ファイルをダブルクリックしても開けます。</p>
+  <div class="note"><b class="tag">動画と音のファイル</b><br>写真は <code>.void</code> の中に一緒に保存されますが、動画と音は元のファイルを参照します。プロジェクトを別の PC へ移すときは、動画と音のファイルも一緒に移してください。</div>
+  <div class="folio">14</div>
+</section>
+
+<!-- ============================================================ 13 keys -->
+<section class="page" id="P-keys" aria-labelledby="P-keys-h">
+  <div class="running"><span>13</span><span>ショートカット一覧</span></div>
+  <div class="chapter-no">13</div>
+  <h2 id="P-keys-h">ショートカット一覧</h2>
+  <div class="two">
+    <div>
+      <h4>ツール</h4>
+      <table>
+        <tr><td><kbd>V</kbd> <kbd>Q</kbd> <kbd>H</kbd></td><td>選択 · なげなわ · 表示の移動</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>P</kbd> <kbd>E</kbd></td><td>ブラシ · ペン · 消しゴム</td></tr>
+        <tr><td><kbd>T</kbd> <kbd>L</kbd> <kbd>A</kbd></td><td>テキスト · 線 · 矢印</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>O</kbd> <kbd>C</kbd></td><td>四角形 · 楕円 · 写真の切り抜き</td></tr>
+        <tr><td><kbd>F</kbd> <kbd>K</kbd> <kbd>I</kbd></td><td>書き出し範囲 · 3D 空間 · スポイト</td></tr>
+      </table>
+      <h4>ファイル</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>O</kbd> <kbd>S</kbd></td><td>新規 · 開く · 保存</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>名前を付けて保存</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>写真の読み込み</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>画像の書き出し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>動画の書き出し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td><td>範囲をクリップボードへ</td></tr>
+      </table>
+      <h4>編集</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Y</kbd></td><td>元に戻す · やり直し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>貼り付け(絵、文字、画像のリンク) · 複製</td></tr>
+        <tr><td><kbd>Backspace</kbd> · <kbd>Delete</kbd></td><td>削除 · 空にする</td></tr>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>移動 · 回転 · サイズ</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>取り消し (ハサミ: 2 回でモードを終える)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h4>表示</h4>
+      <table>
+        <tr><td>ホイール · 中ドラッグ</td><td>ズーム · 移動</td></tr>
+        <tr><td><kbd>Space</kbd>+ドラッグ</td><td>移動 (ドラッグ中も)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>1</kbd></td><td>全体表示 · 100 %</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>UI 倍率</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>UI を隠す</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>2D ↔ 3D · 押したままでのぞき見</td></tr>
+      </table>
+      <h4>描画と色</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+ドラッグ · <kbd>[</kbd> <kbd>]</kbd></td><td>サイズ · 線の太さ</td></tr>
+        <tr><td><kbd>Alt</kbd>+クリック</td><td>パレット</td></tr>
+        <tr><td><kbd>Alt</kbd> (マスク)</td><td>元に戻す</td></tr>
+      </table>
+      <h4>タイムライン</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>タイムラインを開く</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>A</kbd></td><td>再生 · 停止</td></tr>
+        <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>1 フレーム前 · 後</td></tr>
+        <tr><td><kbd>I</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd></td><td>キーを追加 · 削除</td></tr>
+      </table>
+      <h4>3D ワークスペース</h4>
+      <table>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd> · <kbd>5</kbd></td><td>前 · 右 · 上 · 平行投影</td></tr>
+        <tr><td><kbd>0</kbd> · <kbd>.</kbd> · <kbd>Home</kbd></td><td>カメラ · 合わせる · 最初</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>G/R/S の軸を固定</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="folio">15</div>
+</section>
+
+<!-- ============================================================ 14 help -->
+<section class="page" id="P-c14" aria-labelledby="P-c14-h">
+  <div class="running"><span>14</span><span>ヘルプとライセンス</span></div>
+  <div class="chapter-no">14</div>
+  <h2 id="P-c14-h">ヘルプとライセンス</h2>
+  <p class="lede">おかしな点があれば、小さなことでも知らせてください。次のものを一緒に送っていただくと、早く直せます。</p>
+
+  <h3>問題を知らせるとき</h3>
+  <ul>
+    <li>何をしていてどうなったか、もう一度やっても同じか。</li>
+    <li>アプリが突然終了したときは <code>%APPDATA%\DriftingVOID\crash.log</code>。</li>
+    <li>できれば画面のキャプチャーと、問題が起きた <code>.void</code> ファイル。</li>
+    <li>グラフィックカードとペンタブレットの種類。</li>
+  </ul>
+
+  <h3>既知の制限</h3>
+  <ul>
+    <li>Windows 10/11 専用です。DirectX 12 か Vulkan に対応したグラフィックカードが必要です。</li>
+    <li>コード署名がないため、初回起動時に Windows の保護画面が出ます。</li>
+    <li>フォントにない文字は別のフォントで代わりに描かず、空の四角で表示します (意図した動作)。</li>
+    <li>とても大きな録画ペンレイヤーは、読み込みに少し時間がかかることがあります。</li>
+    <li>再生キャッシュはメモリーを多く使うことがあります (最大で物理メモリーの 75 %)。</li>
+  </ul>
+
+  <h3>ffmpeg とライセンス</h3>
+  <p>Drifting VOID は動画の処理に <a href="https://ffmpeg.org">FFmpeg</a> を別のプログラムとして実行します。ffmpeg はこの配布ファイルに含まれていません。セットアップ中に <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の公開ビルド(GPL)を取得してインストール先の <code>ffmpeg</code> フォルダーに置き、そのフォルダーの <code>LICENSE.txt</code> にライセンス全文が、<code>SOURCE.txt</code> に取得したファイル名、チェックサム、入手元があります。</p>
+  <p>日本語の画面フォント Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
+
+  <div class="note"><b class="tag">このマニュアル</b><br>右上で言語を切り替え、<span class="ui">印刷</span>で A4 の冊子として印刷したり PDF に保存したりできます。最初はブラウザーの言語に合わせて開きます。画面ではシステムのテーマに従い、半円のボタンでライト・ダークを切り替えます。</div>
+  <div class="folio">16</div>
+</section>
+
+</main>

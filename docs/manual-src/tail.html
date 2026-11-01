@@ -1,0 +1,61 @@
+
+<script>
+// the bar in the page's language; switching keeps the reader on the same chapter
+(function () {
+  var root = document.documentElement, key = "dv-manual-lang";
+  var T = {
+    ko: { title: "Drifting VOID 사용 설명서", nav: "설명서 메뉴", toc: "차례", keys: "단축키", print: "인쇄", printTip: "인쇄하거나 PDF로 저장", theme: "밝게/어둡게" },
+    en: { title: "Drifting VOID manual", nav: "Manual", toc: "Contents", keys: "Keys", print: "Print", printTip: "Print or save as PDF", theme: "Light/dark" },
+    ja: { title: "Drifting VOID ユーザーマニュアル", nav: "マニュアルのメニュー", toc: "目次", keys: "ショートカット", print: "印刷", printTip: "印刷または PDF に保存", theme: "ライト/ダーク" }
+  };
+  var $ = function (id) { return document.getElementById(id); };
+  function label(l) {
+    var t = T[l];
+    document.title = t.title;
+    document.querySelector(".bar").setAttribute("aria-label", t.nav);
+    $("go-toc").textContent = t.toc; $("go-toc").href = "#" + l + "-toc";
+    $("go-keys").textContent = t.keys; $("go-keys").href = "#" + l + "-keys";
+    $("print").textContent = t.print; $("print").title = t.printTip;
+    $("theme").title = t.theme; $("theme").setAttribute("aria-label", t.theme);
+    document.querySelectorAll(".langs button").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.lang === l)); });
+  }
+  function set(l) { root.dataset.lang = l; root.lang = l; label(l); }
+  // the chapter at the top of the window (its id without the language)
+  function current() {
+    var best = null;
+    document.querySelectorAll('main.book[lang="' + root.dataset.lang + '"] section[id]').forEach(function (s) {
+      if (s.getBoundingClientRect().top <= 80) best = s;
+    });
+    return best && best.id.replace(/^[a-z]+-/, "");
+  }
+  set(root.dataset.lang);
+  // a link to another language's chapter (#ja-c3) opens that language
+  var m = /^#(ko|en|ja)-/.exec(location.hash);
+  if (m && m[1] !== root.dataset.lang) {
+    set(m[1]);
+    var s = document.getElementById(location.hash.slice(1));
+    if (s) s.scrollIntoView();
+  }
+  document.querySelectorAll(".langs button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var at = current();
+      try { localStorage.setItem(key, b.dataset.lang); } catch (e) {}
+      set(b.dataset.lang);
+      var s = at && document.getElementById(b.dataset.lang + "-" + at);
+      if (s) s.scrollIntoView();
+    });
+  });
+})();
+// the theme toggle: system by default; a choice is kept in this browser
+(function () {
+  var root = document.documentElement, key = "dv-manual-theme";
+  try { var saved = localStorage.getItem(key); if (saved) root.dataset.theme = saved; } catch (e) {}
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem(key, root.dataset.theme); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

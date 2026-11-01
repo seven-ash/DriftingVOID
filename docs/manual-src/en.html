@@ -1,0 +1,620 @@
+<main class="book" lang="en" hidden>
+
+<!-- ============================================================ cover -->
+<section class="page cover" aria-label="Cover">
+  <div class="top"><span>User manual</span><span>Windows</span></div>
+  <div class="mid">
+    <img class="mark" src="img/icon.png" alt="" width="112" height="112">
+    <h1>Drifting<span>VOID</span></h1>
+    <p class="sub">Photos, drawings, text and video on an endless canvas.</p>
+  </div>
+  <div class="bottom">
+    <span>Version <strong>{VERSION}</strong> · Windows 10/11 · pen tablet recommended</span>
+    <span>November 2026</span>
+  </div>
+</section>
+
+<!-- ============================================================ contents -->
+<section class="page" id="P-toc" aria-labelledby="P-toc-h">
+  <div class="running"><span>Drifting VOID</span><span>Contents</span></div>
+  <h2 id="P-toc-h">Contents</h2>
+  <p class="lede">New to the app? Read chapters 1 and 2 first and look up the rest when you need it. The shortcuts fit on one page, chapter 13.</p>
+  <ol class="toc">
+    <li><a href="#P-c1"><span class="n">01</span><span class="t">Installing and first start<span class="d">Setup, ffmpeg, removing, where files are</span></span><span class="p">3</span></a></li>
+    <li><a href="#P-c2"><span class="n">02</span><span class="t">A tour of the screen<span class="d">Menus, tools, cards, layers, the Settings menu</span></span><span class="p">4</span></a></li>
+    <li><a href="#P-c3"><span class="n">03</span><span class="t">Working the canvas<span class="d">Pan, zoom, dials, drop-downs, number boxes</span></span><span class="p">5</span></a></li>
+    <li><a href="#P-c4"><span class="n">04</span><span class="t">Drawing and colour<span class="d">Brush, pen, eraser, pressure, smoothing, palette</span></span><span class="p">6</span></a></li>
+    <li><a href="#P-c5"><span class="n">05</span><span class="t">Photos, text and shapes<span class="d">Importing, dragging from a browser, text boxes and outlines</span></span><span class="p">7</span></a></li>
+    <li><a href="#P-c6"><span class="n">06</span><span class="t">Selecting and transforming<span class="d">Select, lasso, group transform, G/R/S</span></span><span class="p">8</span></a></li>
+    <li><a href="#P-c7"><span class="n">07</span><span class="t">Masks<span class="d">Paint to hide, auto select, GrabCut, scissors</span></span><span class="p">9</span></a></li>
+    <li><a href="#P-c8"><span class="n">08</span><span class="t">FX layers<span class="d">Eighteen filters for the layers below</span></span><span class="p">10</span></a></li>
+    <li><a href="#P-c9"><span class="n">09</span><span class="t">3D spaces<span class="d">Vanishing lines, finding lines, walls, depth, engraving</span></span><span class="p">11</span></a></li>
+    <li><a href="#P-c10"><span class="n">10</span><span class="t">The 3D workspace<span class="d">Tab, orbit, views, Blender-style G/R/S</span></span><span class="p">12</span></a></li>
+    <li><a href="#P-c11"><span class="n">11</span><span class="t">Timeline, video and sound<span class="d">Keys per value, cameras, recording, video layers</span></span><span class="p">13</span></a></li>
+    <li><a href="#P-c12"><span class="n">12</span><span class="t">Exporting and saving<span class="d">Images, video, clipboard, .void</span></span><span class="p">14</span></a></li>
+    <li><a href="#P-keys"><span class="n">13</span><span class="t">Shortcuts<span class="d">A one-page reference card</span></span><span class="p">15</span></a></li>
+    <li><a href="#P-c14"><span class="n">14</span><span class="t">Help and licences<span class="d">Known limits, reporting a problem, ffmpeg, fonts</span></span><span class="p">16</span></a></li>
+  </ol>
+  <div class="folio">2</div>
+</section>
+
+<!-- ============================================================ 1 install -->
+<section class="page" id="P-c1" aria-labelledby="P-c1-h">
+  <div class="running"><span>01</span><span>Installing and first start</span></div>
+  <div class="chapter-no">01</div>
+  <h2 id="P-c1-h">Installing and first start</h2>
+  <p class="lede">Drifting VOID installs for your account only, without administrator rights. Setup fetches ffmpeg, which video and sound need, from GitHub.</p>
+
+  <h3>Setup</h3>
+  <ol class="steps">
+    <li><strong>Extract the whole zip</strong> first. Run from inside the zip, setup cannot find its files.</li>
+    <li>Double-click <strong>Setup.cmd</strong>. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
+    <li>Setup runs three steps: copying the program, ffmpeg, then shortcuts and the <code>.void</code> file type. When it asks about a desktop shortcut and starting the app, <kbd>Enter</kbd> takes the default (yes).</li>
+  </ol>
+  <p>On its first start the app follows the Windows display language (Korean, English or Japanese). Change it any time in <span class="ui">Settings</span> › <span class="ui">Language</span>.</p>
+
+  <h3>ffmpeg</h3>
+  <p>Opening and playing video, sound and video export run ffmpeg from the FFmpeg project alongside the app. Photos, drawing, text, 3D spaces and image export work without it.</p>
+  <ul>
+    <li>An ffmpeg already on your PC is used (on PATH, or installed with <code>winget install Gyan.FFmpeg</code>).</li>
+    <li>Otherwise setup asks to download one: the newest release build from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> on GitHub (about 80 MB), checked against its SHA-256 checksum and kept only in the install folder's <code>ffmpeg</code> folder.</li>
+    <li>If the download fails, setup still finishes; run Setup.cmd again later to retry that step. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
+  </ul>
+
+  <h3>Updating and removing</h3>
+  <ul>
+    <li><strong>Updating:</strong> run Setup.cmd from the new zip; it installs over the old version. Settings and projects stay.</li>
+    <li><strong>Removing:</strong> Windows Settings › Apps › Installed apps › Drifting VOID › Uninstall. It asks before deleting settings and never touches <code>.void</code> projects.</li>
+  </ul>
+
+  <h3>Where files are</h3>
+  <table>
+    <tr><th>What</th><th>Where</th></tr>
+    <tr><td>Program, ffmpeg, fonts, this manual</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
+    <tr><td>Settings (tools, recent colours, export, display)</td><td><code>prefs.json</code> and <code>settings.json</code> in <code>%APPDATA%\DriftingVOID</code></td></tr>
+    <tr><td>Video and sound dragged in from a browser</td><td><code>%APPDATA%\DriftingVOID\drops</code></td></tr>
+    <tr><td>Crash log</td><td><code>%APPDATA%\DriftingVOID\crash.log</code></td></tr>
+    <tr><td>Projects</td><td><code>.void</code> files wherever you save them. Photos and drawings are stored inside; video and sound are linked to their files.</td></tr>
+  </table>
+  <div class="folio">3</div>
+</section>
+
+<!-- ============================================================ 2 tour -->
+<section class="page" id="P-c2" aria-labelledby="P-c2-h">
+  <div class="running"><span>02</span><span>A tour of the screen</span></div>
+  <div class="chapter-no">02</div>
+  <h2 id="P-c2-h">A tour of the screen</h2>
+  <p class="lede">The dark ground in the middle is the endless canvas; tools and properties live on glass cards floating over it. The amber accent marks only what is on.</p>
+
+  <figure class="bleed compact">
+    <div class="callouts">
+    <img src="img/overview.jpg" alt="Drifting VOID with one photo open: the tool rail on the left, the property card and layer card on the right." width="1920" height="1080">
+    <span class="pin" style="left:16.8%;top:2.6%">1</span>
+    <span class="pin" style="left:5.2%;top:22%">2</span>
+    <span class="pin" style="left:5.2%;top:49.3%">3</span>
+    <span class="pin" style="left:30%;top:55%">4</span>
+    <span class="pin" style="left:75.2%;top:9%">5</span>
+    <span class="pin" style="left:94%;top:13%">6</span>
+    <span class="pin" style="left:39.8%;top:97.5%">7</span>
+    </div>
+    <figcaption>The photo “room” selected; the card on the right shows its properties.</figcaption>
+  </figure>
+  <ul class="legend">
+    <li><i>1</i><span><strong>Menus</strong> File, Edit, Settings</span></li>
+    <li><i>2</i><span><strong>Tool rail</strong> one key per tool (table in chapter 4); hover for how to use it</span></li>
+    <li><i>3</i><span><strong>Current colour</strong> click for the palette</span></li>
+    <li><i>4</i><span><strong>Canvas</strong> endless; photos keep their full resolution</span></li>
+    <li><i>5</i><span><strong>Tool · Selection</strong> the tool's settings and the selected layer's properties</span></li>
+    <li><i>6</i><span><strong>Layers</strong> buttons for up, down, duplicate, delete and add FX layer; drag to reorder, double-click to rename</span></li>
+    <li><i>7</i><span><strong>Status bar</strong> zoom, position, what just happened</span></li>
+  </ul>
+
+  <h3>Cards and panels</h3>
+  <p>Click a card title (<span class="ui">▾ Tool</span>, <span class="ui">▾ Selection</span>) to fold it. On/off values are switches; pick-one values are joined buttons. Many fields show a short tip on hover, so take a slow first look round.</p>
+
+  <h3>The Settings menu</h3>
+  <div class="two">
+    <div>
+      <ul>
+        <li><span class="ui">Light</span> · <span class="ui">Dark</span> · <span class="ui">System</span>: the theme.</li>
+        <li><span class="ui">Language</span>: 한국어, English, 日本語.</li>
+        <li><span class="ui">UI size</span>: 90–150 %; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd>/<kbd>−</kbd>/<kbd>0</kbd>.</li>
+        <li><span class="ui">Glass</span> (off: solid cards), <span class="ui">Panel shadows</span>, the glass <span class="ui">Edge</span> refraction and <span class="ui">Rim</span> width, the cards' <span class="ui">Radius</span> and <span class="ui">Smooth</span>.</li>
+        <li><span class="ui">Draw with fingers</span>, and the Tab <span class="ui">Peek</span> delay (chapter 10).</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>H</kbd> hides the whole UI and brings it back.</p>
+    </div>
+    <figure style="margin-top:0"><img src="img/light.jpg" alt="The same screen in the light theme" width="1920" height="1080" loading="lazy"><figcaption>Light theme</figcaption></figure>
+  </div>
+  <div class="folio">4</div>
+</section>
+
+<!-- ============================================================ 3 canvas -->
+<section class="page" id="P-c3" aria-labelledby="P-c3-h">
+  <div class="running"><span>03</span><span>Working the canvas</span></div>
+  <div class="chapter-no">03</div>
+  <h2 id="P-c3-h">Working the canvas</h2>
+  <p class="lede">Mouse, pen tablet and touch all work. Pen pressure is read through Windows Ink.</p>
+
+  <h3>Panning and zooming</h3>
+  <table>
+    <tr><th>Input</th><th>Does</th></tr>
+    <tr><td>Wheel</td><td>Zoom about the cursor</td></tr>
+    <tr><td>Middle-button drag · pen side button · <kbd>Space</kbd>+drag · <kbd>H</kbd> tool</td><td>Pan</td></tr>
+    <tr><td><kbd>Shift</kbd>+middle-button drag</td><td>Drag to zoom</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>Ctrl</kbd>+<kbd>1</kbd></td><td>Fit all · 100 %</td></tr>
+    <tr><td>Zoom in the status bar</td><td>Click for 100 %; <span class="ui">−</span> <span class="ui">+</span> step by step</td></tr>
+    <tr><td><kbd>Space</kbd> while dragging anything</td><td>Pan, keeping what you drag under the cursor</td></tr>
+  </table>
+  <div class="note"><b class="tag">Touch</b><br>One finger pans, two zoom. To draw with fingers too, turn on <span class="ui">Settings</span> › <span class="ui">Draw with fingers</span>. A pen always draws.</div>
+
+  <h3>Dials</h3>
+  <p>Most values are set with a ring of ticks, the dial. Drag it sideways; hold <kbd>Shift</kbd> for fine steps; the wheel moves one tick. A value with a default shows <span class="ui">↺</span> once changed: click it to go back. One drag or one run of wheel steps is a single undo.</p>
+
+  <h3>Drop-downs</h3>
+  <p>Click to open the list. The wheel over a closed drop-down steps to the option before or after at once. Press and drag down to open the list, then release on an option to pick it.</p>
+
+  <h3>Number boxes</h3>
+  <p>Number boxes take sums as typed: <code>40*1.5</code>, <code>2^3+1</code>, brackets too. An empty box and <kbd>Enter</kbd> means 0.</p>
+
+  <h3>Undo</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. Closing with unsaved changes asks first.</p>
+  <div class="folio">5</div>
+</section>
+
+<!-- ============================================================ 4 drawing -->
+<section class="page" id="P-c4" aria-labelledby="P-c4-h">
+  <div class="running"><span>04</span><span>Drawing and colour</span></div>
+  <div class="chapter-no">04</div>
+  <h2 id="P-c4-h">Drawing and colour</h2>
+  <p class="lede">The brush paints pixels (raster); the pen draws vector strokes. A drawing layer appears when you start and goes away when it is empty.</p>
+
+  <h3>Tools</h3>
+  <table>
+    <tr><th>Tool</th><th>Key</th><th>Notes</th></tr>
+    <tr><td>Select · Lasso</td><td><kbd>V</kbd> · <kbd>Q</kbd></td><td>Chapter 6</td></tr>
+    <tr><td>Pan</td><td><kbd>H</kbd></td><td>Drag to move the view</td></tr>
+    <tr><td>Brush</td><td><kbd>B</kbd></td><td>Pencil, nib, marker, airbrush, watercolour</td></tr>
+    <tr><td>Pen (vector)</td><td><kbd>P</kbd></td><td>Pressure-sensitive vector strokes, each one selectable</td></tr>
+    <tr><td>Eraser</td><td><kbd>E</kbd></td><td>Erases brush pixels and pen strokes</td></tr>
+    <tr><td>Text</td><td><kbd>T</kbd></td><td>Chapter 5</td></tr>
+    <tr><td>Line · Arrow · Rectangle · Ellipse</td><td><kbd>L</kbd> · <kbd>A</kbd> · <kbd>R</kbd> · <kbd>O</kbd></td><td>Shape layers</td></tr>
+    <tr><td>Crop photo</td><td><kbd>C</kbd></td><td>Chapter 5</td></tr>
+    <tr><td>Export area · 3D space</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>Chapters 12 · 9</td></tr>
+    <tr><td>Eyedropper</td><td><kbd>I</kbd></td><td>Picks a colour from the screen</td></tr>
+  </table>
+
+  <h3>Brush settings</h3>
+  <ul>
+    <li>Each preset has its own default <span class="ui">Hardness</span> and <span class="ui">Opacity</span>.</li>
+    <li><span class="ui">Pressure → size</span>, <span class="ui">Pressure → opacity</span>: how hard you press sets the width or strength.</li>
+    <li><span class="ui">Smooth</span>: how far the brush trails the pen. Higher values give smoother lines that follow later; when the pen rests, the brush catches up.</li>
+    <li>Size: <kbd>Ctrl</kbd>+drag, or <kbd>[</kbd> <kbd>]</kbd>. <kbd>Ctrl</kbd>+drag also sets pen, eraser and shape widths.</li>
+  </ul>
+
+  <h3>Colour</h3>
+  <div class="side">
+    <div>
+      <p><kbd>Alt</kbd>+click anywhere on the canvas opens the OKHSV palette. Its colour space is shaped to look even to the eye, so changing lightness shifts the hue less.</p>
+      <p><span class="ui">Similar colour map</span> shows two maps: colours of the same lightness, and of the same saturation. The row below holds common colours. Every colour field takes a hex code and has <span class="ui">Copy</span> and <span class="ui">Paste</span>; with several layers selected, a colour goes to all of them.</p>
+    </div>
+    <figure><img src="img/palette-card.jpg" alt="The OKHSV palette and the two similar-colour maps" width="780" height="360" loading="lazy"><figcaption>Palette and similar colour maps</figcaption></figure>
+  </div>
+  <div class="folio">6</div>
+</section>
+
+<!-- ============================================================ 5 photos, text -->
+<section class="page" id="P-c5" aria-labelledby="P-c5-h">
+  <div class="running"><span>05</span><span>Photos, text and shapes</span></div>
+  <div class="chapter-no">05</div>
+  <h2 id="P-c5-h">Photos, text and shapes</h2>
+  <p class="lede">Photos come in at full resolution, and scaling one down keeps its original pixels.</p>
+
+  <h3>Importing</h3>
+  <ul>
+    <li>Drop files on the window, press <kbd>Ctrl</kbd>+<kbd>I</kbd>, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>. Pasted text becomes a text layer.</li>
+    <li><strong>Straight from a browser:</strong> drag an image out of Chrome or Edge onto the window and it comes in as a photo. Pasting an image's address does the same; a link that is not an image comes in as text.</li>
+    <li>PNG, JPEG, WebP, BMP, TIFF, GIF and phones' HEIC/HEIF. An animated GIF becomes a looping, transparent video layer (needs ffmpeg).</li>
+    <li>Video (mp4, mov, mkv, webm…) and sound (mp3, wav…): see chapter 11.</li>
+  </ul>
+
+  <h3>Photo properties</h3>
+  <table>
+    <tr><td><span class="ui">Size %</span> · <span class="ui">Angle °</span></td><td><span class="ui">Original size</span>, <span class="ui">Rotation 0°</span> reset them at once</td></tr>
+    <tr><td><span class="ui">Crop…</span> (<kbd>C</kbd>)</td><td>The original stays; <span class="ui">Uncrop</span> brings it back</td></tr>
+    <tr><td><span class="ui">Adjust</span></td><td>Brightness, contrast, saturation</td></tr>
+    <tr><td><span class="ui">Chroma</span></td><td>Makes a picked colour transparent (green screen)</td></tr>
+    <tr><td><span class="ui">Blend</span></td><td>Blend mode</td></tr>
+  </table>
+
+  <h3>Text</h3>
+  <div class="side">
+    <div>
+      <ul>
+        <li>With <kbd>T</kbd>, click the canvas and type. The box grows as you type; turn on <span class="ui">Wrap width</span> to break lines at a width.</li>
+        <li><span class="ui">Font</span> lists every font installed on the PC.</li>
+        <li><span class="ui">Background box</span> adds a box with <span class="ui">Pad X</span>, <span class="ui">Pad Y</span>, <span class="ui">Radius</span>, and a <span class="ui">Box border</span> with its width.</li>
+        <li><span class="ui">Text outline</span> goes round the letters, with or without the box, in its own colour and width.</li>
+        <li>Padding and widths are a % of the text size, so the look holds when the text grows. Changing them never moves the letters: the box grows round them.</li>
+        <li>New text starts with the settings used last.</li>
+      </ul>
+    </div>
+    <figure><img src="img/text-card.jpg" alt="The text tool card: size, font, align, background box with padding and radius, box border, text outline" width="340" height="510" loading="lazy"><figcaption>The text tool card</figcaption></figure>
+  </div>
+  <div class="note"><b class="tag">Fonts</b><br>A character the chosen font lacks (Korean in Arial, say) is not drawn in another font: it shows as an empty box (□). That tells you the font does not suit the text; pick one that has those characters.</div>
+  <div class="folio">7</div>
+</section>
+
+<!-- ============================================================ 6 select -->
+<section class="page" id="P-c6" aria-labelledby="P-c6-h">
+  <div class="running"><span>06</span><span>Selecting and transforming</span></div>
+  <div class="chapter-no">06</div>
+  <h2 id="P-c6-h">Selecting and transforming</h2>
+  <p class="lede">Pick whole layers, or just one pen stroke or some brush pixels, and move them.</p>
+
+  <h3>Select tool <kbd>V</kbd></h3>
+  <table>
+    <tr><td>Click · drag</td><td>Select · move</td></tr>
+    <tr><td><kbd>Shift</kbd>+drag</td><td>Box select: what has its centre inside (<kbd>Shift</kbd>+<kbd>Ctrl</kbd>: only what is fully inside)</td></tr>
+    <tr><td><kbd>Shift</kbd>+click</td><td>Add to or remove from the selection</td></tr>
+    <tr><td>Pen strokes · brush</td><td>Pen by whole strokes; brush by the pixels inside</td></tr>
+    <tr><td>Corners · top circle</td><td>Size · rotate</td></tr>
+  </table>
+  <p><kbd>Q</kbd> (lasso) selects inside a shape you draw freely.</p>
+
+  <h3>Several at once</h3>
+  <ul>
+    <li>With several selected, one set of handles sizes and turns them all about their shared centre.</li>
+    <li>While turning, <kbd>Shift</kbd> or <kbd>Ctrl</kbd>: 15° steps from where you started; <kbd>Alt</kbd>: 15° steps from 0°.</li>
+    <li>A field whose values differ shows <span class="ui">—</span>; a value entered there goes to all. Changing any other field passes on just that value.</li>
+  </ul>
+
+  <h3>Keyboard transforms <kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></h3>
+  <p>In the select tool: <kbd>G</kbd> move, <kbd>R</kbd> rotate, <kbd>S</kbd> scale. Move the mouse to set it; click or <kbd>Enter</kbd> confirms, <kbd>Esc</kbd> or right-click cancels. Layers in a 3D space move in 3D (chapter 10).</p>
+
+  <h3>Duplicate, delete, empty</h3>
+  <table>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Duplicate</td></tr>
+    <tr><td><kbd>Backspace</kbd></td><td><strong>Delete</strong> the selected layers</td></tr>
+    <tr><td><kbd>Delete</kbd></td><td><strong>Empty</strong> the selected brush and pen layers and masks (the layers stay)</td></tr>
+    <tr><td>With some strokes or pixels selected</td><td>Both keys erase only the selected part</td></tr>
+  </table>
+  <p>The same commands are in the <span class="ui">Edit</span> menu and on the layer card's icon buttons. The eye icon shows and hides a layer.</p>
+  <div class="folio">8</div>
+</section>
+
+<!-- ============================================================ 7 masks -->
+<section class="page" id="P-c7" aria-labelledby="P-c7-h">
+  <div class="running"><span>07</span><span>Masks</span></div>
+  <div class="chapter-no">07</div>
+  <h2 id="P-c7-h">Masks</h2>
+  <p class="lede">A mask hides part of a layer without erasing it. It is built for cutting objects cleanly out of high-resolution photos.</p>
+
+  <div class="side">
+    <div>
+      <h3>Making and painting</h3>
+      <p><span class="ui">Mask</span> on a layer row or the property card adds a mask layer under that layer. With the mask selected:</p>
+      <ul>
+        <li>What you paint with the brush, pen or rectangle is hidden; hidden parts show red on the canvas.</li>
+        <li>The eraser brings it back, as does a rectangle drawn with <kbd>Alt</kbd>.</li>
+        <li><span class="ui">Strength</span> and <span class="ui">Invert</span> change how much it hides.</li>
+        <li><span class="ui">Follow</span>: the layer the mask moves with (usually its photo).</li>
+        <li><span class="ui">Empty</span> or <kbd>Delete</kbd> clears the mask.</li>
+      </ul>
+    </div>
+    <figure><img src="img/mask-panel.jpg" alt="The card with a mask selected: Strength, Invert, Follow, Auto select, GrabCut, Scissors, Empty, Range, Refine, Grow" width="340" height="630" loading="lazy"><figcaption>The card with a mask selected</figcaption></figure>
+  </div>
+
+  <h3>Cutting out automatically</h3>
+  <p>The three modes work <strong>in the select tools only (<kbd>V</kbd>, <kbd>Q</kbd>)</strong>. Turning one on switches to the select tool; any other tool does its own job. In all three, <kbd>Alt</kbd> brings back instead of hiding.</p>
+  <table>
+    <tr><td><span class="ui">Auto select</span></td><td>Hides the area similar to where you click; <span class="ui">Range</span> sets how far it reaches</td></tr>
+    <tr><td><span class="ui">GrabCut</span></td><td>Drag a box: the object that stands apart inside it is hidden</td></tr>
+    <tr><td><span class="ui">Scissors</span></td><td>Draws an outline that clings to edges, then closes it (below)</td></tr>
+    <tr><td><span class="ui">Refine</span> · <span class="ui">Grow</span></td><td>Softens the edge to fit the picture (0: hard) · + widens what is hidden to close gaps, − narrows it</td></tr>
+  </table>
+
+  <h3>Scissors</h3>
+  <ul>
+    <li><strong>Drag:</strong> near an edge, the line clings to it and anchors drop by themselves.</li>
+    <li><strong>Click · right-click:</strong> place an anchor; it snaps to the clearest edge nearby.</li>
+    <li><strong>Close:</strong> click the first point or press <kbd>Enter</kbd>. Close with <kbd>Shift</kbd> to refine once more with GrabCut.</li>
+    <li><kbd>Esc</kbd> once drops the outline in progress; again, it leaves scissors mode.</li>
+    <li><span class="ui">Cut edge</span>: <span class="ui">Crisp</span> cuts cleanly on the edge line; <span class="ui">Photo's blur</span> cuts as softly as the edge is blurred in the photo.</li>
+  </ul>
+  <div class="note"><b class="tag">Photo masks</b><br>The first cut-out on an empty mask over a photo is made at the photo's own pixel resolution. Moving, turning or scaling the photo afterwards, the mask simply follows.</div>
+  <div class="folio">9</div>
+</section>
+
+<!-- ============================================================ 8 FX -->
+<section class="page" id="P-c8" aria-labelledby="P-c8-h">
+  <div class="running"><span>08</span><span>FX layers</span></div>
+  <div class="chapter-no">08</div>
+  <h2 id="P-c8-h">FX layers</h2>
+  <p class="lede">An FX layer holds one filter instead of pixels. It filters every layer below it in the list; at the top, it filters everything. The layers themselves are never changed.</p>
+
+  <figure class="bleed">
+    <img src="img/fx.jpg" alt="An FX layer at the top darkening the edges with a vignette; the card shows Filter, Blend, Amount, Size, Softness." width="1920" height="1080" loading="lazy">
+    <figcaption>An FX layer (vignette) at the top, over every layer below</figcaption>
+  </figure>
+
+  <h3>Using one</h3>
+  <ol class="steps">
+    <li>The sparkle button on the layer card, or <span class="ui">Edit</span> › <span class="ui">Add FX layer</span>. It goes above the selected layer.</li>
+    <li>Pick the effect in <span class="ui">Filter</span> and set its values on the dials. Each value can be keyed on the timeline.</li>
+    <li><span class="ui">Blend</span> starts as <span class="ui">Copy</span> (the picture below is replaced by the filtered result); other modes mix it in.</li>
+    <li>An FX layer can have a mask to filter only part of the picture. Moving it in the list changes what it covers.</li>
+  </ol>
+
+  <h3>Filters</h3>
+  <table>
+    <tr><th>Kind</th><th>Filters</th></tr>
+    <tr><td>Blur and sharpen</td><td>Gaussian blur, motion blur, unsharp mask</td></tr>
+    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map</td></tr>
+    <tr><td>Texture and look</td><td>Grain, vignette, colour fringes, pixelate, halftone, glow</td></tr>
+  </table>
+  <p>Grain, pixelate and halftone use a grid fixed to the canvas, so the pattern does not slide when the view moves. Vignette and colour fringes work about the export area (or, without one, all the content).</p>
+  <div class="folio">10</div>
+</section>
+
+<!-- ============================================================ 9 spaces -->
+<section class="page" id="P-c9" aria-labelledby="P-c9-h">
+  <div class="running"><span>09</span><span>3D spaces</span></div>
+  <div class="chapter-no">09</div>
+  <h2 id="P-c9-h">3D spaces</h2>
+  <p class="lede">Draw a few lines along edges that are parallel in the real scene, and the app finds the camera that took the photo. Then stand or lay text and drawings in that space, in the photo's own perspective.</p>
+
+  <figure class="bleed compact">
+    <img src="img/space.jpg" alt="A 3D space fitted to the room photo: vanishing lines per axis along the box's edges, and blue text with depth on the floor." width="1920" height="1080" loading="lazy">
+    <figcaption>A space fitted to the box's edges, with two texts given depth. The card shows focal length, view angle and line error.</figcaption>
+  </figure>
+
+  <h3>Making a space <kbd>K</kbd></h3>
+  <ol class="steps">
+    <li>Drag over a photo to set the space's area, or click a photo to fit it.</li>
+    <li>Draw lines along edges that are parallel in reality. Switch axes with <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> or <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd>: <span class="ax x">X</span> <span class="ax y">Y</span> along the floor, <span class="ax z">Z</span> up. You need two lines on two axes, four at least.</li>
+    <li>Drag a line's ends to refine it. A loupe shows while dragging; <kbd>Shift</kbd> highlights edges in it. <kbd>Delete</kbd> or right-click removes a line.</li>
+    <li>The camera is solved again with every line. Drag layers into the space's folder on the layer card and they go in exactly as they look.</li>
+  </ol>
+
+  <h3>Find lines and Auto pick</h3>
+  <div class="side">
+    <div>
+      <p><span class="ui">Find lines</span> finds straight edges in the photo and shows them as faint candidates. Click a candidate to make it a line of the current axis, and drag on to refine its ends. Candidates never pick an axis by themselves.</p>
+      <p><span class="ui">Auto pick</span> chooses three directions among the candidates that meet at right angles and adds a few lines to each axis. If the result looks wrong, undo and pick by hand.</p>
+    </div>
+    <figure><img src="img/lines.jpg" alt="Find lines showing faint candidate lines along the box and floor edges" width="1600" height="700" loading="lazy"><figcaption>Candidates from Find lines</figcaption></figure>
+  </div>
+
+  <h3>The space card</h3>
+  <table>
+    <tr><td><span class="ui">Reference length</span> · <span class="ui">Tape measure</span></td><td>Tell it one real length in metres and measure others</td></tr>
+    <tr><td><span class="ui">+ Wall</span> · <span class="ui">+ Wall from base line</span></td><td>Make a wall; layers on it move in the wall's plane</td></tr>
+    <tr><td><span class="ui">Draw mask</span></td><td>Where the space shows (to hide things behind objects in front)</td></tr>
+    <tr><td><span class="ui">Lighting</span></td><td>Light and shade on solids' faces (no cast shadows)</td></tr>
+  </table>
+
+  <div class="folio">11</div>
+</section>
+
+<!-- ============================================================ 10 3D workspace -->
+<section class="page" id="P-c10" aria-labelledby="P-c10-h">
+  <div class="running"><span>10</span><span>The 3D workspace</span></div>
+  <div class="chapter-no">10</div>
+  <h2 id="P-c10-h">The 3D workspace</h2>
+  <p class="lede">Look at a space from the side or above while placing layers. The keys are Blender's.</p>
+
+  <figure class="bleed">
+    <img src="img/ws3d.jpg" alt="The 3D workspace: axes on a dark ground, text with depth, the photo's camera on the right, the light compass on the left." width="1920" height="1080" loading="lazy">
+    <figcaption>The buttons at the top switch views; the compass on the left turns the light. The cone is the photo's camera.</figcaption>
+  </figure>
+
+  <h3>Switching</h3>
+  <p>A short press of <kbd>Tab</kbd> switches between the 2D canvas and the 3D workspace. <strong>Hold it</strong> to peek at the other side without switching. How long to hold before the peek is <span class="ui">Settings</span> › <span class="ui">Peek</span>.</p>
+
+  <div class="two">
+    <div>
+      <h3>Views</h3>
+      <table>
+        <tr><td>Middle button · pen side button</td><td>Orbit</td></tr>
+        <tr><td><kbd>Shift</kbd> · <kbd>Ctrl</kbd>+the same drag</td><td>Pan · zoom</td></tr>
+        <tr><td>Wheel</td><td>Zoom</td></tr>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd></td><td>Front · right · top (<kbd>Ctrl</kbd>: opposite)</td></tr>
+        <tr><td><kbd>5</kbd></td><td>Perspective ↔ orthographic</td></tr>
+        <tr><td><kbd>0</kbd></td><td>Through the photo's camera</td></tr>
+        <tr><td><kbd>.</kbd> · <kbd>Home</kbd></td><td>Frame the selection · first view</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Moving G/R/S</h3>
+      <table>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Move · rotate · scale</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>Along that axis; again: the layer's own axis; once more: free</td></tr>
+        <tr><td>Typing a number</td><td>By exactly that much</td></tr>
+        <tr><td><kbd>Ctrl</kbd> · <kbd>Shift</kbd></td><td>Snap to units · fine</td></tr>
+        <tr><td><kbd>Enter</kbd>·click / <kbd>Esc</kbd>·right-click</td><td>Confirm / cancel</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Clear the value</td></tr>
+      </table>
+    </div>
+  </div>
+  <p><span class="ui">Stand on the floor</span> and <span class="ui">Lay on the floor</span> on the card set the selected layer upright or flat on the floor. Height 0 (the grid) is the camera's eye level, not the floor.</p>
+  
+  <h3>Depth and engraving</h3>
+  <p>Raise the <span class="ui">Depth</span> of text, pen strokes or brush drawings to make solids. <span class="ui">Detail</span> and <span class="ui">Smooth shading</span> refine the sides; <span class="ui">Engrave</span> cuts into the surface instead. Drag a layer in a space with <kbd>Alt</kbd> held to slide it along the floor.</p>
+  <div class="folio">12</div>
+</section>
+
+<!-- ============================================================ 11 timeline -->
+<section class="page" id="P-c11" aria-labelledby="P-c11-h">
+  <div class="running"><span>11</span><span>Timeline, video and sound</span></div>
+  <div class="chapter-no">11</div>
+  <h2 id="P-c11-h">Timeline, video and sound</h2>
+  <p class="lede">Turn the canvas itself into moving pictures. Video and sound need ffmpeg.</p>
+
+  <figure class="bleed">
+    <img src="img/timeline-bar.jpg" alt="The timeline: Play, Start, time, fps, Length, Auto key, Record, Add key, Remove keys, Export video, and rows for a camera's Position, Size, Rotate and Follow" width="2480" height="220" loading="lazy">
+    <figcaption>The timeline (<kbd>Ctrl</kbd>+<kbd>T</kbd>), with a row under the camera for each value that has keys</figcaption>
+  </figure>
+
+  <h3>Key animation</h3>
+  <ul>
+    <li><kbd>Alt</kbd>+<kbd>A</kbd> plays and stops; <kbd>,</kbd> <kbd>.</kbd> step one frame.</li>
+    <li><kbd>I</kbd> keys the selection's current values; <kbd>Alt</kbd>+<kbd>I</kbd> removes every key at the playhead. Each property row has its own key button for keying one value, and <span class="ui">&lt;</span> <span class="ui">&gt;</span> jump to the key before or after.</li>
+    <li>Under each layer's name row is one row per value with keys (position, size, rotate, opacity, 3D position, depth, volume, FX values and so on). Keys are picked, moved and deleted on their own row only.</li>
+    <li><span class="ui">Auto key</span> keys only the values you change.</li>
+    <li>Drag keys to move them; <kbd>Shift</kbd>+drag selects several. <kbd>Shift</kbd> while dragging the playhead snaps it to keys. A key's shape shows its easing (smooth, linear, hold).</li>
+    <li>Right-click a name row to set when the layer appears and disappears.</li>
+  </ul>
+
+  <h3>Cameras and recording</h3>
+  <ul>
+    <li>Make a canvas camera with the <kbd>F</kbd> tool and key its position and size to move the view.</li>
+    <li>Turn on <span class="ui">● Record</span> and draw: pen and brush strokes play back in the order and speed they were drawn.</li>
+    <li>Playback keeps finished frames in memory (the playback cache), so heavy scenes still play smoothly.</li>
+  </ul>
+
+  <h3>Video and sound layers</h3>
+  <ul>
+    <li>A dropped video becomes a clip on the timeline: move it, trim either end. Outside the clip it holds its first or last frame.</li>
+    <li>The property card can turn the current frame into a photo layer.</li>
+    <li>A sound file sits on the canvas as a speaker mark and is moved and trimmed on the timeline; its volume can be keyed.</li>
+  </ul>
+  <div class="folio">13</div>
+</section>
+
+<!-- ============================================================ 12 export -->
+<section class="page" id="P-c12" aria-labelledby="P-c12-h">
+  <div class="running"><span>12</span><span>Exporting and saving</span></div>
+  <div class="chapter-no">12</div>
+  <h2 id="P-c12-h">Exporting and saving</h2>
+  <p class="lede">Export just the part you want, at the size you want. Exports are drawn by the same GPU renderer as the screen.</p>
+
+  <h3>Setting the area <kbd>F</kbd></h3>
+  <p>Draw a rectangle with the <span class="ui">Export area</span> tool. With something selected, it fits that exactly.</p>
+
+  <h3>Images <kbd>Ctrl</kbd>+<kbd>E</kbd></h3>
+  <p>PNG or JPEG. <span class="ui">Margin</span> keeps space round the area; raising <span class="ui">Samples</span> draws larger and scales down for smoother edges. The background is transparent, white or a colour. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies the area straight to the clipboard.</p>
+
+  <h3>Video <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></h3>
+  <div class="side">
+    <div>
+      <table>
+        <tr><td><span class="ui">Area</span></td><td>The export area or a camera, all content, the current view</td></tr>
+        <tr><td><span class="ui">Size</span></td><td>By width or height; starts at the area's own pixels</td></tr>
+        <tr><td><span class="ui">Format</span></td><td>H.264, H.265, AV1, ProRes 4444 (alpha), VP9 (alpha), GIF, PNG frames</td></tr>
+        <tr><td><span class="ui">Mode</span></td><td>Quality (lower is better) or bitrate</td></tr>
+        <tr><td><span class="ui">GPU encoding</span></td><td>On by default with an NVIDIA graphics card (NVENC)</td></tr>
+        <tr><td><span class="ui">Samples</span> · <span class="ui">Backdrop</span></td><td>1–4× · transparent, white, colour</td></tr>
+        <tr><td><span class="ui">With sound</span></td><td>Mixes the timeline's sound and the videos' own sound</td></tr>
+      </table>
+      <p>Progress shows in the window, and you can cancel at any time.</p>
+    </div>
+    <figure><img src="img/vexport-card.jpg" alt="The Export video window: Area, Size, fps, Format, Mode, Quality, GPU encoding, Samples, Backdrop, With sound" width="360" height="500" loading="lazy"><figcaption>The Export video window</figcaption></figure>
+  </div>
+
+  <h3>Saving</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>S</kbd> save, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as, <kbd>Ctrl</kbd>+<kbd>O</kbd> open, <kbd>Ctrl</kbd>+<kbd>N</kbd> new. Double-clicking a <code>.void</code> file opens it too.</p>
+  <div class="note"><b class="tag">Video and sound files</b><br>Photos are stored inside the <code>.void</code>, but video and sound are linked to their original files. When moving a project to another PC, take those files along.</div>
+  <div class="folio">14</div>
+</section>
+
+<!-- ============================================================ 13 keys -->
+<section class="page" id="P-keys" aria-labelledby="P-keys-h">
+  <div class="running"><span>13</span><span>Shortcuts</span></div>
+  <div class="chapter-no">13</div>
+  <h2 id="P-keys-h">Shortcuts</h2>
+  <div class="two">
+    <div>
+      <h4>Tools</h4>
+      <table>
+        <tr><td><kbd>V</kbd> <kbd>Q</kbd> <kbd>H</kbd></td><td>Select · lasso · pan</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>P</kbd> <kbd>E</kbd></td><td>Brush · pen · eraser</td></tr>
+        <tr><td><kbd>T</kbd> <kbd>L</kbd> <kbd>A</kbd></td><td>Text · line · arrow</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>O</kbd> <kbd>C</kbd></td><td>Rectangle · ellipse · crop photo</td></tr>
+        <tr><td><kbd>F</kbd> <kbd>K</kbd> <kbd>I</kbd></td><td>Export area · 3D space · eyedropper</td></tr>
+      </table>
+      <h4>File</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>O</kbd> <kbd>S</kbd></td><td>New · open · save</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>Save as</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Import a photo</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Export an image</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>Export video</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td><td>Copy the area to the clipboard</td></tr>
+      </table>
+      <h4>Edit</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Y</kbd></td><td>Undo · redo</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>Paste (picture, text, image link) · duplicate</td></tr>
+        <tr><td><kbd>Backspace</kbd> · <kbd>Delete</kbd></td><td>Delete · empty</td></tr>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Move · rotate · scale</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Cancel (scissors: twice leaves the mode)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h4>View</h4>
+      <table>
+        <tr><td>Wheel · middle drag</td><td>Zoom · pan</td></tr>
+        <tr><td><kbd>Space</kbd>+drag</td><td>Pan (even mid-drag)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>1</kbd></td><td>Fit all · 100 %</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>UI size</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>Hide the UI</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>2D ↔ 3D · hold to peek</td></tr>
+      </table>
+      <h4>Drawing and colour</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+drag · <kbd>[</kbd> <kbd>]</kbd></td><td>Size · line width</td></tr>
+        <tr><td><kbd>Alt</kbd>+click</td><td>Palette</td></tr>
+        <tr><td><kbd>Alt</kbd> (mask)</td><td>Bring back</td></tr>
+      </table>
+      <h4>Timeline</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Open the timeline</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>A</kbd></td><td>Play · stop</td></tr>
+        <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>One frame back · forward</td></tr>
+        <tr><td><kbd>I</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd></td><td>Add · remove keys</td></tr>
+      </table>
+      <h4>3D workspace</h4>
+      <table>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd> · <kbd>5</kbd></td><td>Front · right · top · ortho</td></tr>
+        <tr><td><kbd>0</kbd> · <kbd>.</kbd> · <kbd>Home</kbd></td><td>Camera · frame · first view</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>Lock G/R/S to an axis</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="folio">15</div>
+</section>
+
+<!-- ============================================================ 14 help -->
+<section class="page" id="P-c14" aria-labelledby="P-c14-h">
+  <div class="running"><span>14</span><span>Help and licences</span></div>
+  <div class="chapter-no">14</div>
+  <h2 id="P-c14-h">Help and licences</h2>
+  <p class="lede">If something looks wrong, however small, please tell us. Sending the items below helps it get fixed quickly.</p>
+
+  <h3>Reporting a problem</h3>
+  <ul>
+    <li>What you were doing, what happened, and whether it happens again.</li>
+    <li>If the app closed suddenly: <code>%APPDATA%\DriftingVOID\crash.log</code>.</li>
+    <li>A screenshot and the <code>.void</code> file, if you can.</li>
+    <li>Your graphics card and pen tablet.</li>
+  </ul>
+
+  <h3>Known limits</h3>
+  <ul>
+    <li>Windows 10/11 only, with a graphics card that supports DirectX 12 or Vulkan.</li>
+    <li>Not code-signed yet, so Windows shows a protection window on first run.</li>
+    <li>Characters a font lacks show as empty boxes instead of another font (by design).</li>
+    <li>Very large recorded pen layers can take a moment to open.</li>
+    <li>The playback cache can use a lot of memory (up to 75 % of physical memory).</li>
+  </ul>
+
+  <h3>ffmpeg and licences</h3>
+  <p>Drifting VOID runs <a href="https://ffmpeg.org">FFmpeg</a> as a separate program for video. ffmpeg is not in this package: setup downloads a public build (GPL) from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> into the install folder's <code>ffmpeg</code> folder, where <code>LICENSE.txt</code> holds the full licence and <code>SOURCE.txt</code> the file name, checksum and source.</p>
+  <p>The Japanese UI face, Pretendard JP, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
+
+  <div class="note"><b class="tag">This manual</b><br>Switch its language at the top right, and use <span class="ui">Print</span> to print it as an A4 booklet or save a PDF. It starts in your browser's language and follows the system theme; the half-circle button switches light and dark.</div>
+  <div class="folio">16</div>
+</section>
+
+</main>

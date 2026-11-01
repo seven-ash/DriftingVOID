@@ -37,6 +37,9 @@ Copy-Item $exe $out
 Copy-Item "dist\Setup.cmd" $out
 Copy-Item "dist\setup" (Join-Path $out "setup") -Recurse
 Copy-Item "dist\manual" (Join-Path $out "manual") -Recurse
+# the manual's cover names the version
+$man = Join-Path $out "manual\index.html"
+[IO.File]::WriteAllText($man, [IO.File]::ReadAllText($man, [Text.Encoding]::UTF8).Replace("{VERSION}", $label), (New-Object Text.UTF8Encoding $false))
 # Japanese UI face (SIL OFL 1.1, its licence beside it)
 $fonts = Join-Path $root "assets\fonts"
 New-Item -ItemType Directory -Force (Join-Path $out "fonts") | Out-Null

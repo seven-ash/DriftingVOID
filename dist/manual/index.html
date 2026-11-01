@@ -1,18 +1,37 @@
-﻿<!doctype html>
-<html lang="ko">
+<!doctype html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Drifting VOID 사용 설명서</title>
-<meta name="description" content="Drifting VOID 클로즈 베타 사용 설명서">
+<title>Drifting VOID manual</title>
+<meta name="description" content="Drifting VOID user manual · 사용 설명서 · ユーザーマニュアル">
 <link rel="icon" href="img/icon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<script>
+// the manual's language, before the first paint: a saved choice, else the
+// browser's languages in order, else English
+(function () {
+  var langs = ["ko", "en", "ja"], pick = "";
+  try { pick = localStorage.getItem("dv-manual-lang") || ""; } catch (e) {}
+  if (langs.indexOf(pick) < 0) {
+    pick = "en";
+    var list = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ""];
+    for (var i = 0; i < list.length; i++) {
+      var c = String(list[i]).slice(0, 2).toLowerCase();
+      if (langs.indexOf(c) >= 0) { pick = c; break; }
+    }
+  }
+  document.documentElement.dataset.lang = pick;
+  document.documentElement.lang = pick;
+})();
+</script>
 <!-- Hallmark · pre-emit critique: P5 H4 E4 S5 R5 V4
      genre: atmospheric (the app's own system: void ground, one amber accent, glass cards)
-     macrostructure: booklet (cover · contents · numbered chapters · reference card · colophon) -->
+     macrostructure: booklet (cover · contents · numbered chapters · reference card · colophon),
+     in three languages (ko, en, ja), one shown at a time -->
 <style>
 /* ------------------------------------------------------------ tokens
    Taken from the app (src/theme.rs): VOID, PAPER_2, PAPER_4, INK, INK_2,
@@ -387,71 +406,110 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
   .pin, .legend i, ol.steps > li::before { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   a { text-decoration: none; }
 }
+
+/* ------------------------------------------------------------ languages
+   One booklet per language; the head script picks one before first paint
+   (saved choice, else the browser's languages, else English). */
+@font-face { font-family: "Pretendard JP"; font-weight: 400; src: local("Pretendard JP"), url("../fonts/PretendardJP-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Pretendard JP"; font-weight: 600 800; src: local("Pretendard JP SemiBold"), url("../fonts/PretendardJP-SemiBold.ttf") format("truetype"); }
+:lang(ja) { --font-text: "Pretendard JP", "Pretendard", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif; font-family: var(--font-text); }
+main:lang(en) { word-break: normal; }
+html[data-lang] main.book { display: none; }
+html[data-lang="ko"] main.book[lang="ko"],
+html[data-lang="en"] main.book[lang="en"],
+html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
+.bar .langs { display: flex; gap: 2px; padding-right: var(--space-1); margin-right: var(--space-1); border-right: 1px solid var(--hair); }
+.bar .langs button { padding: 6px 9px; min-width: 34px; }
+.bar .langs button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+@media (max-width: 480px) {
+  .bar { left: var(--space-2); justify-content: space-between; }
+  .bar a, .bar button { padding: 6px 7px; font-size: 12.5px; }
+  .bar .langs button { min-width: 0; padding: 6px 8px; }
+}
+@media print {
+  ol.toc a { padding: 1.5mm 0; }
+  ol.toc .t { font-size: 11pt; }
+  .compact img { max-height: 58mm; }
+  .pin { width: 15px; height: 15px; margin: -7.5px 0 0 -7.5px; font-size: 8.5px; box-shadow: 0 0 0 2px rgb(13 12 19 / 0.55); }
+  h3 { margin: 3.5mm 0 1.8mm; }
+  ol.steps > li { margin-bottom: 1.4mm; }
+  html[data-lang] main.book { display: none !important; }
+  html[data-lang="ko"] main.book[lang="ko"],
+  html[data-lang="en"] main.book[lang="en"],
+  html[data-lang="ja"] main.book[lang="ja"] { display: block !important; }
+}
 </style>
 </head>
 <body>
 
-<nav class="bar" aria-label="설명서 메뉴">
-  <a href="#toc">차례</a>
-  <a href="#keys">단축키</a>
-  <button type="button" id="theme" aria-label="밝게/어둡게 전환" title="밝게/어둡게">
+<nav class="bar" aria-label="Manual">
+  <span class="langs" role="group" aria-label="Language">
+    <button type="button" data-lang="ko" lang="ko" title="한국어">한</button>
+    <button type="button" data-lang="en" lang="en" title="English">EN</button>
+    <button type="button" data-lang="ja" lang="ja" title="日本語">日</button>
+  </span>
+  <a id="go-toc" href="#en-toc">Contents</a>
+  <a id="go-keys" href="#en-keys">Keys</a>
+  <button type="button" id="theme">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>
   </button>
-  <button type="button" onclick="window.print()" title="인쇄하거나 PDF로 저장">인쇄</button>
+  <button type="button" id="print" onclick="window.print()">Print</button>
 </nav>
 
-<main class="book">
+<main class="book" lang="ko">
 
 <!-- ============================================================ cover -->
 <section class="page cover" aria-label="표지">
-  <div class="top"><span>사용 설명서</span><span>클로즈 베타</span></div>
+  <div class="top"><span>사용 설명서</span><span>Windows</span></div>
   <div class="mid">
     <img class="mark" src="img/icon.png" alt="" width="112" height="112">
     <h1>Drifting<span>VOID</span></h1>
     <p class="sub">사진, 그림, 글자, 영상을 끝없는 캔버스 위에서.</p>
   </div>
   <div class="bottom">
-    <span>버전 <strong>0.82.0</strong> · Windows 10/11 · 펜 태블릿 권장</span>
-    <span>2026년 10월</span>
+    <span>버전 <strong>{VERSION}</strong> · Windows 10/11 · 펜 태블릿 권장</span>
+    <span>2026년 11월</span>
   </div>
 </section>
 
 <!-- ============================================================ contents -->
-<section class="page" id="toc" aria-labelledby="toc-h">
+<section class="page" id="ko-toc" aria-labelledby="ko-toc-h">
   <div class="running"><span>Drifting VOID</span><span>차례</span></div>
-  <h2 id="toc-h">차례</h2>
-  <p class="lede">처음이라면 1장과 2장부터 읽고, 나머지는 필요할 때 찾아보세요. 마지막의 단축키 모음은 따로 인쇄해 두기 좋게 한 장에 모았습니다.</p>
+  <h2 id="ko-toc-h">차례</h2>
+  <p class="lede">처음이라면 1장과 2장부터 읽고, 나머지는 필요할 때 찾아보세요. 단축키는 13장 한 장에 모았습니다. 설명서의 화면 사진은 영어 화면으로 찍었습니다.</p>
   <ol class="toc">
-    <li><a href="#c1"><span class="n">01</span><span class="t">설치와 첫 실행<span class="d">설치, ffmpeg, 제거, 파일 위치</span></span><span class="p">3</span></a></li>
-    <li><a href="#c2"><span class="n">02</span><span class="t">화면 둘러보기<span class="d">메뉴, 도구, 카드, 레이어, 테마와 유리 효과</span></span><span class="p">4</span></a></li>
-    <li><a href="#c3"><span class="n">03</span><span class="t">캔버스 다루기<span class="d">이동, 확대, 다이얼, 숫자 칸</span></span><span class="p">5</span></a></li>
-    <li><a href="#c4"><span class="n">04</span><span class="t">그리기와 색<span class="d">브러시, 펜, 지우개, 필압, 손떨림 보정, 팔레트</span></span><span class="p">6</span></a></li>
-    <li><a href="#c5"><span class="n">05</span><span class="t">사진, 글자, 도형<span class="d">불러오기, 자르기, 보정, 글자 상자, 혼합</span></span><span class="p">7</span></a></li>
-    <li><a href="#c6"><span class="n">06</span><span class="t">선택과 변형<span class="d">선택, 올가미, 그룹 변형, G/R/S</span></span><span class="p">8</span></a></li>
-    <li><a href="#c7"><span class="n">07</span><span class="t">마스크<span class="d">칠해서 가리기, 자동 선택, 그랩컷, 가위</span></span><span class="p">9</span></a></li>
-    <li><a href="#c8"><span class="n">08</span><span class="t">3D 공간<span class="d">소실선으로 사진의 원근 맞추기, 벽, 두께, 음각</span></span><span class="p">10</span></a></li>
-    <li><a href="#c9"><span class="n">09</span><span class="t">3D 작업 공간<span class="d">Tab, 궤도, 시점, 블렌더식 G/R/S</span></span><span class="p">11</span></a></li>
-    <li><a href="#c10"><span class="n">10</span><span class="t">타임라인, 영상, 소리<span class="d">키, 카메라, 녹화, 영상 레이어</span></span><span class="p">12</span></a></li>
-    <li><a href="#c11"><span class="n">11</span><span class="t">내보내기<span class="d">이미지, 영상, 클립보드</span></span><span class="p">13</span></a></li>
-    <li><a href="#keys"><span class="n">12</span><span class="t">단축키 모음<span class="d">한 장짜리 참고 카드</span></span><span class="p">14</span></a></li>
-    <li><a href="#c13"><span class="n">13</span><span class="t">베타 테스트 안내<span class="d">알려진 제한, 오류 보고, 라이선스</span></span><span class="p">15</span></a></li>
+    <li><a href="#ko-c1"><span class="n">01</span><span class="t">설치와 첫 실행<span class="d">설치, ffmpeg, 제거, 파일 위치</span></span><span class="p">3</span></a></li>
+    <li><a href="#ko-c2"><span class="n">02</span><span class="t">화면 둘러보기<span class="d">메뉴, 도구, 카드, 레이어, 설정 메뉴</span></span><span class="p">4</span></a></li>
+    <li><a href="#ko-c3"><span class="n">03</span><span class="t">캔버스 다루기<span class="d">이동, 확대, 다이얼, 드롭다운, 숫자 칸</span></span><span class="p">5</span></a></li>
+    <li><a href="#ko-c4"><span class="n">04</span><span class="t">그리기와 색<span class="d">브러시, 펜, 지우개, 필압, 손떨림 보정, 팔레트</span></span><span class="p">6</span></a></li>
+    <li><a href="#ko-c5"><span class="n">05</span><span class="t">사진, 글자, 도형<span class="d">불러오기, 브라우저에서 끌어오기, 글자 상자와 외곽선</span></span><span class="p">7</span></a></li>
+    <li><a href="#ko-c6"><span class="n">06</span><span class="t">선택과 변형<span class="d">선택, 올가미, 그룹 변형, G/R/S</span></span><span class="p">8</span></a></li>
+    <li><a href="#ko-c7"><span class="n">07</span><span class="t">마스크<span class="d">칠해서 가리기, 자동 선택, 그랩컷, 가위</span></span><span class="p">9</span></a></li>
+    <li><a href="#ko-c8"><span class="n">08</span><span class="t">FX 레이어<span class="d">아래 레이어에 거는 필터 18가지</span></span><span class="p">10</span></a></li>
+    <li><a href="#ko-c9"><span class="n">09</span><span class="t">3D 공간<span class="d">소실선, 선 찾기, 벽, 두께, 음각</span></span><span class="p">11</span></a></li>
+    <li><a href="#ko-c10"><span class="n">10</span><span class="t">3D 작업 공간<span class="d">Tab, 궤도, 시점, 블렌더식 G/R/S</span></span><span class="p">12</span></a></li>
+    <li><a href="#ko-c11"><span class="n">11</span><span class="t">타임라인, 영상, 소리<span class="d">값마다 키, 카메라, 녹화, 영상 레이어</span></span><span class="p">13</span></a></li>
+    <li><a href="#ko-c12"><span class="n">12</span><span class="t">내보내기와 저장<span class="d">이미지, 영상, 클립보드, .void</span></span><span class="p">14</span></a></li>
+    <li><a href="#ko-keys"><span class="n">13</span><span class="t">단축키 모음<span class="d">한 장짜리 참고 카드</span></span><span class="p">15</span></a></li>
+    <li><a href="#ko-c14"><span class="n">14</span><span class="t">도움말과 라이선스<span class="d">알려진 제한, 문제 알리기, ffmpeg, 글꼴</span></span><span class="p">16</span></a></li>
   </ol>
   <div class="folio">2</div>
 </section>
 
 <!-- ============================================================ 1 install -->
-<section class="page" id="c1" aria-labelledby="c1-h">
+<section class="page" id="ko-c1" aria-labelledby="ko-c1-h">
   <div class="running"><span>01</span><span>설치와 첫 실행</span></div>
   <div class="chapter-no">01</div>
-  <h2 id="c1-h">설치와 첫 실행</h2>
+  <h2 id="ko-c1-h">설치와 첫 실행</h2>
   <p class="lede">관리자 권한 없이 내 계정에만 설치합니다. 영상과 소리에 쓰는 ffmpeg는 설치하면서 GitHub에서 받아 옵니다.</p>
 
   <h3>설치</h3>
   <ol class="steps">
     <li>받은 압축 파일을 <strong>모두 풉니다</strong>. 압축 파일 안에서 바로 실행하면 설치 파일을 찾지 못합니다.</li>
-    <li><strong>Setup.cmd</strong>를 더블 클릭합니다. “Windows의 PC 보호” 창이 뜨면 <span class="ui">추가 정보</span> → <span class="ui">실행</span>을 누릅니다. 베타 빌드에는 아직 코드 서명이 없어서 나오는 창입니다.</li>
+    <li><strong>Setup.cmd</strong>를 더블 클릭합니다. “Windows의 PC 보호” 창이 뜨면 <span class="ui">추가 정보</span> → <span class="ui">실행</span>을 누릅니다. 아직 코드 서명이 없어서 나오는 창입니다.</li>
     <li>설치 창이 세 단계를 차례로 진행합니다: 프로그램 복사, ffmpeg, 바로 가기와 <code>.void</code> 파일 연결. 바탕 화면 바로 가기를 만들지와 바로 실행할지를 물으면 <kbd>Enter</kbd>로 기본값(예)을 고를 수 있습니다.</li>
   </ol>
+  <p>처음 실행하면 Windows 표시 언어를 따라 한국어, 영어, 일본어 중 하나로 열립니다. 나중에 <span class="ui">설정</span> › <span class="ui">언어</span>에서 바꿀 수 있습니다.</p>
 
   <h3>ffmpeg</h3>
   <p>영상 불러오기와 재생, 소리, 영상 내보내기는 FFmpeg 프로젝트의 ffmpeg를 함께 실행해서 처리합니다. 사진, 그림, 글자, 3D 공간, 이미지 내보내기는 ffmpeg 없이도 됩니다.</p>
@@ -463,67 +521,77 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
 
   <h3>업데이트와 제거</h3>
   <ul>
-    <li><strong>새 베타로 업데이트:</strong> 새 압축 파일의 Setup.cmd를 실행하면 같은 자리에 덮어씁니다. 설정과 프로젝트는 그대로 남습니다.</li>
-    <li><strong>제거:</strong> 설정 › 앱 › 설치된 앱 › Drifting VOID › 제거. 설정 파일까지 지울지 따로 묻고, <code>.void</code> 프로젝트 파일은 건드리지 않습니다.</li>
+    <li><strong>새 버전으로 업데이트:</strong> 새 압축 파일의 Setup.cmd를 실행하면 같은 자리에 덮어씁니다. 설정과 프로젝트는 그대로 남습니다.</li>
+    <li><strong>제거:</strong> Windows 설정 › 앱 › 설치된 앱 › Drifting VOID › 제거. 설정 파일까지 지울지 따로 묻고, <code>.void</code> 프로젝트 파일은 건드리지 않습니다.</li>
   </ul>
 
   <h3>파일 위치</h3>
   <table>
     <tr><th>무엇</th><th>어디</th></tr>
-    <tr><td>프로그램, ffmpeg, 이 설명서</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
-    <tr><td>설정 (도구, 최근 색, 내보내기, 유리 효과)</td><td><code>%APPDATA%\DriftingVOID</code>의 <code>prefs.json</code>, <code>settings.json</code></td></tr>
+    <tr><td>프로그램, ffmpeg, 글꼴, 이 설명서</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
+    <tr><td>설정 (도구, 최근 색, 내보내기, 화면)</td><td><code>%APPDATA%\DriftingVOID</code>의 <code>prefs.json</code>, <code>settings.json</code></td></tr>
+    <tr><td>브라우저에서 끌어온 영상과 소리</td><td><code>%APPDATA%\DriftingVOID\drops</code></td></tr>
     <tr><td>오류 기록</td><td><code>%APPDATA%\DriftingVOID\crash.log</code></td></tr>
-    <tr><td>프로젝트</td><td>저장한 곳의 <code>.void</code> 파일. 원본 사진 파일과 그림, 영상 연결 정보를 한 파일에 담습니다.</td></tr>
+    <tr><td>프로젝트</td><td>저장한 곳의 <code>.void</code> 파일. 원본 사진과 그림을 한 파일에 담고, 영상과 소리는 원래 파일을 가리킵니다.</td></tr>
   </table>
   <div class="folio">3</div>
 </section>
 
 <!-- ============================================================ 2 tour -->
-<section class="page" id="c2" aria-labelledby="c2-h">
+<section class="page" id="ko-c2" aria-labelledby="ko-c2-h">
   <div class="running"><span>02</span><span>화면 둘러보기</span></div>
   <div class="chapter-no">02</div>
-  <h2 id="c2-h">화면 둘러보기</h2>
+  <h2 id="ko-c2-h">화면 둘러보기</h2>
   <p class="lede">가운데의 어두운 바탕이 끝없는 캔버스이고, 도구와 속성은 그 위에 떠 있는 유리 카드에 있습니다. 강조색(호박색)은 지금 켜진 것에만 씁니다.</p>
 
-  <figure class="bleed">
+  <figure class="bleed compact">
     <div class="callouts">
     <img src="img/overview.jpg" alt="사진 한 장이 열린 Drifting VOID 화면. 왼쪽에 도구 막대, 오른쪽에 속성 카드와 레이어 카드." width="1920" height="1080">
-    <span class="pin" style="left:6.5%;top:2.6%">1</span>
-    <span class="pin" style="left:1.6%;top:22%">2</span>
-    <span class="pin" style="left:1.6%;top:49.5%">3</span>
+    <span class="pin" style="left:16.8%;top:2.6%">1</span>
+    <span class="pin" style="left:5.2%;top:22%">2</span>
+    <span class="pin" style="left:5.2%;top:49.3%">3</span>
     <span class="pin" style="left:30%;top:55%">4</span>
-    <span class="pin" style="left:82%;top:16%">5</span>
-    <span class="pin" style="left:94.5%;top:8%">6</span>
-    <span class="pin" style="left:44.5%;top:97.5%">7</span>
+    <span class="pin" style="left:75.2%;top:9%">5</span>
+    <span class="pin" style="left:94%;top:13%">6</span>
+    <span class="pin" style="left:39.8%;top:97.5%">7</span>
     </div>
     <figcaption>사진(room)을 선택한 상태. 오른쪽 카드에 사진의 속성이 나옵니다.</figcaption>
   </figure>
   <ul class="legend">
-    <li><i>1</i><span><strong>메뉴</strong> 파일, 편집, 보기</span></li>
-    <li><i>2</i><span><strong>도구 막대</strong> 칸마다 단축키 한 글자 (4장 표)</span></li>
+    <li><i>1</i><span><strong>메뉴</strong> 파일, 편집, 설정</span></li>
+    <li><i>2</i><span><strong>도구 막대</strong> 칸마다 단축키 한 글자 (4장 표). 마우스를 올리면 옆에 쓰는 법이 뜹니다</span></li>
     <li><i>3</i><span><strong>현재 색</strong> 누르면 팔레트</span></li>
     <li><i>4</i><span><strong>캔버스</strong> 끝이 없고, 사진은 원본 해상도로 놓입니다</span></li>
     <li><i>5</i><span><strong>도구 · 선택한 항목</strong> 지금 도구의 설정과 고른 레이어의 속성</span></li>
-    <li><i>6</i><span><strong>레이어</strong> 끌어서 순서 바꾸기, 두 번 눌러 이름 바꾸기, 마스크 버튼</span></li>
-    <li><i>7</i><span><strong>상태 줄</strong> 배율, 좌표, 지금 할 수 있는 동작</span></li>
+    <li><i>6</i><span><strong>레이어</strong> 위로, 아래로, 복제, 삭제, FX 레이어 추가 단추. 끌어서 순서 바꾸기, 두 번 눌러 이름 바꾸기</span></li>
+    <li><i>7</i><span><strong>상태 줄</strong> 배율, 좌표, 방금 한 일</span></li>
   </ul>
 
   <h3>카드와 패널</h3>
-  <p>오른쪽은 창 가장자리부터 레이어, 도구의 주요 속성 순서로 놓입니다. 카드 제목(<span class="ui">▾ 도구</span>, <span class="ui">▾ 선택한 항목</span>)을 누르면 접힙니다. 마우스를 올리면 짧은 설명이 뜨는 칸이 많으니, 처음엔 천천히 훑어보세요.</p>
+  <p>카드 제목(<span class="ui">▾ 도구</span>, <span class="ui">▾ 선택한 항목</span>)을 누르면 접힙니다. 켜고 끄는 값은 스위치, 하나를 고르는 값은 나란히 붙은 단추입니다. 마우스를 올리면 짧은 설명이 뜨는 칸이 많으니, 처음엔 천천히 훑어보세요.</p>
 
-  <h3>테마와 유리 효과</h3>
+  <h3>설정 메뉴</h3>
   <div class="two">
-    <p><span class="ui">보기</span> 메뉴에서 밝게, 어둡게, 시스템 설정 따르기 중 하나를 고릅니다. 같은 메뉴에서 <span class="ui">유리 효과</span>(끄면 불투명 카드), <span class="ui">패널 그림자</span>, 유리 <span class="ui">가장자리</span>의 굴절 세기와 <span class="ui">테두리</span> 폭을 바꿀 수 있습니다. <kbd>Ctrl</kbd>+<kbd>H</kbd>는 모든 UI를 숨겼다가 다시 보여 줍니다.</p>
-    <figure style="margin-top:0"><img src="img/light.jpg" alt="밝은 테마의 같은 화면" width="1920" height="1080" loading="lazy"><figcaption>밝은 테마</figcaption></figure>
+    <div>
+      <ul>
+        <li><span class="ui">라이트</span> · <span class="ui">다크</span> · <span class="ui">시스템</span>: 화면 테마.</li>
+        <li><span class="ui">언어</span>: 한국어, English, 日本語.</li>
+        <li><span class="ui">UI 크기</span>: 90–150 %. <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd>/<kbd>−</kbd>/<kbd>0</kbd>.</li>
+        <li><span class="ui">유리 효과</span>(끄면 불투명 카드), <span class="ui">패널 그림자</span>, 유리의 <span class="ui">가장자리</span> 굴절 세기와 <span class="ui">테두리</span> 폭, 카드의 <span class="ui">모서리</span>와 <span class="ui">스무딩</span>.</li>
+        <li><span class="ui">손가락으로 그리기</span>, Tab <span class="ui">미리보기</span> 시간 (10장).</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>H</kbd>는 모든 UI를 숨겼다가 다시 보여 줍니다.</p>
+    </div>
+    <figure style="margin-top:0"><img src="img/light.jpg" alt="라이트 테마의 같은 화면" width="1920" height="1080" loading="lazy"><figcaption>라이트 테마</figcaption></figure>
   </div>
   <div class="folio">4</div>
 </section>
 
 <!-- ============================================================ 3 canvas -->
-<section class="page" id="c3" aria-labelledby="c3-h">
+<section class="page" id="ko-c3" aria-labelledby="ko-c3-h">
   <div class="running"><span>03</span><span>캔버스 다루기</span></div>
   <div class="chapter-no">03</div>
-  <h2 id="c3-h">캔버스 다루기</h2>
+  <h2 id="ko-c3-h">캔버스 다루기</h2>
   <p class="lede">마우스, 펜 태블릿, 터치를 모두 받습니다. 펜 태블릿의 필압은 Windows Ink로 읽습니다.</p>
 
   <h3>보기 이동과 확대</h3>
@@ -536,13 +604,16 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <tr><td>상태 줄의 배율</td><td>누르면 100 %, <span class="ui">−</span> <span class="ui">+</span>로 한 단계씩</td></tr>
     <tr><td>무엇이든 끄는 도중 <kbd>Space</kbd></td><td>끌던 것을 커서에 붙여 둔 채 화면만 이동</td></tr>
   </table>
-  <div class="note"><b class="tag">터치</b><br>손가락은 기본으로 화면 이동만 합니다. 손가락으로도 그리려면 도구 카드의 <span class="ui">손가락 터치로도 그리기</span>를 켭니다.</div>
+  <div class="note"><b class="tag">터치</b><br>손가락 하나는 화면 이동, 둘은 확대·축소입니다. 손가락으로도 그리려면 <span class="ui">설정</span> › <span class="ui">손가락으로 그리기</span>를 켭니다. 펜은 언제나 그립니다.</div>
 
   <h3>다이얼</h3>
-  <p>값 대부분은 눈금 링(다이얼)으로 바꿉니다. 링을 좌우로 끌면 값이 바뀌고, <kbd>Shift</kbd>를 누르면 미세 조정, 휠은 한 칸씩입니다. 기본값이 있는 값은 바뀌면 오른쪽에 <span class="ui">↺</span>이 생겨, 누르면 되돌아갑니다. 다이얼을 한 번 끌거나 휠을 연달아 돌린 것은 실행 취소 한 번으로 돌아갑니다.</p>
+  <p>값 대부분은 눈금 링(다이얼)으로 바꿉니다. 링을 좌우로 끌면 값이 바뀌고, <kbd>Shift</kbd>를 누르면 미세 조정, 휠은 한 칸씩입니다. 기본값이 있는 값은 바뀌면 <span class="ui">↺</span>이 생겨, 누르면 되돌아갑니다. 다이얼을 한 번 끌거나 휠을 연달아 돌린 것은 실행 취소 한 번으로 돌아갑니다.</p>
+
+  <h3>드롭다운</h3>
+  <p>클릭하면 목록이 열립니다. 닫힌 드롭다운 위에서 휠을 굴리면 앞뒤 항목으로 바로 바뀝니다. 누른 채 아래로 끌면 목록이 열리고, 원하는 항목에서 놓으면 그것이 골라집니다.</p>
 
   <h3>숫자 칸</h3>
-  <p>숫자 칸에는 계산식을 그대로 쓸 수 있습니다: <code>40*1.5</code>, <code>2^3+1</code>, 괄호도 됩니다. 칸을 비우고 <kbd>Enter</kbd>를 누르면 0입니다. 소수가 의미 있는 값은 둘째 자리까지 보여 줍니다.</p>
+  <p>숫자 칸에는 계산식을 그대로 쓸 수 있습니다: <code>40*1.5</code>, <code>2^3+1</code>, 괄호도 됩니다. 칸을 비우고 <kbd>Enter</kbd>를 누르면 0입니다.</p>
 
   <h3>실행 취소</h3>
   <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> 실행 취소, <kbd>Ctrl</kbd>+<kbd>Y</kbd> 다시 실행. 저장하지 않은 채 닫으려 하면 먼저 물어봅니다.</p>
@@ -550,10 +621,10 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
 </section>
 
 <!-- ============================================================ 4 drawing -->
-<section class="page" id="c4" aria-labelledby="c4-h">
+<section class="page" id="ko-c4" aria-labelledby="ko-c4-h">
   <div class="running"><span>04</span><span>그리기와 색</span></div>
   <div class="chapter-no">04</div>
-  <h2 id="c4-h">그리기와 색</h2>
+  <h2 id="ko-c4-h">그리기와 색</h2>
   <p class="lede">브러시는 픽셀(래스터)로, 펜은 벡터 획으로 그립니다. 처음 그릴 때 그리기 레이어가 생기고, 비면 저절로 없어집니다.</p>
 
   <h3>도구</h3>
@@ -567,7 +638,7 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <tr><td>글자</td><td><kbd>T</kbd></td><td>5장</td></tr>
     <tr><td>선 · 화살표 · 사각형 · 원</td><td><kbd>L</kbd> · <kbd>A</kbd> · <kbd>R</kbd> · <kbd>O</kbd></td><td>도형 레이어</td></tr>
     <tr><td>사진 자르기</td><td><kbd>C</kbd></td><td>5장</td></tr>
-    <tr><td>내보낼 영역 · 3D 공간</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>11장 · 8장</td></tr>
+    <tr><td>내보낼 영역 · 3D 공간</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>12장 · 9장</td></tr>
     <tr><td>스포이드</td><td><kbd>I</kbd></td><td>화면의 색을 집음</td></tr>
   </table>
 
@@ -583,26 +654,26 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
   <div class="side">
     <div>
       <p>캔버스 아무 데서나 <kbd>Alt</kbd>+클릭하면 OKHSV 팔레트가 열립니다. 사람 눈에 고르게 보이도록 맞춘 색 공간이라, 밝기를 바꿔도 색감이 덜 틀어집니다.</p>
-      <p><span class="ui">비슷한 색 지도</span>를 켜면 지금 색과 채도·밝기가 비슷한 영역을 전체 색 범위 안에서 보여 줍니다. 아래 줄은 최근에 쓴 색입니다. 여러 레이어를 고른 채 색을 고르면 모두에 적용됩니다.</p>
+      <p><span class="ui">비슷한 색 지도</span>를 켜면 지금 색과 밝기가 같은 색, 채도가 같은 색을 두 장의 지도로 보여 줍니다. 아래 줄은 자주 쓰는 색입니다. 색 칸마다 헥스 코드를 쓰거나 <span class="ui">복사</span>, <span class="ui">붙여넣기</span>할 수 있고, 여러 레이어를 고른 채 색을 고르면 모두에 적용됩니다.</p>
     </div>
-    <figure><img src="img/palette-card.jpg" alt="OKHSV 팔레트와 비슷한 색 지도 두 장" width="760" height="340" loading="lazy"><figcaption>팔레트와 비슷한 색 지도</figcaption></figure>
+    <figure><img src="img/palette-card.jpg" alt="OKHSV 팔레트와 비슷한 색 지도 두 장" width="780" height="360" loading="lazy"><figcaption>팔레트와 비슷한 색 지도</figcaption></figure>
   </div>
   <div class="folio">6</div>
 </section>
 
 <!-- ============================================================ 5 photos, text -->
-<section class="page" id="c5" aria-labelledby="c5-h">
+<section class="page" id="ko-c5" aria-labelledby="ko-c5-h">
   <div class="running"><span>05</span><span>사진, 글자, 도형</span></div>
   <div class="chapter-no">05</div>
-  <h2 id="c5-h">사진, 글자, 도형</h2>
+  <h2 id="ko-c5-h">사진, 글자, 도형</h2>
   <p class="lede">사진은 원본 해상도 그대로 들어오고, 크기를 줄여도 원본 픽셀은 남아 있습니다.</p>
 
   <h3>불러오기</h3>
   <ul>
-    <li>파일을 창에 끌어 놓기, <kbd>Ctrl</kbd>+<kbd>I</kbd>, 또는 <kbd>Ctrl</kbd>+<kbd>V</kbd>로 붙여 넣기. 글자를 붙여 넣으면 메모(글자 레이어)가 됩니다.</li>
-    <li>PNG, JPEG, WebP, BMP, TIFF, GIF. 움직이는 GIF는 반복 재생되는 투명 영상 레이어가 됩니다 (ffmpeg 필요).</li>
-    <li>영상(mp4, mov, mkv, webm 등)과 소리(mp3, wav 등)는 10장을 보세요.</li>
-    <li>사진은 그리기 레이어 아래에 놓입니다.</li>
+    <li>파일을 창에 끌어 놓기, <kbd>Ctrl</kbd>+<kbd>I</kbd>, 또는 <kbd>Ctrl</kbd>+<kbd>V</kbd>로 붙여 넣기. 글자를 붙여 넣으면 글자 레이어가 됩니다.</li>
+    <li><strong>브라우저에서 바로:</strong> 크롬이나 엣지의 이미지를 창으로 끌어 놓으면 사진으로 들어옵니다. 이미지 주소를 복사해 붙여 넣어도 사진이 됩니다. 이미지가 아닌 링크는 글자로 들어갑니다.</li>
+    <li>PNG, JPEG, WebP, BMP, TIFF, GIF, 휴대폰의 HEIC/HEIF. 움직이는 GIF는 반복 재생되는 투명 영상 레이어가 됩니다 (ffmpeg 필요).</li>
+    <li>영상(mp4, mov, mkv, webm 등)과 소리(mp3, wav 등)는 11장을 보세요.</li>
   </ul>
 
   <h3>사진 속성</h3>
@@ -611,27 +682,32 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <tr><td><span class="ui">자르기…</span> (<kbd>C</kbd>)</td><td>잘라도 원본은 남고, <span class="ui">자르기 해제</span>로 되돌립니다</td></tr>
     <tr><td><span class="ui">보정</span></td><td>밝기, 대비, 채도</td></tr>
     <tr><td><span class="ui">크로마 키</span></td><td>고른 색을 투명하게 (초록 배경 빼기)</td></tr>
-    <tr><td><span class="ui">혼합</span></td><td>블렌드 모드는 팔레트가 아니라 속성 카드에 있습니다</td></tr>
+    <tr><td><span class="ui">혼합</span></td><td>블렌드 모드</td></tr>
   </table>
 
   <h3>글자</h3>
-  <ul>
-    <li><kbd>T</kbd>로 캔버스를 누르고 입력합니다. 상자는 입력하는 대로 옆으로 늘어나고, <span class="ui">줄바꿈 폭</span>을 켜면 그 폭에서 줄을 바꿉니다.</li>
-    <li><span class="ui">글꼴</span>은 이 PC에 설치된 글꼴 전체에서 고릅니다. <span class="ui">스타일</span>, <span class="ui">정렬</span>, <span class="ui">배경 상자</span>, <span class="ui">색</span>도 같은 카드에 있습니다.</li>
-    <li>회전한 글자는 정렬 기준 쪽(왼쪽, 가운데, 오른쪽)을 붙박고 늘어납니다.</li>
-  </ul>
-  <div class="note"><b class="tag">글꼴</b><br>고른 글꼴에 없는 글자(예: Arial의 한글)는 대신 다른 글꼴로 그리지 않고 빈 네모(□)로 보입니다. 그 글꼴이 이 글에 맞지 않는다는 표시이니, 한글이 있는 글꼴을 골라 주세요.</div>
-
-  <h3>도형과 두께</h3>
-  <p>선, 화살표, 사각형, 원은 각각 레이어가 됩니다. 글자, 펜 획, 브러시 그림에는 <span class="ui">두께</span>를 줄 수 있고, 3D 공간 안에서 입체로 보입니다 (8장).</p>
+  <div class="side">
+    <div>
+      <ul>
+        <li><kbd>T</kbd>로 캔버스를 누르고 입력합니다. 상자는 입력하는 대로 늘어나고, <span class="ui">줄바꿈 폭</span>을 켜면 그 폭에서 줄을 바꿉니다.</li>
+        <li><span class="ui">글꼴</span>은 이 PC에 설치된 글꼴 전체에서 고릅니다.</li>
+        <li><span class="ui">배경 상자</span>를 켜면 <span class="ui">가로 여백</span>, <span class="ui">세로 여백</span>, <span class="ui">모서리</span>, <span class="ui">상자 테두리</span>와 그 굵기를 정합니다.</li>
+        <li><span class="ui">글자 외곽선</span>은 상자와 따로 켜고, 색과 굵기를 정합니다.</li>
+        <li>여백과 굵기는 글자 크기에 대한 %라서, 글자를 키워도 모양이 그대로입니다. 바꿔도 글자는 제자리에 있고 상자만 둘레로 커집니다.</li>
+        <li>새 글자는 마지막에 쓴 설정으로 시작합니다.</li>
+      </ul>
+    </div>
+    <figure><img src="img/text-card.jpg" alt="글자 도구 카드: 크기, 글꼴, 정렬, 배경 상자와 여백, 모서리, 상자 테두리, 글자 외곽선" width="340" height="510" loading="lazy"><figcaption>글자 도구 카드</figcaption></figure>
+  </div>
+  <div class="note"><b class="tag">글꼴</b><br>고른 글꼴에 없는 글자(예: Arial의 한글)는 다른 글꼴로 대신 그리지 않고 빈 네모(□)로 보입니다. 그 글꼴이 이 글에 맞지 않는다는 표시이니, 한글이 있는 글꼴을 골라 주세요.</div>
   <div class="folio">7</div>
 </section>
 
 <!-- ============================================================ 6 select -->
-<section class="page" id="c6" aria-labelledby="c6-h">
+<section class="page" id="ko-c6" aria-labelledby="ko-c6-h">
   <div class="running"><span>06</span><span>선택과 변형</span></div>
   <div class="chapter-no">06</div>
-  <h2 id="c6-h">선택과 변형</h2>
+  <h2 id="ko-c6-h">선택과 변형</h2>
   <p class="lede">레이어를 통째로 고르기도 하고, 펜 획 하나나 브러시 픽셀 일부만 골라 옮기기도 합니다.</p>
 
   <h3>선택 도구 <kbd>V</kbd></h3>
@@ -648,11 +724,11 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
   <ul>
     <li>여러 개를 고르면 손잡이가 하나로 묶여, 공통 중심을 기준으로 크기를 바꾸고 회전합니다.</li>
     <li>회전 중 <kbd>Shift</kbd>나 <kbd>Ctrl</kbd>: 처음 각도에서 15°씩. <kbd>Alt</kbd>: 0°에서부터 15°씩.</li>
-    <li>속성 카드에서 값이 서로 다른 칸은 <span class="ui">—</span>로 보입니다. 거기에 값을 넣으면 모두 그 값이 됩니다.</li>
+    <li>속성 카드에서 값이 서로 다른 칸은 <span class="ui">—</span>로 보입니다. 거기에 값을 넣으면 모두 그 값이 됩니다. 다른 칸을 바꾸면 바꾼 값만 모두에 들어갑니다.</li>
   </ul>
 
   <h3>키보드로 변형 <kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></h3>
-  <p>선택 도구에서 <kbd>G</kbd> 이동, <kbd>R</kbd> 회전, <kbd>S</kbd> 크기. 마우스를 움직여 정하고, 클릭이나 <kbd>Enter</kbd>로 확정, <kbd>Esc</kbd>나 오른쪽 클릭으로 취소합니다. 3D 공간 안의 레이어는 3D 방식으로 움직입니다 (9장).</p>
+  <p>선택 도구에서 <kbd>G</kbd> 이동, <kbd>R</kbd> 회전, <kbd>S</kbd> 크기. 마우스를 움직여 정하고, 클릭이나 <kbd>Enter</kbd>로 확정, <kbd>Esc</kbd>나 오른쪽 클릭으로 취소합니다. 3D 공간 안의 레이어는 3D 방식으로 움직입니다 (10장).</p>
 
   <h3>복제, 삭제, 비우기</h3>
   <table>
@@ -661,15 +737,15 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <tr><td><kbd>Delete</kbd></td><td>고른 브러시·펜 레이어와 마스크를 <strong>비우기</strong> (레이어는 남김)</td></tr>
     <tr><td>획이나 픽셀 일부를 고른 경우</td><td>두 키 모두 고른 부분만 지웁니다</td></tr>
   </table>
-  <p>레이어 카드의 <span class="ui">위로</span> <span class="ui">아래로</span>로 순서를, 눈 아이콘으로 보이기를 바꿉니다.</p>
+  <p>같은 명령이 <span class="ui">편집</span> 메뉴와 레이어 카드의 아이콘 단추에도 있습니다. 눈 아이콘으로 보이기를 바꿉니다.</p>
   <div class="folio">8</div>
 </section>
 
 <!-- ============================================================ 7 masks -->
-<section class="page" id="c7" aria-labelledby="c7-h">
+<section class="page" id="ko-c7" aria-labelledby="ko-c7-h">
   <div class="running"><span>07</span><span>마스크</span></div>
   <div class="chapter-no">07</div>
-  <h2 id="c7-h">마스크</h2>
+  <h2 id="ko-c7-h">마스크</h2>
   <p class="lede">레이어의 일부를 지우지 않고 가립니다. 고해상도 사진에서 물체를 깔끔하게 따내는 데 맞춰 만들었습니다.</p>
 
   <div class="side">
@@ -677,22 +753,23 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
       <h3>만들기와 칠하기</h3>
       <p>레이어 줄이나 속성 카드의 <span class="ui">마스크</span>를 누르면 그 레이어 밑에 마스크 레이어가 생깁니다. 마스크를 고른 채:</p>
       <ul>
-        <li>브러시, 펜, 사각형으로 칠한 곳이 가려집니다.</li>
+        <li>브러시, 펜, 사각형으로 칠한 곳이 가려집니다. 가려진 곳은 캔버스에 붉게 보입니다.</li>
         <li>지우개는 되살립니다. <kbd>Alt</kbd>를 누르고 사각형을 그려도 되살립니다.</li>
         <li><span class="ui">강도</span>, <span class="ui">반전</span>으로 가리는 정도를 바꿉니다.</li>
         <li><span class="ui">따라가기</span>: 마스크가 어느 레이어를 따라 움직일지 정합니다 (보통 그 사진).</li>
         <li><span class="ui">비우기</span> 또는 <kbd>Delete</kbd>: 마스크를 비웁니다.</li>
       </ul>
     </div>
-    <figure><img src="img/mask-panel.jpg" alt="마스크를 고른 상태의 속성 카드: 강도, 반전, 따라가기, 자동 선택, 그랩컷, 가위, 비우기" width="335" height="680" loading="lazy"><figcaption>마스크를 고른 속성 카드</figcaption></figure>
+    <figure><img src="img/mask-panel.jpg" alt="마스크를 고른 상태의 카드: 강도, 반전, 따라가기, 자동 선택, 그랩컷, 가위, 비우기, 허용 오차, 다듬기, 경계 이동" width="340" height="630" loading="lazy"><figcaption>마스크를 고른 카드</figcaption></figure>
   </div>
 
   <h3>자동으로 따내기</h3>
-  <p>세 가지 모드는 <strong>선택 도구(<kbd>V</kbd>, <kbd>Q</kbd>)에서만</strong> 동작합니다. 모드를 켜면 선택 도구로 바뀌고, 다른 도구를 고르면 그 도구 본래 동작을 합니다 (<kbd>B</kbd>로 메우기, <kbd>E</kbd>로 지우기). 모두 <kbd>Alt</kbd>를 누르면 반대로 되살립니다.</p>
+  <p>세 가지 모드는 <strong>선택 도구(<kbd>V</kbd>, <kbd>Q</kbd>)에서만</strong> 동작합니다. 모드를 켜면 선택 도구로 바뀌고, 다른 도구를 고르면 그 도구 본래 동작을 합니다. 모두 <kbd>Alt</kbd>를 누르면 반대로 되살립니다.</p>
   <table>
     <tr><td><span class="ui">자동 선택</span></td><td>클릭한 곳과 비슷한 면을 가립니다. <span class="ui">허용 오차</span>로 범위 조절</td></tr>
     <tr><td><span class="ui">그랩컷</span></td><td>상자로 끌면 상자 안에서 떨어져 보이는 물체를 가립니다</td></tr>
     <tr><td><span class="ui">가위</span></td><td>경계를 따라가며 윤곽을 그려 닫습니다 (아래)</td></tr>
+    <tr><td><span class="ui">다듬기</span> · <span class="ui">경계 이동</span></td><td>경계를 그림에 맞춰 부드럽게 (0: 딱 떨어지게) · +는 가리는 곳을 넓혀 틈을 메우고, −는 좁힙니다</td></tr>
   </table>
 
   <h3>가위</h3>
@@ -701,22 +778,53 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <li><strong>클릭 · 오른쪽 클릭</strong>: 그 자리에 앵커를 놓습니다. 근처의 가장 뚜렷한 경계로 붙습니다.</li>
     <li><strong>닫기</strong>: 첫 점을 누르거나 <kbd>Enter</kbd>. <kbd>Shift</kbd>를 누르고 닫으면 그랩컷으로 한 번 더 다듬습니다.</li>
     <li><kbd>Esc</kbd> 한 번은 그리던 윤곽 취소, 한 번 더 누르면 가위 모드를 끕니다.</li>
-    <li><span class="ui">가위 경계</span>: <span class="ui">선명</span>은 경계선에서 깔끔하게(서브픽셀) 자르고, <span class="ui">사진 흐림</span>은 사진 속 경계가 흐린 만큼 부드럽게 자릅니다.</li>
+    <li><span class="ui">가위 경계</span>: <span class="ui">선명</span>은 경계선에서 깔끔하게 자르고, <span class="ui">사진 흐림</span>은 사진 속 경계가 흐린 만큼 부드럽게 자릅니다.</li>
   </ul>
-  <div class="note"><b class="tag">사진 마스크</b><br>빈 마스크를 사진 위에서 처음 따내면 그 사진의 원본 픽셀 해상도로 만들어집니다. 그 뒤 사진을 옮기거나 돌리거나 줄여도 마스크가 다시 계산되지 않고 그대로 따라갑니다.</div>
+  <div class="note"><b class="tag">사진 마스크</b><br>빈 마스크를 사진 위에서 처음 따내면 그 사진의 원본 픽셀 해상도로 만들어집니다. 그 뒤 사진을 옮기거나 돌리거나 줄여도 마스크가 그대로 따라갑니다.</div>
   <div class="folio">9</div>
 </section>
 
-<!-- ============================================================ 8 spaces -->
-<section class="page" id="c8" aria-labelledby="c8-h">
-  <div class="running"><span>08</span><span>3D 공간</span></div>
+<!-- ============================================================ 8 FX -->
+<section class="page" id="ko-c8" aria-labelledby="ko-c8-h">
+  <div class="running"><span>08</span><span>FX 레이어</span></div>
   <div class="chapter-no">08</div>
-  <h2 id="c8-h">3D 공간</h2>
-  <p class="lede">사진 속 평행한 모서리를 몇 개 그으면 그 사진을 찍은 카메라를 찾아냅니다. 그 공간에 글자와 그림을 세우거나 눕혀, 사진 원근에 맞게 놓습니다.</p>
+  <h2 id="ko-c8-h">FX 레이어</h2>
+  <p class="lede">픽셀 대신 필터 하나를 담은 레이어입니다. 목록에서 자기 아래에 있는 레이어 전부에 필터를 걸고, 맨 위에 두면 모든 것에 겁니다. 원본은 바뀌지 않습니다.</p>
 
   <figure class="bleed">
-    <img src="img/space.jpg" alt="방 사진 위에 3D 공간을 맞춘 화면. 상자 모서리에 축별 소실선이 그어져 있고 두께를 준 파란 글자가 바닥과 벽에 놓여 있다." width="1920" height="1080" loading="lazy">
-    <figcaption>상자 모서리로 맞춘 공간에 두께를 준 글자 두 개. 오른쪽 카드에 초점거리, 시야각, 선 오차가 나옵니다.</figcaption>
+    <img src="img/fx.jpg" alt="맨 위의 FX 레이어가 비네트로 화면 가장자리를 어둡게 한 모습. 오른쪽 카드에 필터, 혼합, 양, 크기, 부드러움." width="1920" height="1080" loading="lazy">
+    <figcaption>맨 위의 FX 레이어(비네트)가 아래의 모든 레이어에 걸린 모습</figcaption>
+  </figure>
+
+  <h3>쓰는 법</h3>
+  <ol class="steps">
+    <li>레이어 카드의 반짝이 단추나 <span class="ui">편집</span> › <span class="ui">FX 레이어 추가</span>. 고른 레이어 위에 생깁니다.</li>
+    <li>카드의 <span class="ui">필터</span>에서 효과를 고르고 값을 다이얼로 정합니다. 값마다 타임라인 키를 넣을 수 있습니다.</li>
+    <li><span class="ui">혼합</span>은 처음에 <span class="ui">복사</span>(아래 그림을 필터 결과로 바꿈)입니다. 다른 모드로 섞을 수도 있습니다.</li>
+    <li>FX 레이어에도 마스크를 달아 일부에만 걸 수 있습니다. 레이어 순서를 바꾸면 걸리는 범위가 바뀝니다.</li>
+  </ol>
+
+  <h3>필터</h3>
+  <table>
+    <tr><th>종류</th><th>필터</th></tr>
+    <tr><td>흐림과 선명</td><td>가우시안 흐림, 동작 흐림, 언샤프 마스크</td></tr>
+    <tr><td>색</td><td>밝기/대비, 색조/채도/명도, 레벨, 커브, 흑백, 반전, 포스터화, 임계값, 그라디언트 맵</td></tr>
+    <tr><td>질감과 화면</td><td>노이즈, 비네트, 색수차, 픽셀화, 하프톤, 글로우</td></tr>
+  </table>
+  <p>노이즈, 픽셀화, 하프톤은 캔버스에 고정된 격자를 써서, 화면을 옮겨도 무늬가 따라 미끄러지지 않습니다. 비네트와 색수차는 내보낼 영역(없으면 전체 내용)을 기준으로 합니다.</p>
+  <div class="folio">10</div>
+</section>
+
+<!-- ============================================================ 9 spaces -->
+<section class="page" id="ko-c9" aria-labelledby="ko-c9-h">
+  <div class="running"><span>09</span><span>3D 공간</span></div>
+  <div class="chapter-no">09</div>
+  <h2 id="ko-c9-h">3D 공간</h2>
+  <p class="lede">사진 속 평행한 모서리를 몇 개 그으면 그 사진을 찍은 카메라를 찾아냅니다. 그 공간에 글자와 그림을 세우거나 눕혀, 사진 원근에 맞게 놓습니다.</p>
+
+  <figure class="bleed compact">
+    <img src="img/space.jpg" alt="방 사진 위에 3D 공간을 맞춘 화면. 상자 모서리에 축별 소실선이 그어져 있고 두께를 준 파란 글자가 바닥에 놓여 있다." width="1920" height="1080" loading="lazy">
+    <figcaption>상자 모서리로 맞춘 공간에 두께를 준 글자 두 개. 카드에 초점거리, 시야각, 선 오차가 나옵니다.</figcaption>
   </figure>
 
   <h3>공간 만들기 <kbd>K</kbd></h3>
@@ -727,35 +835,40 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <li>카메라는 그을 때마다 바로 다시 계산됩니다. 레이어를 레이어 카드의 공간 폴더로 끌어 넣으면, 보이는 모습 그대로 공간에 들어갑니다.</li>
   </ol>
 
+  <h3>선 찾기와 자동 선택</h3>
+  <div class="side">
+    <div>
+      <p><span class="ui">선 찾기</span>는 사진에서 곧은 모서리를 찾아 옅은 색 후보로 보여 줍니다. 후보를 누르면 지금 축의 선이 되고, 그대로 끌어 끝을 다듬을 수 있습니다. 후보는 축을 저절로 정하지 않습니다.</p>
+      <p><span class="ui">자동 선택</span>을 누르면 후보 가운데 서로 직각으로 맞는 세 방향을 골라, 축마다 몇 줄씩 넣어 줍니다. 결과가 이상하면 실행 취소하고 손으로 고르세요.</p>
+    </div>
+    <figure><img src="img/lines.jpg" alt="선 찾기로 상자와 바닥 모서리에 옅은 후보 선이 표시된 모습" width="1600" height="700" loading="lazy"><figcaption>선 찾기의 후보</figcaption></figure>
+  </div>
+
   <h3>공간 카드</h3>
   <table>
-    <tr><td><span class="ui">기준 길이</span> · <span class="ui">줄자</span></td><td>사진 속 한 길이를 실제 미터로 알려 주면 다른 길이를 잴 수 있습니다. 기준이 없으면 미터를 보여 주지 않습니다</td></tr>
+    <tr><td><span class="ui">기준 길이</span> · <span class="ui">줄자</span></td><td>사진 속 한 길이를 실제 미터로 알려 주면 다른 길이를 잴 수 있습니다</td></tr>
     <tr><td><span class="ui">+ 벽</span> · <span class="ui">+ 밑선 벽</span></td><td>벽을 만들고, 그 안의 레이어는 벽 기준으로 움직입니다</td></tr>
     <tr><td><span class="ui">마스크 그리기</span></td><td>공간이 보일 영역을 정합니다 (앞의 물체 뒤로 숨기기)</td></tr>
     <tr><td><span class="ui">조명</span></td><td>입체의 면에 빛과 그늘을 줍니다 (그림자는 없음)</td></tr>
-    <tr><td><span class="ui">주점도 추정</span></td><td>세 축 모두 두 줄 이상일 때, 잘린 사진의 중심 어긋남까지 추정</td></tr>
   </table>
 
-  <h3>두께와 음각</h3>
-  <p>글자, 펜 획, 브러시 그림의 <span class="ui">두께</span>를 올리면 입체가 됩니다. 0이 아닐 때 <span class="ui">세그먼트</span>(윤곽을 얼마나 잘게 나눌지)와 <span class="ui">스무스 셰이딩</span>이 나타납니다. 두께 아래의 <span class="ui">음각</span>을 켜면 레이어 모양대로 표면 안쪽으로 파 들어갑니다. 주변 표면은 그대로입니다.</p>
-  <p>공간 안의 레이어를 <kbd>Alt</kbd>를 누른 채 끌면 바닥에 붙어 미끄러집니다.</p>
-  <div class="folio">10</div>
+  <div class="folio">11</div>
 </section>
 
-<!-- ============================================================ 9 3D workspace -->
-<section class="page" id="c9" aria-labelledby="c9-h">
-  <div class="running"><span>09</span><span>3D 작업 공간</span></div>
-  <div class="chapter-no">09</div>
-  <h2 id="c9-h">3D 작업 공간</h2>
+<!-- ============================================================ 10 3D workspace -->
+<section class="page" id="ko-c10" aria-labelledby="ko-c10-h">
+  <div class="running"><span>10</span><span>3D 작업 공간</span></div>
+  <div class="chapter-no">10</div>
+  <h2 id="ko-c10-h">3D 작업 공간</h2>
   <p class="lede">공간을 옆이나 위에서 보며 레이어를 배치합니다. 키는 블렌더와 같습니다.</p>
 
   <figure class="bleed">
-    <img src="img/ws3d.jpg" alt="3D 작업 공간. 어두운 바탕에 격자와 축, 두께를 준 글자, 오른쪽의 카메라 표시, 왼쪽의 빛 나침반." width="1920" height="1080" loading="lazy">
-    <figcaption>위쪽 단추로 시점을, 왼쪽 나침반으로 빛 방향을 바꿉니다. 오른쪽 뿔 모양이 사진의 카메라입니다.</figcaption>
+    <img src="img/ws3d.jpg" alt="3D 작업 공간. 어두운 바탕에 축, 두께를 준 글자, 오른쪽의 카메라 표시, 왼쪽의 빛 나침반." width="1920" height="1080" loading="lazy">
+    <figcaption>위쪽 단추로 시점을, 왼쪽 나침반으로 빛 방향을 바꿉니다. 뿔 모양이 사진의 카메라입니다.</figcaption>
   </figure>
 
   <h3>오가기</h3>
-  <p><kbd>Tab</kbd>을 짧게 누르면 2D 캔버스와 3D 작업 공간을 오갑니다. <strong>누르고 있으면</strong> 바꾸지 않고 다른 쪽을 잠깐 미리 봅니다. 얼마나 눌러야 미리보기가 뜨는지는 <span class="ui">보기</span> › <span class="ui">미리보기</span>에서 정합니다.</p>
+  <p><kbd>Tab</kbd>을 짧게 누르면 2D 캔버스와 3D 작업 공간을 오갑니다. <strong>누르고 있으면</strong> 바꾸지 않고 다른 쪽을 잠깐 미리 봅니다. 얼마나 눌러야 미리보기가 뜨는지는 <span class="ui">설정</span> › <span class="ui">미리보기</span>에서 정합니다.</p>
 
   <div class="two">
     <div>
@@ -782,87 +895,92 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
       </table>
     </div>
   </div>
-  <p>속성 카드의 <span class="ui">바닥에 세우기</span>, <span class="ui">바닥에 눕히기</span>는 고른 레이어를 바닥 위에 바로 세우거나 눕힙니다. 0 높이(격자)는 바닥이 아니라 카메라 눈높이입니다.</p>
-  <div class="folio">11</div>
+  <p>카드의 <span class="ui">바닥에 세우기</span>, <span class="ui">바닥에 눕히기</span>는 고른 레이어를 바닥 위에 바로 세우거나 눕힙니다. 0 높이(격자)는 바닥이 아니라 카메라 눈높이입니다.</p>
+  
+  <h3>두께와 음각</h3>
+  <p>글자, 펜 획, 브러시 그림의 <span class="ui">두께</span>를 올리면 입체가 됩니다. <span class="ui">세그먼트</span>와 <span class="ui">스무스 셰이딩</span>으로 옆면을 다듬고, <span class="ui">음각</span>을 켜면 표면 안쪽으로 파 들어갑니다. 공간 안의 레이어를 <kbd>Alt</kbd>를 누른 채 끌면 바닥에 붙어 미끄러집니다.</p>
+  <div class="folio">12</div>
 </section>
 
-<!-- ============================================================ 10 timeline -->
-<section class="page" id="c10" aria-labelledby="c10-h">
-  <div class="running"><span>10</span><span>타임라인, 영상, 소리</span></div>
-  <div class="chapter-no">10</div>
-  <h2 id="c10-h">타임라인, 영상, 소리</h2>
+<!-- ============================================================ 11 timeline -->
+<section class="page" id="ko-c11" aria-labelledby="ko-c11-h">
+  <div class="running"><span>11</span><span>타임라인, 영상, 소리</span></div>
+  <div class="chapter-no">11</div>
+  <h2 id="ko-c11-h">타임라인, 영상, 소리</h2>
   <p class="lede">캔버스를 그대로 움직이는 그림으로 만듭니다. 영상과 소리 기능에는 ffmpeg가 필요합니다.</p>
 
   <figure class="bleed">
-    <img src="img/timeline-bar.jpg" alt="타임라인 막대: 재생, 처음, 시간, fps, 길이, 자동 키, 녹화, 키 넣기, 키 지우기, 영상 내보내기, 그리고 카메라 트랙" width="2440" height="115" loading="lazy">
-    <figcaption>타임라인 (<kbd>Ctrl</kbd>+<kbd>T</kbd>)</figcaption>
+    <img src="img/timeline-bar.jpg" alt="타임라인: 재생, 처음, 시간, fps, 길이, 자동 키, 녹화, 키 넣기, 키 지우기, 영상 내보내기, 그리고 카메라의 위치, 크기, 회전, 따라가기 줄" width="2480" height="220" loading="lazy">
+    <figcaption>타임라인 (<kbd>Ctrl</kbd>+<kbd>T</kbd>). 카메라 아래에 키가 있는 값마다 한 줄씩.</figcaption>
   </figure>
 
   <h3>키 애니메이션</h3>
   <ul>
     <li><kbd>Alt</kbd>+<kbd>A</kbd> 재생·정지, <kbd>,</kbd> <kbd>.</kbd> 한 프레임씩.</li>
-    <li><kbd>I</kbd>는 고른 것의 지금 값을 키로 넣고, <kbd>Alt</kbd>+<kbd>I</kbd>는 뺍니다. 속성 줄마다 이름과 다이얼 사이에 키 단추가 있어, 값 하나씩 따로 키를 넣을 수 있습니다. 키가 있는 값 옆의 <span class="ui">&lt;</span> <span class="ui">&gt;</span>로 앞뒤 키로 건너뜁니다.</li>
-    <li><span class="ui">자동 키</span>를 켜면 값을 바꿀 때마다 키가 들어갑니다.</li>
-    <li>키는 끌어서 옮기고, <kbd>Shift</kbd>+끌기로 여러 개를 고릅니다. 재생 헤드를 <kbd>Shift</kbd>를 누른 채 끌면 가까운 키에 붙습니다. 키 모양은 보간 방식을 나타냅니다.</li>
-    <li>트랙을 오른쪽 클릭하면 레이어가 나타나고 사라질 시점을 정합니다.</li>
+    <li><kbd>I</kbd>는 고른 것의 지금 값을 키로 넣고, <kbd>Alt</kbd>+<kbd>I</kbd>는 재생 헤드 자리의 키를 모두 뺍니다. 속성 줄마다 키 단추가 있어 값 하나씩 따로 키를 넣을 수 있고, <span class="ui">&lt;</span> <span class="ui">&gt;</span>로 앞뒤 키로 건너뜁니다.</li>
+    <li>레이어마다 이름 줄 아래에 키가 있는 값(위치, 크기, 회전, 불투명도, 3D 위치, 두께, 볼륨, FX 값 등)이 한 줄씩 나옵니다. 키는 자기 줄에서만 고르고, 옮기고, 지웁니다.</li>
+    <li><span class="ui">자동 키</span>를 켜면 바꾼 값에만 키가 들어갑니다.</li>
+    <li>키는 끌어서 옮기고, <kbd>Shift</kbd>+끌기로 여러 개를 고릅니다. 재생 헤드를 <kbd>Shift</kbd>를 누른 채 끌면 가까운 키에 붙습니다. 키 모양은 보간 방식(부드럽게, 직선, 멈춤)을 나타냅니다.</li>
+    <li>이름 줄을 오른쪽 클릭하면 레이어가 나타나고 사라질 시점을 정합니다.</li>
   </ul>
 
   <h3>카메라와 녹화</h3>
   <ul>
     <li><kbd>F</kbd> 도구에서 캔버스 카메라를 만들고, 위치와 크기에 키를 넣어 화면이 움직이게 합니다.</li>
     <li><span class="ui">● 녹화</span>를 켜고 그리면 펜과 브러시 획이 그린 순서와 속도 그대로 재생됩니다.</li>
-    <li>재생할 때는 미리 그린 프레임을 메모리에 모아 두어(재생 캐시), 무거운 장면도 부드럽게 돕니다. 카메라나 내보낼 영역을 2초쯤 그대로 두면 미리 채우기 시작합니다.</li>
+    <li>재생할 때는 미리 그린 프레임을 메모리에 모아 두어(재생 캐시), 무거운 장면도 부드럽게 돕니다.</li>
   </ul>
 
   <h3>영상과 소리 레이어</h3>
   <ul>
-    <li>영상을 끌어 놓으면 한 프레임을 보여 주는 레이어가 되고, 타임라인에서는 클립이 됩니다. 클립을 옮기거나 앞뒤를 자를 수 있고, 클립 밖에서는 첫 프레임이나 마지막 프레임에 멈춰 있습니다.</li>
+    <li>영상을 끌어 놓으면 타임라인에서 클립이 됩니다. 옮기거나 앞뒤를 자를 수 있고, 클립 밖에서는 첫 프레임이나 마지막 프레임에 멈춰 있습니다.</li>
     <li>속성 카드에서 지금 프레임을 사진 레이어로 바꿀 수 있습니다.</li>
-    <li>소리 파일은 캔버스에 스피커 표시로 놓이고, 타임라인에서 옮기고 자를 수 있습니다. 음량에도 키를 넣을 수 있습니다. 영상 속 소리도 함께 재생됩니다.</li>
+    <li>소리 파일은 캔버스에 스피커 표시로 놓이고, 타임라인에서 옮기고 자를 수 있습니다. 음량에도 키를 넣을 수 있습니다.</li>
   </ul>
-  <div class="folio">12</div>
+  <div class="folio">13</div>
 </section>
 
-<!-- ============================================================ 11 export -->
-<section class="page" id="c11" aria-labelledby="c11-h">
-  <div class="running"><span>11</span><span>내보내기</span></div>
-  <div class="chapter-no">11</div>
-  <h2 id="c11-h">내보내기</h2>
+<!-- ============================================================ 12 export -->
+<section class="page" id="ko-c12" aria-labelledby="ko-c12-h">
+  <div class="running"><span>12</span><span>내보내기와 저장</span></div>
+  <div class="chapter-no">12</div>
+  <h2 id="ko-c12-h">내보내기와 저장</h2>
   <p class="lede">캔버스 전체가 아니라 원하는 부분만, 원하는 크기로 내보냅니다. 내보내기는 화면과 같은 GPU 렌더러로 그립니다.</p>
 
   <h3>영역 정하기 <kbd>F</kbd></h3>
-  <p><span class="ui">내보낼 영역</span> 도구로 사각형을 그립니다. 무언가를 고른 채 쓰면 그것에 딱 맞게 잡히고, 여백은 내보내기 창에서 따로 줍니다.</p>
+  <p><span class="ui">내보낼 영역</span> 도구로 사각형을 그립니다. 무언가를 고른 채 쓰면 그것에 딱 맞게 잡힙니다.</p>
 
   <h3>이미지 <kbd>Ctrl</kbd>+<kbd>E</kbd></h3>
-  <p>PNG나 JPEG로 내보냅니다. <span class="ui">여백</span>은 영역 바깥에 둘 거리입니다. <span class="ui">슈퍼샘플링</span>을 올리면 2–4배 크기로 그린 뒤 줄여 가장자리가 더 매끈해집니다. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>는 영역을 바로 클립보드로 복사합니다.</p>
+  <p>PNG나 JPEG로 내보냅니다. <span class="ui">여백</span>은 영역 바깥에 둘 거리이고, <span class="ui">슈퍼샘플링</span>을 올리면 크게 그린 뒤 줄여 가장자리가 더 매끈해집니다. 배경은 투명, 흰색, 고른 색 중에서 정합니다. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>는 영역을 바로 클립보드로 복사합니다.</p>
 
   <h3>영상 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></h3>
   <div class="side">
     <div>
       <table>
-        <tr><td><span class="ui">영역</span></td><td>카메라, 내보낼 영역, 내용 전체, 지금 화면</td></tr>
+        <tr><td><span class="ui">영역</span></td><td>내보낼 영역이나 카메라, 내용 전체, 지금 화면</td></tr>
         <tr><td><span class="ui">크기</span></td><td>가로 또는 세로 기준. 처음엔 영역의 실제 픽셀 크기</td></tr>
         <tr><td><span class="ui">형식</span></td><td>H.264, H.265, AV1, ProRes 4444(투명), VP9(투명), GIF, PNG 프레임</td></tr>
-        <tr><td><span class="ui">품질</span> · <span class="ui">비트레이트</span></td><td>품질 값은 낮을수록 고화질</td></tr>
+        <tr><td><span class="ui">화질 기준</span></td><td>품질 값(낮을수록 고화질) 또는 비트레이트</td></tr>
         <tr><td><span class="ui">GPU 인코딩</span></td><td>NVIDIA 그래픽카드면 기본으로 켜집니다 (NVENC)</td></tr>
+        <tr><td>슈퍼샘플링 · <span class="ui">배경</span></td><td>1–4배 · 투명, 흰색, 색</td></tr>
         <tr><td><span class="ui">소리 포함</span></td><td>타임라인의 소리와 영상 소리를 섞어 넣습니다</td></tr>
       </table>
       <p>진행 상황이 창에 나오고, 언제든 취소할 수 있습니다.</p>
     </div>
-    <figure><img src="img/vexport-card.jpg" alt="영상 내보내기 창: 영역, 크기, fps, 형식, 품질, GPU 인코딩, 슈퍼샘플링, 배경, 소리 포함" width="465" height="530" loading="lazy"><figcaption>영상 내보내기 창</figcaption></figure>
+    <figure><img src="img/vexport-card.jpg" alt="영상 내보내기 창: 영역, 크기, fps, 형식, 화질 기준, 품질, GPU 인코딩, 샘플, 배경, 소리 포함" width="360" height="500" loading="lazy"><figcaption>영상 내보내기 창</figcaption></figure>
   </div>
 
   <h3>저장</h3>
   <p><kbd>Ctrl</kbd>+<kbd>S</kbd> 저장, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> 다른 이름으로 저장, <kbd>Ctrl</kbd>+<kbd>O</kbd> 열기, <kbd>Ctrl</kbd>+<kbd>N</kbd> 새로 만들기. <code>.void</code> 파일을 더블 클릭해도 열립니다.</p>
-  <div class="note"><b class="tag">영상 파일</b><br>영상은 <code>.void</code>에 복사되지 않고 원래 파일을 가리킵니다. 프로젝트를 다른 PC로 옮길 때는 영상 파일도 함께 옮겨 주세요.</div>
-  <div class="folio">13</div>
+  <div class="note"><b class="tag">영상과 소리 파일</b><br>사진은 <code>.void</code> 안에 함께 저장되지만, 영상과 소리는 원래 파일을 가리킵니다. 프로젝트를 다른 PC로 옮길 때는 영상과 소리 파일도 함께 옮겨 주세요.</div>
+  <div class="folio">14</div>
 </section>
 
-<!-- ============================================================ 12 keys -->
-<section class="page" id="keys" aria-labelledby="keys-h">
-  <div class="running"><span>12</span><span>단축키 모음</span></div>
-  <div class="chapter-no">12</div>
-  <h2 id="keys-h">단축키 모음</h2>
+<!-- ============================================================ 13 keys -->
+<section class="page" id="ko-keys" aria-labelledby="ko-keys-h">
+  <div class="running"><span>13</span><span>단축키 모음</span></div>
+  <div class="chapter-no">13</div>
+  <h2 id="ko-keys-h">단축키 모음</h2>
   <div class="two">
     <div>
       <h4>도구</h4>
@@ -885,7 +1003,7 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
       <h4>편집</h4>
       <table>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Y</kbd></td><td>실행 취소 · 다시 실행</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>붙여넣기 · 복제</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>붙여넣기(그림, 글자, 이미지 링크) · 복제</td></tr>
         <tr><td><kbd>Backspace</kbd> · <kbd>Delete</kbd></td><td>삭제 · 비우기</td></tr>
         <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>이동 · 회전 · 크기</td></tr>
         <tr><td><kbd>Esc</kbd></td><td>취소 (가위: 두 번이면 모드 끄기)</td></tr>
@@ -897,6 +1015,7 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
         <tr><td>휠 · 가운데 끌기</td><td>확대 · 이동</td></tr>
         <tr><td><kbd>Space</kbd>+끌기</td><td>이동 (끄는 중에도)</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>1</kbd></td><td>전체 보기 · 100 %</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>UI 크기</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>UI 숨기기</td></tr>
         <tr><td><kbd>Tab</kbd></td><td>2D ↔ 3D · 누르고 있으면 미리보기</td></tr>
       </table>
@@ -921,17 +1040,17 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
       </table>
     </div>
   </div>
-  <div class="folio">14</div>
+  <div class="folio">15</div>
 </section>
 
-<!-- ============================================================ 13 beta -->
-<section class="page" id="c13" aria-labelledby="c13-h">
-  <div class="running"><span>13</span><span>베타 테스트 안내</span></div>
-  <div class="chapter-no">13</div>
-  <h2 id="c13-h">베타 테스트 안내</h2>
-  <p class="lede">테스트에 참여해 주셔서 고맙습니다. 아직 다듬는 중인 프로그램이니, 이상한 점은 사소해 보여도 알려 주세요.</p>
+<!-- ============================================================ 14 help -->
+<section class="page" id="ko-c14" aria-labelledby="ko-c14-h">
+  <div class="running"><span>14</span><span>도움말과 라이선스</span></div>
+  <div class="chapter-no">14</div>
+  <h2 id="ko-c14-h">도움말과 라이선스</h2>
+  <p class="lede">이상한 점이 있으면 사소해 보여도 알려 주세요. 아래 내용을 함께 보내 주시면 빨리 고칠 수 있습니다.</p>
 
-  <h3>알려 줄 때 함께 보내 주세요</h3>
+  <h3>문제를 알릴 때</h3>
   <ul>
     <li>무엇을 하다가 어떻게 됐는지, 다시 해도 그런지.</li>
     <li>프로그램이 갑자기 꺼졌다면 <code>%APPDATA%\DriftingVOID\crash.log</code> 파일.</li>
@@ -945,21 +1064,1309 @@ ol.toc .p { font-family: var(--font-mono); font-size: 13px; color: var(--ink-3);
     <li>코드 서명이 없어 처음 실행할 때 Windows 보호 창이 뜹니다.</li>
     <li>글꼴에 없는 글자는 다른 글꼴로 대신 그리지 않고 빈 네모로 보입니다 (의도한 동작).</li>
     <li>아주 큰 녹화 펜 레이어는 불러올 때 잠시 느릴 수 있습니다.</li>
-    <li>화면 글은 아직 한국어뿐입니다. 영어와 일본어는 UI 정리 뒤에 넣을 예정입니다.</li>
     <li>재생 캐시는 메모리를 많이 쓸 수 있습니다 (최대 물리 메모리의 75 %).</li>
   </ul>
 
   <h3>ffmpeg와 라이선스</h3>
   <p>Drifting VOID는 영상 처리에 <a href="https://ffmpeg.org">FFmpeg</a>를 별도 프로그램으로 실행합니다. ffmpeg는 이 배포 파일에 들어 있지 않습니다. 설치 과정에서 <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a>의 공개 빌드(GPL)를 받아 설치 폴더의 <code>ffmpeg</code> 폴더에 두며, 그 폴더의 <code>LICENSE.txt</code>에 라이선스 전문이, <code>SOURCE.txt</code>에 받은 파일 이름, 체크섬, 출처가 있습니다.</p>
-  <p>화면 글꼴은 Pretendard 등 설치된 글꼴을 먼저 찾고, 없으면 맑은 고딕을 씁니다.</p>
+  <p>일본어 화면 글꼴 Pretendard JP는 SIL Open Font License 1.1로 함께 배포되며, 설치 폴더의 <code>fonts</code>에 라이선스가 있습니다. 한국어와 영어 화면은 Pretendard 등 설치된 글꼴을 먼저 찾고, 없으면 맑은 고딕을 씁니다.</p>
 
-  <div class="note"><b class="tag">이 설명서</b><br>오른쪽 위의 <span class="ui">인쇄</span>로 A4 책자로 인쇄하거나 PDF로 저장할 수 있습니다. 화면에서는 시스템 테마를 따르고, 반원 단추로 밝게·어둡게를 바꿉니다.</div>
-  <div class="folio">15</div>
+  <div class="note"><b class="tag">이 설명서</b><br>오른쪽 위에서 언어를 바꾸고, <span class="ui">인쇄</span>로 A4 책자로 인쇄하거나 PDF로 저장할 수 있습니다. 처음에는 브라우저 언어를 따릅니다. 화면에서는 시스템 테마를 따르고, 반원 단추로 밝게·어둡게를 바꿉니다.</div>
+  <div class="folio">16</div>
 </section>
 
 </main>
 
+<main class="book" lang="en">
+
+<!-- ============================================================ cover -->
+<section class="page cover" aria-label="Cover">
+  <div class="top"><span>User manual</span><span>Windows</span></div>
+  <div class="mid">
+    <img class="mark" src="img/icon.png" alt="" width="112" height="112">
+    <h1>Drifting<span>VOID</span></h1>
+    <p class="sub">Photos, drawings, text and video on an endless canvas.</p>
+  </div>
+  <div class="bottom">
+    <span>Version <strong>{VERSION}</strong> · Windows 10/11 · pen tablet recommended</span>
+    <span>November 2026</span>
+  </div>
+</section>
+
+<!-- ============================================================ contents -->
+<section class="page" id="en-toc" aria-labelledby="en-toc-h">
+  <div class="running"><span>Drifting VOID</span><span>Contents</span></div>
+  <h2 id="en-toc-h">Contents</h2>
+  <p class="lede">New to the app? Read chapters 1 and 2 first and look up the rest when you need it. The shortcuts fit on one page, chapter 13.</p>
+  <ol class="toc">
+    <li><a href="#en-c1"><span class="n">01</span><span class="t">Installing and first start<span class="d">Setup, ffmpeg, removing, where files are</span></span><span class="p">3</span></a></li>
+    <li><a href="#en-c2"><span class="n">02</span><span class="t">A tour of the screen<span class="d">Menus, tools, cards, layers, the Settings menu</span></span><span class="p">4</span></a></li>
+    <li><a href="#en-c3"><span class="n">03</span><span class="t">Working the canvas<span class="d">Pan, zoom, dials, drop-downs, number boxes</span></span><span class="p">5</span></a></li>
+    <li><a href="#en-c4"><span class="n">04</span><span class="t">Drawing and colour<span class="d">Brush, pen, eraser, pressure, smoothing, palette</span></span><span class="p">6</span></a></li>
+    <li><a href="#en-c5"><span class="n">05</span><span class="t">Photos, text and shapes<span class="d">Importing, dragging from a browser, text boxes and outlines</span></span><span class="p">7</span></a></li>
+    <li><a href="#en-c6"><span class="n">06</span><span class="t">Selecting and transforming<span class="d">Select, lasso, group transform, G/R/S</span></span><span class="p">8</span></a></li>
+    <li><a href="#en-c7"><span class="n">07</span><span class="t">Masks<span class="d">Paint to hide, auto select, GrabCut, scissors</span></span><span class="p">9</span></a></li>
+    <li><a href="#en-c8"><span class="n">08</span><span class="t">FX layers<span class="d">Eighteen filters for the layers below</span></span><span class="p">10</span></a></li>
+    <li><a href="#en-c9"><span class="n">09</span><span class="t">3D spaces<span class="d">Vanishing lines, finding lines, walls, depth, engraving</span></span><span class="p">11</span></a></li>
+    <li><a href="#en-c10"><span class="n">10</span><span class="t">The 3D workspace<span class="d">Tab, orbit, views, Blender-style G/R/S</span></span><span class="p">12</span></a></li>
+    <li><a href="#en-c11"><span class="n">11</span><span class="t">Timeline, video and sound<span class="d">Keys per value, cameras, recording, video layers</span></span><span class="p">13</span></a></li>
+    <li><a href="#en-c12"><span class="n">12</span><span class="t">Exporting and saving<span class="d">Images, video, clipboard, .void</span></span><span class="p">14</span></a></li>
+    <li><a href="#en-keys"><span class="n">13</span><span class="t">Shortcuts<span class="d">A one-page reference card</span></span><span class="p">15</span></a></li>
+    <li><a href="#en-c14"><span class="n">14</span><span class="t">Help and licences<span class="d">Known limits, reporting a problem, ffmpeg, fonts</span></span><span class="p">16</span></a></li>
+  </ol>
+  <div class="folio">2</div>
+</section>
+
+<!-- ============================================================ 1 install -->
+<section class="page" id="en-c1" aria-labelledby="en-c1-h">
+  <div class="running"><span>01</span><span>Installing and first start</span></div>
+  <div class="chapter-no">01</div>
+  <h2 id="en-c1-h">Installing and first start</h2>
+  <p class="lede">Drifting VOID installs for your account only, without administrator rights. Setup fetches ffmpeg, which video and sound need, from GitHub.</p>
+
+  <h3>Setup</h3>
+  <ol class="steps">
+    <li><strong>Extract the whole zip</strong> first. Run from inside the zip, setup cannot find its files.</li>
+    <li>Double-click <strong>Setup.cmd</strong>. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
+    <li>Setup runs three steps: copying the program, ffmpeg, then shortcuts and the <code>.void</code> file type. When it asks about a desktop shortcut and starting the app, <kbd>Enter</kbd> takes the default (yes).</li>
+  </ol>
+  <p>On its first start the app follows the Windows display language (Korean, English or Japanese). Change it any time in <span class="ui">Settings</span> › <span class="ui">Language</span>.</p>
+
+  <h3>ffmpeg</h3>
+  <p>Opening and playing video, sound and video export run ffmpeg from the FFmpeg project alongside the app. Photos, drawing, text, 3D spaces and image export work without it.</p>
+  <ul>
+    <li>An ffmpeg already on your PC is used (on PATH, or installed with <code>winget install Gyan.FFmpeg</code>).</li>
+    <li>Otherwise setup asks to download one: the newest release build from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> on GitHub (about 80 MB), checked against its SHA-256 checksum and kept only in the install folder's <code>ffmpeg</code> folder.</li>
+    <li>If the download fails, setup still finishes; run Setup.cmd again later to retry that step. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
+  </ul>
+
+  <h3>Updating and removing</h3>
+  <ul>
+    <li><strong>Updating:</strong> run Setup.cmd from the new zip; it installs over the old version. Settings and projects stay.</li>
+    <li><strong>Removing:</strong> Windows Settings › Apps › Installed apps › Drifting VOID › Uninstall. It asks before deleting settings and never touches <code>.void</code> projects.</li>
+  </ul>
+
+  <h3>Where files are</h3>
+  <table>
+    <tr><th>What</th><th>Where</th></tr>
+    <tr><td>Program, ffmpeg, fonts, this manual</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
+    <tr><td>Settings (tools, recent colours, export, display)</td><td><code>prefs.json</code> and <code>settings.json</code> in <code>%APPDATA%\DriftingVOID</code></td></tr>
+    <tr><td>Video and sound dragged in from a browser</td><td><code>%APPDATA%\DriftingVOID\drops</code></td></tr>
+    <tr><td>Crash log</td><td><code>%APPDATA%\DriftingVOID\crash.log</code></td></tr>
+    <tr><td>Projects</td><td><code>.void</code> files wherever you save them. Photos and drawings are stored inside; video and sound are linked to their files.</td></tr>
+  </table>
+  <div class="folio">3</div>
+</section>
+
+<!-- ============================================================ 2 tour -->
+<section class="page" id="en-c2" aria-labelledby="en-c2-h">
+  <div class="running"><span>02</span><span>A tour of the screen</span></div>
+  <div class="chapter-no">02</div>
+  <h2 id="en-c2-h">A tour of the screen</h2>
+  <p class="lede">The dark ground in the middle is the endless canvas; tools and properties live on glass cards floating over it. The amber accent marks only what is on.</p>
+
+  <figure class="bleed compact">
+    <div class="callouts">
+    <img src="img/overview.jpg" alt="Drifting VOID with one photo open: the tool rail on the left, the property card and layer card on the right." width="1920" height="1080">
+    <span class="pin" style="left:16.8%;top:2.6%">1</span>
+    <span class="pin" style="left:5.2%;top:22%">2</span>
+    <span class="pin" style="left:5.2%;top:49.3%">3</span>
+    <span class="pin" style="left:30%;top:55%">4</span>
+    <span class="pin" style="left:75.2%;top:9%">5</span>
+    <span class="pin" style="left:94%;top:13%">6</span>
+    <span class="pin" style="left:39.8%;top:97.5%">7</span>
+    </div>
+    <figcaption>The photo “room” selected; the card on the right shows its properties.</figcaption>
+  </figure>
+  <ul class="legend">
+    <li><i>1</i><span><strong>Menus</strong> File, Edit, Settings</span></li>
+    <li><i>2</i><span><strong>Tool rail</strong> one key per tool (table in chapter 4); hover for how to use it</span></li>
+    <li><i>3</i><span><strong>Current colour</strong> click for the palette</span></li>
+    <li><i>4</i><span><strong>Canvas</strong> endless; photos keep their full resolution</span></li>
+    <li><i>5</i><span><strong>Tool · Selection</strong> the tool's settings and the selected layer's properties</span></li>
+    <li><i>6</i><span><strong>Layers</strong> buttons for up, down, duplicate, delete and add FX layer; drag to reorder, double-click to rename</span></li>
+    <li><i>7</i><span><strong>Status bar</strong> zoom, position, what just happened</span></li>
+  </ul>
+
+  <h3>Cards and panels</h3>
+  <p>Click a card title (<span class="ui">▾ Tool</span>, <span class="ui">▾ Selection</span>) to fold it. On/off values are switches; pick-one values are joined buttons. Many fields show a short tip on hover, so take a slow first look round.</p>
+
+  <h3>The Settings menu</h3>
+  <div class="two">
+    <div>
+      <ul>
+        <li><span class="ui">Light</span> · <span class="ui">Dark</span> · <span class="ui">System</span>: the theme.</li>
+        <li><span class="ui">Language</span>: 한국어, English, 日本語.</li>
+        <li><span class="ui">UI size</span>: 90–150 %; <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd>/<kbd>−</kbd>/<kbd>0</kbd>.</li>
+        <li><span class="ui">Glass</span> (off: solid cards), <span class="ui">Panel shadows</span>, the glass <span class="ui">Edge</span> refraction and <span class="ui">Rim</span> width, the cards' <span class="ui">Radius</span> and <span class="ui">Smooth</span>.</li>
+        <li><span class="ui">Draw with fingers</span>, and the Tab <span class="ui">Peek</span> delay (chapter 10).</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>H</kbd> hides the whole UI and brings it back.</p>
+    </div>
+    <figure style="margin-top:0"><img src="img/light.jpg" alt="The same screen in the light theme" width="1920" height="1080" loading="lazy"><figcaption>Light theme</figcaption></figure>
+  </div>
+  <div class="folio">4</div>
+</section>
+
+<!-- ============================================================ 3 canvas -->
+<section class="page" id="en-c3" aria-labelledby="en-c3-h">
+  <div class="running"><span>03</span><span>Working the canvas</span></div>
+  <div class="chapter-no">03</div>
+  <h2 id="en-c3-h">Working the canvas</h2>
+  <p class="lede">Mouse, pen tablet and touch all work. Pen pressure is read through Windows Ink.</p>
+
+  <h3>Panning and zooming</h3>
+  <table>
+    <tr><th>Input</th><th>Does</th></tr>
+    <tr><td>Wheel</td><td>Zoom about the cursor</td></tr>
+    <tr><td>Middle-button drag · pen side button · <kbd>Space</kbd>+drag · <kbd>H</kbd> tool</td><td>Pan</td></tr>
+    <tr><td><kbd>Shift</kbd>+middle-button drag</td><td>Drag to zoom</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>Ctrl</kbd>+<kbd>1</kbd></td><td>Fit all · 100 %</td></tr>
+    <tr><td>Zoom in the status bar</td><td>Click for 100 %; <span class="ui">−</span> <span class="ui">+</span> step by step</td></tr>
+    <tr><td><kbd>Space</kbd> while dragging anything</td><td>Pan, keeping what you drag under the cursor</td></tr>
+  </table>
+  <div class="note"><b class="tag">Touch</b><br>One finger pans, two zoom. To draw with fingers too, turn on <span class="ui">Settings</span> › <span class="ui">Draw with fingers</span>. A pen always draws.</div>
+
+  <h3>Dials</h3>
+  <p>Most values are set with a ring of ticks, the dial. Drag it sideways; hold <kbd>Shift</kbd> for fine steps; the wheel moves one tick. A value with a default shows <span class="ui">↺</span> once changed: click it to go back. One drag or one run of wheel steps is a single undo.</p>
+
+  <h3>Drop-downs</h3>
+  <p>Click to open the list. The wheel over a closed drop-down steps to the option before or after at once. Press and drag down to open the list, then release on an option to pick it.</p>
+
+  <h3>Number boxes</h3>
+  <p>Number boxes take sums as typed: <code>40*1.5</code>, <code>2^3+1</code>, brackets too. An empty box and <kbd>Enter</kbd> means 0.</p>
+
+  <h3>Undo</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. Closing with unsaved changes asks first.</p>
+  <div class="folio">5</div>
+</section>
+
+<!-- ============================================================ 4 drawing -->
+<section class="page" id="en-c4" aria-labelledby="en-c4-h">
+  <div class="running"><span>04</span><span>Drawing and colour</span></div>
+  <div class="chapter-no">04</div>
+  <h2 id="en-c4-h">Drawing and colour</h2>
+  <p class="lede">The brush paints pixels (raster); the pen draws vector strokes. A drawing layer appears when you start and goes away when it is empty.</p>
+
+  <h3>Tools</h3>
+  <table>
+    <tr><th>Tool</th><th>Key</th><th>Notes</th></tr>
+    <tr><td>Select · Lasso</td><td><kbd>V</kbd> · <kbd>Q</kbd></td><td>Chapter 6</td></tr>
+    <tr><td>Pan</td><td><kbd>H</kbd></td><td>Drag to move the view</td></tr>
+    <tr><td>Brush</td><td><kbd>B</kbd></td><td>Pencil, nib, marker, airbrush, watercolour</td></tr>
+    <tr><td>Pen (vector)</td><td><kbd>P</kbd></td><td>Pressure-sensitive vector strokes, each one selectable</td></tr>
+    <tr><td>Eraser</td><td><kbd>E</kbd></td><td>Erases brush pixels and pen strokes</td></tr>
+    <tr><td>Text</td><td><kbd>T</kbd></td><td>Chapter 5</td></tr>
+    <tr><td>Line · Arrow · Rectangle · Ellipse</td><td><kbd>L</kbd> · <kbd>A</kbd> · <kbd>R</kbd> · <kbd>O</kbd></td><td>Shape layers</td></tr>
+    <tr><td>Crop photo</td><td><kbd>C</kbd></td><td>Chapter 5</td></tr>
+    <tr><td>Export area · 3D space</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>Chapters 12 · 9</td></tr>
+    <tr><td>Eyedropper</td><td><kbd>I</kbd></td><td>Picks a colour from the screen</td></tr>
+  </table>
+
+  <h3>Brush settings</h3>
+  <ul>
+    <li>Each preset has its own default <span class="ui">Hardness</span> and <span class="ui">Opacity</span>.</li>
+    <li><span class="ui">Pressure → size</span>, <span class="ui">Pressure → opacity</span>: how hard you press sets the width or strength.</li>
+    <li><span class="ui">Smooth</span>: how far the brush trails the pen. Higher values give smoother lines that follow later; when the pen rests, the brush catches up.</li>
+    <li>Size: <kbd>Ctrl</kbd>+drag, or <kbd>[</kbd> <kbd>]</kbd>. <kbd>Ctrl</kbd>+drag also sets pen, eraser and shape widths.</li>
+  </ul>
+
+  <h3>Colour</h3>
+  <div class="side">
+    <div>
+      <p><kbd>Alt</kbd>+click anywhere on the canvas opens the OKHSV palette. Its colour space is shaped to look even to the eye, so changing lightness shifts the hue less.</p>
+      <p><span class="ui">Similar colour map</span> shows two maps: colours of the same lightness, and of the same saturation. The row below holds common colours. Every colour field takes a hex code and has <span class="ui">Copy</span> and <span class="ui">Paste</span>; with several layers selected, a colour goes to all of them.</p>
+    </div>
+    <figure><img src="img/palette-card.jpg" alt="The OKHSV palette and the two similar-colour maps" width="780" height="360" loading="lazy"><figcaption>Palette and similar colour maps</figcaption></figure>
+  </div>
+  <div class="folio">6</div>
+</section>
+
+<!-- ============================================================ 5 photos, text -->
+<section class="page" id="en-c5" aria-labelledby="en-c5-h">
+  <div class="running"><span>05</span><span>Photos, text and shapes</span></div>
+  <div class="chapter-no">05</div>
+  <h2 id="en-c5-h">Photos, text and shapes</h2>
+  <p class="lede">Photos come in at full resolution, and scaling one down keeps its original pixels.</p>
+
+  <h3>Importing</h3>
+  <ul>
+    <li>Drop files on the window, press <kbd>Ctrl</kbd>+<kbd>I</kbd>, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>. Pasted text becomes a text layer.</li>
+    <li><strong>Straight from a browser:</strong> drag an image out of Chrome or Edge onto the window and it comes in as a photo. Pasting an image's address does the same; a link that is not an image comes in as text.</li>
+    <li>PNG, JPEG, WebP, BMP, TIFF, GIF and phones' HEIC/HEIF. An animated GIF becomes a looping, transparent video layer (needs ffmpeg).</li>
+    <li>Video (mp4, mov, mkv, webm…) and sound (mp3, wav…): see chapter 11.</li>
+  </ul>
+
+  <h3>Photo properties</h3>
+  <table>
+    <tr><td><span class="ui">Size %</span> · <span class="ui">Angle °</span></td><td><span class="ui">Original size</span>, <span class="ui">Rotation 0°</span> reset them at once</td></tr>
+    <tr><td><span class="ui">Crop…</span> (<kbd>C</kbd>)</td><td>The original stays; <span class="ui">Uncrop</span> brings it back</td></tr>
+    <tr><td><span class="ui">Adjust</span></td><td>Brightness, contrast, saturation</td></tr>
+    <tr><td><span class="ui">Chroma</span></td><td>Makes a picked colour transparent (green screen)</td></tr>
+    <tr><td><span class="ui">Blend</span></td><td>Blend mode</td></tr>
+  </table>
+
+  <h3>Text</h3>
+  <div class="side">
+    <div>
+      <ul>
+        <li>With <kbd>T</kbd>, click the canvas and type. The box grows as you type; turn on <span class="ui">Wrap width</span> to break lines at a width.</li>
+        <li><span class="ui">Font</span> lists every font installed on the PC.</li>
+        <li><span class="ui">Background box</span> adds a box with <span class="ui">Pad X</span>, <span class="ui">Pad Y</span>, <span class="ui">Radius</span>, and a <span class="ui">Box border</span> with its width.</li>
+        <li><span class="ui">Text outline</span> goes round the letters, with or without the box, in its own colour and width.</li>
+        <li>Padding and widths are a % of the text size, so the look holds when the text grows. Changing them never moves the letters: the box grows round them.</li>
+        <li>New text starts with the settings used last.</li>
+      </ul>
+    </div>
+    <figure><img src="img/text-card.jpg" alt="The text tool card: size, font, align, background box with padding and radius, box border, text outline" width="340" height="510" loading="lazy"><figcaption>The text tool card</figcaption></figure>
+  </div>
+  <div class="note"><b class="tag">Fonts</b><br>A character the chosen font lacks (Korean in Arial, say) is not drawn in another font: it shows as an empty box (□). That tells you the font does not suit the text; pick one that has those characters.</div>
+  <div class="folio">7</div>
+</section>
+
+<!-- ============================================================ 6 select -->
+<section class="page" id="en-c6" aria-labelledby="en-c6-h">
+  <div class="running"><span>06</span><span>Selecting and transforming</span></div>
+  <div class="chapter-no">06</div>
+  <h2 id="en-c6-h">Selecting and transforming</h2>
+  <p class="lede">Pick whole layers, or just one pen stroke or some brush pixels, and move them.</p>
+
+  <h3>Select tool <kbd>V</kbd></h3>
+  <table>
+    <tr><td>Click · drag</td><td>Select · move</td></tr>
+    <tr><td><kbd>Shift</kbd>+drag</td><td>Box select: what has its centre inside (<kbd>Shift</kbd>+<kbd>Ctrl</kbd>: only what is fully inside)</td></tr>
+    <tr><td><kbd>Shift</kbd>+click</td><td>Add to or remove from the selection</td></tr>
+    <tr><td>Pen strokes · brush</td><td>Pen by whole strokes; brush by the pixels inside</td></tr>
+    <tr><td>Corners · top circle</td><td>Size · rotate</td></tr>
+  </table>
+  <p><kbd>Q</kbd> (lasso) selects inside a shape you draw freely.</p>
+
+  <h3>Several at once</h3>
+  <ul>
+    <li>With several selected, one set of handles sizes and turns them all about their shared centre.</li>
+    <li>While turning, <kbd>Shift</kbd> or <kbd>Ctrl</kbd>: 15° steps from where you started; <kbd>Alt</kbd>: 15° steps from 0°.</li>
+    <li>A field whose values differ shows <span class="ui">—</span>; a value entered there goes to all. Changing any other field passes on just that value.</li>
+  </ul>
+
+  <h3>Keyboard transforms <kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></h3>
+  <p>In the select tool: <kbd>G</kbd> move, <kbd>R</kbd> rotate, <kbd>S</kbd> scale. Move the mouse to set it; click or <kbd>Enter</kbd> confirms, <kbd>Esc</kbd> or right-click cancels. Layers in a 3D space move in 3D (chapter 10).</p>
+
+  <h3>Duplicate, delete, empty</h3>
+  <table>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Duplicate</td></tr>
+    <tr><td><kbd>Backspace</kbd></td><td><strong>Delete</strong> the selected layers</td></tr>
+    <tr><td><kbd>Delete</kbd></td><td><strong>Empty</strong> the selected brush and pen layers and masks (the layers stay)</td></tr>
+    <tr><td>With some strokes or pixels selected</td><td>Both keys erase only the selected part</td></tr>
+  </table>
+  <p>The same commands are in the <span class="ui">Edit</span> menu and on the layer card's icon buttons. The eye icon shows and hides a layer.</p>
+  <div class="folio">8</div>
+</section>
+
+<!-- ============================================================ 7 masks -->
+<section class="page" id="en-c7" aria-labelledby="en-c7-h">
+  <div class="running"><span>07</span><span>Masks</span></div>
+  <div class="chapter-no">07</div>
+  <h2 id="en-c7-h">Masks</h2>
+  <p class="lede">A mask hides part of a layer without erasing it. It is built for cutting objects cleanly out of high-resolution photos.</p>
+
+  <div class="side">
+    <div>
+      <h3>Making and painting</h3>
+      <p><span class="ui">Mask</span> on a layer row or the property card adds a mask layer under that layer. With the mask selected:</p>
+      <ul>
+        <li>What you paint with the brush, pen or rectangle is hidden; hidden parts show red on the canvas.</li>
+        <li>The eraser brings it back, as does a rectangle drawn with <kbd>Alt</kbd>.</li>
+        <li><span class="ui">Strength</span> and <span class="ui">Invert</span> change how much it hides.</li>
+        <li><span class="ui">Follow</span>: the layer the mask moves with (usually its photo).</li>
+        <li><span class="ui">Empty</span> or <kbd>Delete</kbd> clears the mask.</li>
+      </ul>
+    </div>
+    <figure><img src="img/mask-panel.jpg" alt="The card with a mask selected: Strength, Invert, Follow, Auto select, GrabCut, Scissors, Empty, Range, Refine, Grow" width="340" height="630" loading="lazy"><figcaption>The card with a mask selected</figcaption></figure>
+  </div>
+
+  <h3>Cutting out automatically</h3>
+  <p>The three modes work <strong>in the select tools only (<kbd>V</kbd>, <kbd>Q</kbd>)</strong>. Turning one on switches to the select tool; any other tool does its own job. In all three, <kbd>Alt</kbd> brings back instead of hiding.</p>
+  <table>
+    <tr><td><span class="ui">Auto select</span></td><td>Hides the area similar to where you click; <span class="ui">Range</span> sets how far it reaches</td></tr>
+    <tr><td><span class="ui">GrabCut</span></td><td>Drag a box: the object that stands apart inside it is hidden</td></tr>
+    <tr><td><span class="ui">Scissors</span></td><td>Draws an outline that clings to edges, then closes it (below)</td></tr>
+    <tr><td><span class="ui">Refine</span> · <span class="ui">Grow</span></td><td>Softens the edge to fit the picture (0: hard) · + widens what is hidden to close gaps, − narrows it</td></tr>
+  </table>
+
+  <h3>Scissors</h3>
+  <ul>
+    <li><strong>Drag:</strong> near an edge, the line clings to it and anchors drop by themselves.</li>
+    <li><strong>Click · right-click:</strong> place an anchor; it snaps to the clearest edge nearby.</li>
+    <li><strong>Close:</strong> click the first point or press <kbd>Enter</kbd>. Close with <kbd>Shift</kbd> to refine once more with GrabCut.</li>
+    <li><kbd>Esc</kbd> once drops the outline in progress; again, it leaves scissors mode.</li>
+    <li><span class="ui">Cut edge</span>: <span class="ui">Crisp</span> cuts cleanly on the edge line; <span class="ui">Photo's blur</span> cuts as softly as the edge is blurred in the photo.</li>
+  </ul>
+  <div class="note"><b class="tag">Photo masks</b><br>The first cut-out on an empty mask over a photo is made at the photo's own pixel resolution. Moving, turning or scaling the photo afterwards, the mask simply follows.</div>
+  <div class="folio">9</div>
+</section>
+
+<!-- ============================================================ 8 FX -->
+<section class="page" id="en-c8" aria-labelledby="en-c8-h">
+  <div class="running"><span>08</span><span>FX layers</span></div>
+  <div class="chapter-no">08</div>
+  <h2 id="en-c8-h">FX layers</h2>
+  <p class="lede">An FX layer holds one filter instead of pixels. It filters every layer below it in the list; at the top, it filters everything. The layers themselves are never changed.</p>
+
+  <figure class="bleed">
+    <img src="img/fx.jpg" alt="An FX layer at the top darkening the edges with a vignette; the card shows Filter, Blend, Amount, Size, Softness." width="1920" height="1080" loading="lazy">
+    <figcaption>An FX layer (vignette) at the top, over every layer below</figcaption>
+  </figure>
+
+  <h3>Using one</h3>
+  <ol class="steps">
+    <li>The sparkle button on the layer card, or <span class="ui">Edit</span> › <span class="ui">Add FX layer</span>. It goes above the selected layer.</li>
+    <li>Pick the effect in <span class="ui">Filter</span> and set its values on the dials. Each value can be keyed on the timeline.</li>
+    <li><span class="ui">Blend</span> starts as <span class="ui">Copy</span> (the picture below is replaced by the filtered result); other modes mix it in.</li>
+    <li>An FX layer can have a mask to filter only part of the picture. Moving it in the list changes what it covers.</li>
+  </ol>
+
+  <h3>Filters</h3>
+  <table>
+    <tr><th>Kind</th><th>Filters</th></tr>
+    <tr><td>Blur and sharpen</td><td>Gaussian blur, motion blur, unsharp mask</td></tr>
+    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map</td></tr>
+    <tr><td>Texture and look</td><td>Grain, vignette, colour fringes, pixelate, halftone, glow</td></tr>
+  </table>
+  <p>Grain, pixelate and halftone use a grid fixed to the canvas, so the pattern does not slide when the view moves. Vignette and colour fringes work about the export area (or, without one, all the content).</p>
+  <div class="folio">10</div>
+</section>
+
+<!-- ============================================================ 9 spaces -->
+<section class="page" id="en-c9" aria-labelledby="en-c9-h">
+  <div class="running"><span>09</span><span>3D spaces</span></div>
+  <div class="chapter-no">09</div>
+  <h2 id="en-c9-h">3D spaces</h2>
+  <p class="lede">Draw a few lines along edges that are parallel in the real scene, and the app finds the camera that took the photo. Then stand or lay text and drawings in that space, in the photo's own perspective.</p>
+
+  <figure class="bleed compact">
+    <img src="img/space.jpg" alt="A 3D space fitted to the room photo: vanishing lines per axis along the box's edges, and blue text with depth on the floor." width="1920" height="1080" loading="lazy">
+    <figcaption>A space fitted to the box's edges, with two texts given depth. The card shows focal length, view angle and line error.</figcaption>
+  </figure>
+
+  <h3>Making a space <kbd>K</kbd></h3>
+  <ol class="steps">
+    <li>Drag over a photo to set the space's area, or click a photo to fit it.</li>
+    <li>Draw lines along edges that are parallel in reality. Switch axes with <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> or <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd>: <span class="ax x">X</span> <span class="ax y">Y</span> along the floor, <span class="ax z">Z</span> up. You need two lines on two axes, four at least.</li>
+    <li>Drag a line's ends to refine it. A loupe shows while dragging; <kbd>Shift</kbd> highlights edges in it. <kbd>Delete</kbd> or right-click removes a line.</li>
+    <li>The camera is solved again with every line. Drag layers into the space's folder on the layer card and they go in exactly as they look.</li>
+  </ol>
+
+  <h3>Find lines and Auto pick</h3>
+  <div class="side">
+    <div>
+      <p><span class="ui">Find lines</span> finds straight edges in the photo and shows them as faint candidates. Click a candidate to make it a line of the current axis, and drag on to refine its ends. Candidates never pick an axis by themselves.</p>
+      <p><span class="ui">Auto pick</span> chooses three directions among the candidates that meet at right angles and adds a few lines to each axis. If the result looks wrong, undo and pick by hand.</p>
+    </div>
+    <figure><img src="img/lines.jpg" alt="Find lines showing faint candidate lines along the box and floor edges" width="1600" height="700" loading="lazy"><figcaption>Candidates from Find lines</figcaption></figure>
+  </div>
+
+  <h3>The space card</h3>
+  <table>
+    <tr><td><span class="ui">Reference length</span> · <span class="ui">Tape measure</span></td><td>Tell it one real length in metres and measure others</td></tr>
+    <tr><td><span class="ui">+ Wall</span> · <span class="ui">+ Wall from base line</span></td><td>Make a wall; layers on it move in the wall's plane</td></tr>
+    <tr><td><span class="ui">Draw mask</span></td><td>Where the space shows (to hide things behind objects in front)</td></tr>
+    <tr><td><span class="ui">Lighting</span></td><td>Light and shade on solids' faces (no cast shadows)</td></tr>
+  </table>
+
+  <div class="folio">11</div>
+</section>
+
+<!-- ============================================================ 10 3D workspace -->
+<section class="page" id="en-c10" aria-labelledby="en-c10-h">
+  <div class="running"><span>10</span><span>The 3D workspace</span></div>
+  <div class="chapter-no">10</div>
+  <h2 id="en-c10-h">The 3D workspace</h2>
+  <p class="lede">Look at a space from the side or above while placing layers. The keys are Blender's.</p>
+
+  <figure class="bleed">
+    <img src="img/ws3d.jpg" alt="The 3D workspace: axes on a dark ground, text with depth, the photo's camera on the right, the light compass on the left." width="1920" height="1080" loading="lazy">
+    <figcaption>The buttons at the top switch views; the compass on the left turns the light. The cone is the photo's camera.</figcaption>
+  </figure>
+
+  <h3>Switching</h3>
+  <p>A short press of <kbd>Tab</kbd> switches between the 2D canvas and the 3D workspace. <strong>Hold it</strong> to peek at the other side without switching. How long to hold before the peek is <span class="ui">Settings</span> › <span class="ui">Peek</span>.</p>
+
+  <div class="two">
+    <div>
+      <h3>Views</h3>
+      <table>
+        <tr><td>Middle button · pen side button</td><td>Orbit</td></tr>
+        <tr><td><kbd>Shift</kbd> · <kbd>Ctrl</kbd>+the same drag</td><td>Pan · zoom</td></tr>
+        <tr><td>Wheel</td><td>Zoom</td></tr>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd></td><td>Front · right · top (<kbd>Ctrl</kbd>: opposite)</td></tr>
+        <tr><td><kbd>5</kbd></td><td>Perspective ↔ orthographic</td></tr>
+        <tr><td><kbd>0</kbd></td><td>Through the photo's camera</td></tr>
+        <tr><td><kbd>.</kbd> · <kbd>Home</kbd></td><td>Frame the selection · first view</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Moving G/R/S</h3>
+      <table>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Move · rotate · scale</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>Along that axis; again: the layer's own axis; once more: free</td></tr>
+        <tr><td>Typing a number</td><td>By exactly that much</td></tr>
+        <tr><td><kbd>Ctrl</kbd> · <kbd>Shift</kbd></td><td>Snap to units · fine</td></tr>
+        <tr><td><kbd>Enter</kbd>·click / <kbd>Esc</kbd>·right-click</td><td>Confirm / cancel</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Clear the value</td></tr>
+      </table>
+    </div>
+  </div>
+  <p><span class="ui">Stand on the floor</span> and <span class="ui">Lay on the floor</span> on the card set the selected layer upright or flat on the floor. Height 0 (the grid) is the camera's eye level, not the floor.</p>
+  
+  <h3>Depth and engraving</h3>
+  <p>Raise the <span class="ui">Depth</span> of text, pen strokes or brush drawings to make solids. <span class="ui">Detail</span> and <span class="ui">Smooth shading</span> refine the sides; <span class="ui">Engrave</span> cuts into the surface instead. Drag a layer in a space with <kbd>Alt</kbd> held to slide it along the floor.</p>
+  <div class="folio">12</div>
+</section>
+
+<!-- ============================================================ 11 timeline -->
+<section class="page" id="en-c11" aria-labelledby="en-c11-h">
+  <div class="running"><span>11</span><span>Timeline, video and sound</span></div>
+  <div class="chapter-no">11</div>
+  <h2 id="en-c11-h">Timeline, video and sound</h2>
+  <p class="lede">Turn the canvas itself into moving pictures. Video and sound need ffmpeg.</p>
+
+  <figure class="bleed">
+    <img src="img/timeline-bar.jpg" alt="The timeline: Play, Start, time, fps, Length, Auto key, Record, Add key, Remove keys, Export video, and rows for a camera's Position, Size, Rotate and Follow" width="2480" height="220" loading="lazy">
+    <figcaption>The timeline (<kbd>Ctrl</kbd>+<kbd>T</kbd>), with a row under the camera for each value that has keys</figcaption>
+  </figure>
+
+  <h3>Key animation</h3>
+  <ul>
+    <li><kbd>Alt</kbd>+<kbd>A</kbd> plays and stops; <kbd>,</kbd> <kbd>.</kbd> step one frame.</li>
+    <li><kbd>I</kbd> keys the selection's current values; <kbd>Alt</kbd>+<kbd>I</kbd> removes every key at the playhead. Each property row has its own key button for keying one value, and <span class="ui">&lt;</span> <span class="ui">&gt;</span> jump to the key before or after.</li>
+    <li>Under each layer's name row is one row per value with keys (position, size, rotate, opacity, 3D position, depth, volume, FX values and so on). Keys are picked, moved and deleted on their own row only.</li>
+    <li><span class="ui">Auto key</span> keys only the values you change.</li>
+    <li>Drag keys to move them; <kbd>Shift</kbd>+drag selects several. <kbd>Shift</kbd> while dragging the playhead snaps it to keys. A key's shape shows its easing (smooth, linear, hold).</li>
+    <li>Right-click a name row to set when the layer appears and disappears.</li>
+  </ul>
+
+  <h3>Cameras and recording</h3>
+  <ul>
+    <li>Make a canvas camera with the <kbd>F</kbd> tool and key its position and size to move the view.</li>
+    <li>Turn on <span class="ui">● Record</span> and draw: pen and brush strokes play back in the order and speed they were drawn.</li>
+    <li>Playback keeps finished frames in memory (the playback cache), so heavy scenes still play smoothly.</li>
+  </ul>
+
+  <h3>Video and sound layers</h3>
+  <ul>
+    <li>A dropped video becomes a clip on the timeline: move it, trim either end. Outside the clip it holds its first or last frame.</li>
+    <li>The property card can turn the current frame into a photo layer.</li>
+    <li>A sound file sits on the canvas as a speaker mark and is moved and trimmed on the timeline; its volume can be keyed.</li>
+  </ul>
+  <div class="folio">13</div>
+</section>
+
+<!-- ============================================================ 12 export -->
+<section class="page" id="en-c12" aria-labelledby="en-c12-h">
+  <div class="running"><span>12</span><span>Exporting and saving</span></div>
+  <div class="chapter-no">12</div>
+  <h2 id="en-c12-h">Exporting and saving</h2>
+  <p class="lede">Export just the part you want, at the size you want. Exports are drawn by the same GPU renderer as the screen.</p>
+
+  <h3>Setting the area <kbd>F</kbd></h3>
+  <p>Draw a rectangle with the <span class="ui">Export area</span> tool. With something selected, it fits that exactly.</p>
+
+  <h3>Images <kbd>Ctrl</kbd>+<kbd>E</kbd></h3>
+  <p>PNG or JPEG. <span class="ui">Margin</span> keeps space round the area; raising <span class="ui">Samples</span> draws larger and scales down for smoother edges. The background is transparent, white or a colour. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies the area straight to the clipboard.</p>
+
+  <h3>Video <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></h3>
+  <div class="side">
+    <div>
+      <table>
+        <tr><td><span class="ui">Area</span></td><td>The export area or a camera, all content, the current view</td></tr>
+        <tr><td><span class="ui">Size</span></td><td>By width or height; starts at the area's own pixels</td></tr>
+        <tr><td><span class="ui">Format</span></td><td>H.264, H.265, AV1, ProRes 4444 (alpha), VP9 (alpha), GIF, PNG frames</td></tr>
+        <tr><td><span class="ui">Mode</span></td><td>Quality (lower is better) or bitrate</td></tr>
+        <tr><td><span class="ui">GPU encoding</span></td><td>On by default with an NVIDIA graphics card (NVENC)</td></tr>
+        <tr><td><span class="ui">Samples</span> · <span class="ui">Backdrop</span></td><td>1–4× · transparent, white, colour</td></tr>
+        <tr><td><span class="ui">With sound</span></td><td>Mixes the timeline's sound and the videos' own sound</td></tr>
+      </table>
+      <p>Progress shows in the window, and you can cancel at any time.</p>
+    </div>
+    <figure><img src="img/vexport-card.jpg" alt="The Export video window: Area, Size, fps, Format, Mode, Quality, GPU encoding, Samples, Backdrop, With sound" width="360" height="500" loading="lazy"><figcaption>The Export video window</figcaption></figure>
+  </div>
+
+  <h3>Saving</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>S</kbd> save, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as, <kbd>Ctrl</kbd>+<kbd>O</kbd> open, <kbd>Ctrl</kbd>+<kbd>N</kbd> new. Double-clicking a <code>.void</code> file opens it too.</p>
+  <div class="note"><b class="tag">Video and sound files</b><br>Photos are stored inside the <code>.void</code>, but video and sound are linked to their original files. When moving a project to another PC, take those files along.</div>
+  <div class="folio">14</div>
+</section>
+
+<!-- ============================================================ 13 keys -->
+<section class="page" id="en-keys" aria-labelledby="en-keys-h">
+  <div class="running"><span>13</span><span>Shortcuts</span></div>
+  <div class="chapter-no">13</div>
+  <h2 id="en-keys-h">Shortcuts</h2>
+  <div class="two">
+    <div>
+      <h4>Tools</h4>
+      <table>
+        <tr><td><kbd>V</kbd> <kbd>Q</kbd> <kbd>H</kbd></td><td>Select · lasso · pan</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>P</kbd> <kbd>E</kbd></td><td>Brush · pen · eraser</td></tr>
+        <tr><td><kbd>T</kbd> <kbd>L</kbd> <kbd>A</kbd></td><td>Text · line · arrow</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>O</kbd> <kbd>C</kbd></td><td>Rectangle · ellipse · crop photo</td></tr>
+        <tr><td><kbd>F</kbd> <kbd>K</kbd> <kbd>I</kbd></td><td>Export area · 3D space · eyedropper</td></tr>
+      </table>
+      <h4>File</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>O</kbd> <kbd>S</kbd></td><td>New · open · save</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>Save as</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Import a photo</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Export an image</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>Export video</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td><td>Copy the area to the clipboard</td></tr>
+      </table>
+      <h4>Edit</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Y</kbd></td><td>Undo · redo</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>Paste (picture, text, image link) · duplicate</td></tr>
+        <tr><td><kbd>Backspace</kbd> · <kbd>Delete</kbd></td><td>Delete · empty</td></tr>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>Move · rotate · scale</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Cancel (scissors: twice leaves the mode)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h4>View</h4>
+      <table>
+        <tr><td>Wheel · middle drag</td><td>Zoom · pan</td></tr>
+        <tr><td><kbd>Space</kbd>+drag</td><td>Pan (even mid-drag)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>1</kbd></td><td>Fit all · 100 %</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>UI size</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>Hide the UI</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>2D ↔ 3D · hold to peek</td></tr>
+      </table>
+      <h4>Drawing and colour</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+drag · <kbd>[</kbd> <kbd>]</kbd></td><td>Size · line width</td></tr>
+        <tr><td><kbd>Alt</kbd>+click</td><td>Palette</td></tr>
+        <tr><td><kbd>Alt</kbd> (mask)</td><td>Bring back</td></tr>
+      </table>
+      <h4>Timeline</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Open the timeline</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>A</kbd></td><td>Play · stop</td></tr>
+        <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>One frame back · forward</td></tr>
+        <tr><td><kbd>I</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd></td><td>Add · remove keys</td></tr>
+      </table>
+      <h4>3D workspace</h4>
+      <table>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd> · <kbd>5</kbd></td><td>Front · right · top · ortho</td></tr>
+        <tr><td><kbd>0</kbd> · <kbd>.</kbd> · <kbd>Home</kbd></td><td>Camera · frame · first view</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>Lock G/R/S to an axis</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="folio">15</div>
+</section>
+
+<!-- ============================================================ 14 help -->
+<section class="page" id="en-c14" aria-labelledby="en-c14-h">
+  <div class="running"><span>14</span><span>Help and licences</span></div>
+  <div class="chapter-no">14</div>
+  <h2 id="en-c14-h">Help and licences</h2>
+  <p class="lede">If something looks wrong, however small, please tell us. Sending the items below helps it get fixed quickly.</p>
+
+  <h3>Reporting a problem</h3>
+  <ul>
+    <li>What you were doing, what happened, and whether it happens again.</li>
+    <li>If the app closed suddenly: <code>%APPDATA%\DriftingVOID\crash.log</code>.</li>
+    <li>A screenshot and the <code>.void</code> file, if you can.</li>
+    <li>Your graphics card and pen tablet.</li>
+  </ul>
+
+  <h3>Known limits</h3>
+  <ul>
+    <li>Windows 10/11 only, with a graphics card that supports DirectX 12 or Vulkan.</li>
+    <li>Not code-signed yet, so Windows shows a protection window on first run.</li>
+    <li>Characters a font lacks show as empty boxes instead of another font (by design).</li>
+    <li>Very large recorded pen layers can take a moment to open.</li>
+    <li>The playback cache can use a lot of memory (up to 75 % of physical memory).</li>
+  </ul>
+
+  <h3>ffmpeg and licences</h3>
+  <p>Drifting VOID runs <a href="https://ffmpeg.org">FFmpeg</a> as a separate program for video. ffmpeg is not in this package: setup downloads a public build (GPL) from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> into the install folder's <code>ffmpeg</code> folder, where <code>LICENSE.txt</code> holds the full licence and <code>SOURCE.txt</code> the file name, checksum and source.</p>
+  <p>The Japanese UI face, Pretendard JP, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
+
+  <div class="note"><b class="tag">This manual</b><br>Switch its language at the top right, and use <span class="ui">Print</span> to print it as an A4 booklet or save a PDF. It starts in your browser's language and follows the system theme; the half-circle button switches light and dark.</div>
+  <div class="folio">16</div>
+</section>
+
+</main>
+
+<main class="book" lang="ja">
+
+<!-- ============================================================ cover -->
+<section class="page cover" aria-label="表紙">
+  <div class="top"><span>ユーザーマニュアル</span><span>Windows</span></div>
+  <div class="mid">
+    <img class="mark" src="img/icon.png" alt="" width="112" height="112">
+    <h1>Drifting<span>VOID</span></h1>
+    <p class="sub">写真、絵、文字、動画を、果てのないキャンバスの上で。</p>
+  </div>
+  <div class="bottom">
+    <span>バージョン <strong>{VERSION}</strong> · Windows 10/11 · ペンタブレット推奨</span>
+    <span>2026年11月</span>
+  </div>
+</section>
+
+<!-- ============================================================ contents -->
+<section class="page" id="ja-toc" aria-labelledby="ja-toc-h">
+  <div class="running"><span>Drifting VOID</span><span>目次</span></div>
+  <h2 id="ja-toc-h">目次</h2>
+  <p class="lede">はじめての方は 1 章と 2 章から読み、ほかは必要なときに引いてください。ショートカットは 13 章の 1 ページにまとめています。画面写真は英語表示で撮影しています。</p>
+  <ol class="toc">
+    <li><a href="#ja-c1"><span class="n">01</span><span class="t">インストールと初回起動<span class="d">セットアップ、ffmpeg、削除、ファイルの場所</span></span><span class="p">3</span></a></li>
+    <li><a href="#ja-c2"><span class="n">02</span><span class="t">画面の見かた<span class="d">メニュー、ツール、カード、レイヤー、設定メニュー</span></span><span class="p">4</span></a></li>
+    <li><a href="#ja-c3"><span class="n">03</span><span class="t">キャンバスの操作<span class="d">移動、ズーム、ダイヤル、ドロップダウン、数値欄</span></span><span class="p">5</span></a></li>
+    <li><a href="#ja-c4"><span class="n">04</span><span class="t">描画と色<span class="d">ブラシ、ペン、消しゴム、筆圧、手ぶれ補正、パレット</span></span><span class="p">6</span></a></li>
+    <li><a href="#ja-c5"><span class="n">05</span><span class="t">写真、文字、図形<span class="d">読み込み、ブラウザーからのドラッグ、文字のボックスと縁取り</span></span><span class="p">7</span></a></li>
+    <li><a href="#ja-c6"><span class="n">06</span><span class="t">選択と変形<span class="d">選択、なげなわ、まとめて変形、G/R/S</span></span><span class="p">8</span></a></li>
+    <li><a href="#ja-c7"><span class="n">07</span><span class="t">マスク<span class="d">塗って隠す、自動選択、GrabCut、ハサミ</span></span><span class="p">9</span></a></li>
+    <li><a href="#ja-c8"><span class="n">08</span><span class="t">FX レイヤー<span class="d">下のレイヤーにかける 18 種類のフィルター</span></span><span class="p">10</span></a></li>
+    <li><a href="#ja-c9"><span class="n">09</span><span class="t">3D 空間<span class="d">消失線、線の検出、壁、厚み、彫り込み</span></span><span class="p">11</span></a></li>
+    <li><a href="#ja-c10"><span class="n">10</span><span class="t">3D ワークスペース<span class="d">Tab、軌道回転、視点、Blender 式 G/R/S</span></span><span class="p">12</span></a></li>
+    <li><a href="#ja-c11"><span class="n">11</span><span class="t">タイムライン、動画、音<span class="d">値ごとのキー、カメラ、録画、動画レイヤー</span></span><span class="p">13</span></a></li>
+    <li><a href="#ja-c12"><span class="n">12</span><span class="t">書き出しと保存<span class="d">画像、動画、クリップボード、.void</span></span><span class="p">14</span></a></li>
+    <li><a href="#ja-keys"><span class="n">13</span><span class="t">ショートカット一覧<span class="d">1 ページの早見表</span></span><span class="p">15</span></a></li>
+    <li><a href="#ja-c14"><span class="n">14</span><span class="t">ヘルプとライセンス<span class="d">既知の制限、問題の報告、ffmpeg、フォント</span></span><span class="p">16</span></a></li>
+  </ol>
+  <div class="folio">2</div>
+</section>
+
+<!-- ============================================================ 1 install -->
+<section class="page" id="ja-c1" aria-labelledby="ja-c1-h">
+  <div class="running"><span>01</span><span>インストールと初回起動</span></div>
+  <div class="chapter-no">01</div>
+  <h2 id="ja-c1-h">インストールと初回起動</h2>
+  <p class="lede">管理者権限なしで、自分のアカウントにだけインストールします。動画と音に使う ffmpeg は、セットアップ中に GitHub から取得します。</p>
+
+  <h3>セットアップ</h3>
+  <ol class="steps">
+    <li>受け取った zip を<strong>すべて展開</strong>します。zip の中から直接実行すると、セットアップがファイルを見つけられません。</li>
+    <li><strong>Setup.cmd</strong> をダブルクリックします。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
+    <li>セットアップは 3 段階で進みます: プログラムのコピー、ffmpeg、ショートカットと <code>.void</code> ファイルの関連付け。デスクトップのショートカットを作るか、すぐ起動するかを聞かれたら、<kbd>Enter</kbd> で既定(はい)を選べます。</li>
+  </ol>
+  <p>初回起動では Windows の表示言語に合わせて、韓国語、英語、日本語のいずれかで開きます。あとから <span class="ui">設定</span> › <span class="ui">言語</span> で変えられます。</p>
+
+  <h3>ffmpeg</h3>
+  <p>動画の読み込みと再生、音、動画の書き出しは、FFmpeg プロジェクトの ffmpeg を一緒に動かして処理します。写真、絵、文字、3D 空間、画像の書き出しは ffmpeg なしで使えます。</p>
+  <ul>
+    <li>すでに ffmpeg が入っていれば、それを使います (PATH、または <code>winget install Gyan.FFmpeg</code> で入れたもの)。</li>
+    <li>なければダウンロードするか聞きます。GitHub の <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の最新リリースビルド(約 80 MB)を取得し、SHA-256 チェックサムを確かめてから、インストール先の <code>ffmpeg</code> フォルダーにだけ置きます。</li>
+    <li>取得に失敗してもセットアップは最後まで進みます。あとで Setup.cmd をもう一度実行すれば、その段階だけやり直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
+  </ul>
+
+  <h3>更新と削除</h3>
+  <ul>
+    <li><strong>新しいバージョンへの更新:</strong> 新しい zip の Setup.cmd を実行すると、同じ場所に上書きします。設定とプロジェクトはそのまま残ります。</li>
+    <li><strong>削除:</strong> Windows の設定 › アプリ › インストールされているアプリ › Drifting VOID › アンインストール。設定ファイルも消すかは別に聞き、<code>.void</code> プロジェクトには触れません。</li>
+  </ul>
+
+  <h3>ファイルの場所</h3>
+  <table>
+    <tr><th>何</th><th>どこ</th></tr>
+    <tr><td>プログラム、ffmpeg、フォント、このマニュアル</td><td><code>%LOCALAPPDATA%\Programs\DriftingVOID</code></td></tr>
+    <tr><td>設定 (ツール、最近の色、書き出し、表示)</td><td><code>%APPDATA%\DriftingVOID</code> の <code>prefs.json</code>、<code>settings.json</code></td></tr>
+    <tr><td>ブラウザーからドラッグした動画と音</td><td><code>%APPDATA%\DriftingVOID\drops</code></td></tr>
+    <tr><td>エラーログ</td><td><code>%APPDATA%\DriftingVOID\crash.log</code></td></tr>
+    <tr><td>プロジェクト</td><td>保存した場所の <code>.void</code> ファイル。写真と絵は中に保存され、動画と音は元のファイルを参照します。</td></tr>
+  </table>
+  <div class="folio">3</div>
+</section>
+
+<!-- ============================================================ 2 tour -->
+<section class="page" id="ja-c2" aria-labelledby="ja-c2-h">
+  <div class="running"><span>02</span><span>画面の見かた</span></div>
+  <div class="chapter-no">02</div>
+  <h2 id="ja-c2-h">画面の見かた</h2>
+  <p class="lede">中央の暗い地が果てのないキャンバスで、ツールとプロパティはその上に浮かぶガラスのカードにあります。アクセント色(琥珀色)は、いまオンのものにだけ使います。</p>
+
+  <figure class="bleed compact">
+    <div class="callouts">
+    <img src="img/overview.jpg" alt="写真を 1 枚開いた Drifting VOID の画面。左にツールバー、右にプロパティカードとレイヤーカード。" width="1920" height="1080">
+    <span class="pin" style="left:16.8%;top:2.6%">1</span>
+    <span class="pin" style="left:5.2%;top:22%">2</span>
+    <span class="pin" style="left:5.2%;top:49.3%">3</span>
+    <span class="pin" style="left:30%;top:55%">4</span>
+    <span class="pin" style="left:75.2%;top:9%">5</span>
+    <span class="pin" style="left:94%;top:13%">6</span>
+    <span class="pin" style="left:39.8%;top:97.5%">7</span>
+    </div>
+    <figcaption>写真「room」を選択した状態。右のカードに写真のプロパティが出ます。</figcaption>
+  </figure>
+  <ul class="legend">
+    <li><i>1</i><span><strong>メニュー</strong> ファイル、編集、設定</span></li>
+    <li><i>2</i><span><strong>ツールバー</strong> ツールごとにショートカット 1 文字 (4 章の表)。マウスを乗せると使い方が出ます</span></li>
+    <li><i>3</i><span><strong>現在の色</strong> 押すとパレット</span></li>
+    <li><i>4</i><span><strong>キャンバス</strong> 果てがなく、写真は元の解像度で置かれます</span></li>
+    <li><i>5</i><span><strong>ツール · 選択中の項目</strong> いまのツールの設定と、選んだレイヤーのプロパティ</span></li>
+    <li><i>6</i><span><strong>レイヤー</strong> 上へ、下へ、複製、削除、FX レイヤーを追加のボタン。ドラッグで並べ替え、ダブルクリックで名前の変更</span></li>
+    <li><i>7</i><span><strong>ステータスバー</strong> 倍率、座標、直前の操作</span></li>
+  </ul>
+
+  <h3>カードとパネル</h3>
+  <p>カードの見出し(<span class="ui">▾ ツール</span>、<span class="ui">▾ 選択中の項目</span>)を押すと折りたためます。オン/オフの値はスイッチ、1 つを選ぶ値は並んだボタンです。マウスを乗せると短い説明が出る欄が多いので、はじめはゆっくり見て回ってください。</p>
+
+  <h3>設定メニュー</h3>
+  <div class="two">
+    <div>
+      <ul>
+        <li><span class="ui">ライト</span> · <span class="ui">ダーク</span> · <span class="ui">システム</span>: 画面のテーマ。</li>
+        <li><span class="ui">言語</span>: 한국어、English、日本語。</li>
+        <li><span class="ui">UI 倍率</span>: 90–150 %。<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd>/<kbd>−</kbd>/<kbd>0</kbd>。</li>
+        <li><span class="ui">ガラス効果</span>(オフで不透明なカード)、<span class="ui">パネルの影</span>、ガラスの<span class="ui">縁</span>の屈折の強さと<span class="ui">リム</span>の幅、カードの<span class="ui">角</span>と<span class="ui">滑らかさ</span>。</li>
+        <li><span class="ui">指で描く</span>、Tab の<span class="ui">待ち時間</span> (10 章)。</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>H</kbd> で UI をすべて隠し、もう一度押すと戻ります。</p>
+    </div>
+    <figure style="margin-top:0"><img src="img/light.jpg" alt="ライトテーマの同じ画面" width="1920" height="1080" loading="lazy"><figcaption>ライトテーマ</figcaption></figure>
+  </div>
+  <div class="folio">4</div>
+</section>
+
+<!-- ============================================================ 3 canvas -->
+<section class="page" id="ja-c3" aria-labelledby="ja-c3-h">
+  <div class="running"><span>03</span><span>キャンバスの操作</span></div>
+  <div class="chapter-no">03</div>
+  <h2 id="ja-c3-h">キャンバスの操作</h2>
+  <p class="lede">マウス、ペンタブレット、タッチのどれでも使えます。ペンの筆圧は Windows Ink で読み取ります。</p>
+
+  <h3>表示の移動とズーム</h3>
+  <table>
+    <tr><th>入力</th><th>動作</th></tr>
+    <tr><td>ホイール</td><td>カーソル位置を中心にズーム</td></tr>
+    <tr><td>中ボタンドラッグ · ペンのサイドボタン · <kbd>Space</kbd>+ドラッグ · <kbd>H</kbd> ツール</td><td>表示の移動</td></tr>
+    <tr><td><kbd>Shift</kbd>+中ボタンドラッグ</td><td>ドラッグでズーム</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>Ctrl</kbd>+<kbd>1</kbd></td><td>全体表示 · 100 %</td></tr>
+    <tr><td>ステータスバーの倍率</td><td>押すと 100 %、<span class="ui">−</span> <span class="ui">+</span> で 1 段階ずつ</td></tr>
+    <tr><td>何かをドラッグ中に <kbd>Space</kbd></td><td>ドラッグ中のものをカーソルに付けたまま表示だけ移動</td></tr>
+  </table>
+  <div class="note"><b class="tag">タッチ</b><br>指 1 本で表示の移動、2 本でズームです。指でも描くには <span class="ui">設定</span> › <span class="ui">指で描く</span> をオンにします。ペンはいつでも描けます。</div>
+
+  <h3>ダイヤル</h3>
+  <p>ほとんどの値は目盛りのリング(ダイヤル)で変えます。左右にドラッグすると値が変わり、<kbd>Shift</kbd> で微調整、ホイールは 1 目盛りずつです。既定値のある値は、変えると <span class="ui">↺</span> が出て、押すと戻ります。1 回のドラッグや続けて回したホイールは、元に戻す 1 回で戻ります。</p>
+
+  <h3>ドロップダウン</h3>
+  <p>クリックで一覧が開きます。閉じたドロップダウンの上でホイールを回すと、前後の項目にすぐ切り替わります。押したまま下へドラッグすると一覧が開き、選びたい項目で離すとそれが選ばれます。</p>
+
+  <h3>数値欄</h3>
+  <p>数値欄には計算式をそのまま書けます: <code>40*1.5</code>、<code>2^3+1</code>、かっこも使えます。空のまま <kbd>Enter</kbd> を押すと 0 です。</p>
+
+  <h3>元に戻す</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。保存せずに閉じようとすると、先に確認します。</p>
+  <div class="folio">5</div>
+</section>
+
+<!-- ============================================================ 4 drawing -->
+<section class="page" id="ja-c4" aria-labelledby="ja-c4-h">
+  <div class="running"><span>04</span><span>描画と色</span></div>
+  <div class="chapter-no">04</div>
+  <h2 id="ja-c4-h">描画と色</h2>
+  <p class="lede">ブラシはピクセル(ラスター)で、ペンはベクターのストロークで描きます。描き始めると描画レイヤーができ、空になると自動で消えます。</p>
+
+  <h3>ツール</h3>
+  <table>
+    <tr><th>ツール</th><th>キー</th><th>説明</th></tr>
+    <tr><td>選択 · なげなわ選択</td><td><kbd>V</kbd> · <kbd>Q</kbd></td><td>6 章</td></tr>
+    <tr><td>表示の移動</td><td><kbd>H</kbd></td><td>ドラッグで移動</td></tr>
+    <tr><td>ブラシ</td><td><kbd>B</kbd></td><td>鉛筆、ペン先、マーカー、エアブラシ、水彩</td></tr>
+    <tr><td>ペン (ベクター)</td><td><kbd>P</kbd></td><td>筆圧のあるベクターのストローク。1 本ずつ選んで動かせる</td></tr>
+    <tr><td>消しゴム</td><td><kbd>E</kbd></td><td>ブラシのピクセルとペンのストロークを消す</td></tr>
+    <tr><td>テキスト</td><td><kbd>T</kbd></td><td>5 章</td></tr>
+    <tr><td>線 · 矢印 · 四角形 · 楕円</td><td><kbd>L</kbd> · <kbd>A</kbd> · <kbd>R</kbd> · <kbd>O</kbd></td><td>図形レイヤー</td></tr>
+    <tr><td>写真の切り抜き</td><td><kbd>C</kbd></td><td>5 章</td></tr>
+    <tr><td>書き出し範囲 · 3D 空間</td><td><kbd>F</kbd> · <kbd>K</kbd></td><td>12 章 · 9 章</td></tr>
+    <tr><td>スポイト</td><td><kbd>I</kbd></td><td>画面の色を拾う</td></tr>
+  </table>
+
+  <h3>ブラシの設定</h3>
+  <ul>
+    <li>プリセットごとに既定の<span class="ui">硬さ</span>と<span class="ui">不透明度</span>があります。</li>
+    <li><span class="ui">筆圧 → サイズ</span>、<span class="ui">筆圧 → 濃度</span>: ペンを押す強さで太さや濃さが変わります。</li>
+    <li><span class="ui">手ぶれ補正</span>: 筆がペンをどれだけ遅れて追うか。大きいほど線がなめらかで、遅れて追います。ペンを止めると、筆がペンの下まで追いつきます。</li>
+    <li>サイズ: <kbd>Ctrl</kbd>+ドラッグ、または <kbd>[</kbd> <kbd>]</kbd>。ペン、消しゴム、図形の線の太さも <kbd>Ctrl</kbd>+ドラッグで変えます。</li>
+  </ul>
+
+  <h3>色</h3>
+  <div class="side">
+    <div>
+      <p>キャンバスのどこでも <kbd>Alt</kbd>+クリックで OKHSV パレットが開きます。人の目に均等に見えるよう整えた色空間なので、明るさを変えても色味がずれにくくなっています。</p>
+      <p><span class="ui">類似色マップ</span>をオンにすると、いまの色と明るさが同じ色、彩度が同じ色を 2 枚のマップで見せます。下の列はよく使う色です。色の欄にはどれも 16 進コードを書けて、<span class="ui">コピー</span>、<span class="ui">貼り付け</span>もできます。複数のレイヤーを選んだまま色を選ぶと、すべてに適用されます。</p>
+    </div>
+    <figure><img src="img/palette-card.jpg" alt="OKHSV パレットと 2 枚の類似色マップ" width="780" height="360" loading="lazy"><figcaption>パレットと類似色マップ</figcaption></figure>
+  </div>
+  <div class="folio">6</div>
+</section>
+
+<!-- ============================================================ 5 photos, text -->
+<section class="page" id="ja-c5" aria-labelledby="ja-c5-h">
+  <div class="running"><span>05</span><span>写真、文字、図形</span></div>
+  <div class="chapter-no">05</div>
+  <h2 id="ja-c5-h">写真、文字、図形</h2>
+  <p class="lede">写真は元の解像度のまま入り、縮小しても元のピクセルは残っています。</p>
+
+  <h3>読み込み</h3>
+  <ul>
+    <li>ファイルをウィンドウにドロップ、<kbd>Ctrl</kbd>+<kbd>I</kbd>、または <kbd>Ctrl</kbd>+<kbd>V</kbd> で貼り付け。文字を貼り付けるとテキストレイヤーになります。</li>
+    <li><strong>ブラウザーから直接:</strong> Chrome や Edge の画像をウィンドウにドラッグすると写真として入ります。画像のアドレスをコピーして貼り付けても写真になります。画像でないリンクは文字として入ります。</li>
+    <li>PNG、JPEG、WebP、BMP、TIFF、GIF、スマートフォンの HEIC/HEIF。動く GIF は、くり返し再生される透明な動画レイヤーになります (ffmpeg が必要)。</li>
+    <li>動画(mp4、mov、mkv、webm など)と音(mp3、wav など)は 11 章を見てください。</li>
+  </ul>
+
+  <h3>写真のプロパティ</h3>
+  <table>
+    <tr><td><span class="ui">サイズ %</span> · <span class="ui">回転 °</span></td><td><span class="ui">元のサイズ</span>、<span class="ui">回転 0°</span> で一度に戻す</td></tr>
+    <tr><td><span class="ui">切り抜き…</span> (<kbd>C</kbd>)</td><td>切り抜いても元は残り、<span class="ui">切り抜き解除</span>で戻ります</td></tr>
+    <tr><td><span class="ui">補正</span></td><td>明るさ、コントラスト、彩度</td></tr>
+    <tr><td><span class="ui">クロマキー</span></td><td>選んだ色を透明に (グリーンバックの除去)</td></tr>
+    <tr><td><span class="ui">合成</span></td><td>描画モード</td></tr>
+  </table>
+
+  <h3>文字</h3>
+  <div class="side">
+    <div>
+      <ul>
+        <li><kbd>T</kbd> でキャンバスを押して入力します。ボックスは入力に合わせて広がり、<span class="ui">折り返し幅</span>をオンにするとその幅で改行します。</li>
+        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。</li>
+        <li><span class="ui">背景ボックス</span>をオンにすると、<span class="ui">左右余白</span>、<span class="ui">上下余白</span>、<span class="ui">角</span>、<span class="ui">ボックスの枠線</span>とその太さを決められます。</li>
+        <li><span class="ui">文字の縁取り</span>はボックスとは別にオンにでき、色と太さを決めます。</li>
+        <li>余白と太さは文字サイズに対する % なので、文字を大きくしても見た目が保たれます。変えても文字はその場から動かず、ボックスだけがまわりに広がります。</li>
+        <li>新しい文字は、最後に使った設定で始まります。</li>
+      </ul>
+    </div>
+    <figure><img src="img/text-card.jpg" alt="テキストツールのカード: サイズ、フォント、整列、背景ボックスと余白、角、ボックスの枠線、文字の縁取り" width="340" height="510" loading="lazy"><figcaption>テキストツールのカード</figcaption></figure>
+  </div>
+  <div class="note"><b class="tag">フォント</b><br>選んだフォントにない文字(Arial の日本語など)は、別のフォントで代わりに描かず、空の四角(□)で表示します。そのフォントが文章に合っていないという印なので、その文字を含むフォントを選んでください。</div>
+  <div class="folio">7</div>
+</section>
+
+<!-- ============================================================ 6 select -->
+<section class="page" id="ja-c6" aria-labelledby="ja-c6-h">
+  <div class="running"><span>06</span><span>選択と変形</span></div>
+  <div class="chapter-no">06</div>
+  <h2 id="ja-c6-h">選択と変形</h2>
+  <p class="lede">レイヤーを丸ごと選ぶことも、ペンのストローク 1 本やブラシのピクセルの一部だけを選んで動かすこともできます。</p>
+
+  <h3>選択ツール <kbd>V</kbd></h3>
+  <table>
+    <tr><td>クリック · ドラッグ</td><td>選ぶ · 動かす</td></tr>
+    <tr><td><kbd>Shift</kbd>+ドラッグ</td><td>範囲選択。中心が範囲に入ったものを選びます (<kbd>Shift</kbd>+<kbd>Ctrl</kbd>: 完全に入ったものだけ)</td></tr>
+    <tr><td><kbd>Shift</kbd>+クリック</td><td>選択に追加、または除外</td></tr>
+    <tr><td>ペンのストローク · ブラシ</td><td>ペンは 1 本ずつ、ブラシは範囲内のピクセルだけを選びます</td></tr>
+    <tr><td>角 · 上の丸</td><td>サイズ · 回転</td></tr>
+  </table>
+  <p><kbd>Q</kbd>(なげなわ)は、自由に描いた形の内側を選びます。</p>
+
+  <h3>まとめて扱う</h3>
+  <ul>
+    <li>複数を選ぶとハンドルが 1 つにまとまり、共通の中心を基準にサイズを変えたり回したりします。</li>
+    <li>回転中に <kbd>Shift</kbd> か <kbd>Ctrl</kbd>: 始めの角度から 15° ずつ。<kbd>Alt</kbd>: 0° から 15° ずつ。</li>
+    <li>プロパティカードで値がそろわない欄は <span class="ui">—</span> と表示されます。そこに値を入れると、すべてがその値になります。ほかの欄を変えると、変えた値だけがすべてに入ります。</li>
+  </ul>
+
+  <h3>キーボードで変形 <kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></h3>
+  <p>選択ツールで <kbd>G</kbd> 移動、<kbd>R</kbd> 回転、<kbd>S</kbd> サイズ。マウスを動かして決め、クリックか <kbd>Enter</kbd> で確定、<kbd>Esc</kbd> か右クリックで取り消します。3D 空間の中のレイヤーは 3D の方式で動きます (10 章)。</p>
+
+  <h3>複製、削除、空にする</h3>
+  <table>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>複製</td></tr>
+    <tr><td><kbd>Backspace</kbd></td><td>選んだレイヤーを<strong>削除</strong></td></tr>
+    <tr><td><kbd>Delete</kbd></td><td>選んだブラシ・ペンレイヤーとマスクを<strong>空にする</strong> (レイヤーは残る)</td></tr>
+    <tr><td>ストロークやピクセルの一部を選んだとき</td><td>どちらのキーも選んだ部分だけを消します</td></tr>
+  </table>
+  <p>同じ操作は<span class="ui">編集</span>メニューと、レイヤーカードのアイコンボタンにもあります。目のアイコンで表示を切り替えます。</p>
+  <div class="folio">8</div>
+</section>
+
+<!-- ============================================================ 7 masks -->
+<section class="page" id="ja-c7" aria-labelledby="ja-c7-h">
+  <div class="running"><span>07</span><span>マスク</span></div>
+  <div class="chapter-no">07</div>
+  <h2 id="ja-c7-h">マスク</h2>
+  <p class="lede">レイヤーの一部を、消さずに隠します。高解像度の写真から物をきれいに切り抜くことに合わせて作りました。</p>
+
+  <div class="side">
+    <div>
+      <h3>作成と塗り</h3>
+      <p>レイヤーの行やプロパティカードの<span class="ui">マスク</span>を押すと、そのレイヤーの下にマスクレイヤーができます。マスクを選んだまま:</p>
+      <ul>
+        <li>ブラシ、ペン、四角形で塗ったところが隠れます。隠れた部分はキャンバスで赤く見えます。</li>
+        <li>消しゴムで元に戻ります。<kbd>Alt</kbd> を押して四角形を描いても戻ります。</li>
+        <li><span class="ui">強さ</span>、<span class="ui">反転</span>で隠し方を変えます。</li>
+        <li><span class="ui">追従</span>: マスクがどのレイヤーに付いて動くか (ふつうはその写真)。</li>
+        <li><span class="ui">空にする</span>または <kbd>Delete</kbd>: マスクを空にします。</li>
+      </ul>
+    </div>
+    <figure><img src="img/mask-panel.jpg" alt="マスクを選んだカード: 強さ、反転、追従、自動選択、GrabCut、ハサミ、空にする、許容誤差、整える、境界の移動" width="340" height="630" loading="lazy"><figcaption>マスクを選んだカード</figcaption></figure>
+  </div>
+
+  <h3>自動で切り抜く</h3>
+  <p>3 つのモードは<strong>選択ツール(<kbd>V</kbd>、<kbd>Q</kbd>)でだけ</strong>動きます。モードをオンにすると選択ツールに切り替わり、ほかのツールを選ぶとそのツール本来の動作をします。どれも <kbd>Alt</kbd> を押すと、逆に元に戻します。</p>
+  <table>
+    <tr><td><span class="ui">自動選択</span></td><td>クリックした所と似た面を隠します。<span class="ui">許容誤差</span>で範囲を調整</td></tr>
+    <tr><td><span class="ui">GrabCut</span></td><td>四角くドラッグすると、その中で浮いて見える物を隠します</td></tr>
+    <tr><td><span class="ui">ハサミ</span></td><td>境界に沿って輪郭を描き、閉じます (下記)</td></tr>
+    <tr><td><span class="ui">整える</span> · <span class="ui">境界の移動</span></td><td>境界を絵に合わせてなめらかに (0: くっきり) · + は隠す範囲を広げてすき間を埋め、− は狭めます</td></tr>
+  </table>
+
+  <h3>ハサミ</h3>
+  <ul>
+    <li><strong>ドラッグ</strong>: カーソルを境界の近くで動かすと、線が境界に吸い付いて追い、アンカーが自動で置かれます。</li>
+    <li><strong>クリック · 右クリック</strong>: その場所にアンカーを置きます。近くのいちばんはっきりした境界に吸着します。</li>
+    <li><strong>閉じる</strong>: 最初の点を押すか <kbd>Enter</kbd>。<kbd>Shift</kbd> を押して閉じると、GrabCut でもう一度整えます。</li>
+    <li><kbd>Esc</kbd> 1 回で描きかけの輪郭を取り消し、もう 1 回でハサミのモードを終えます。</li>
+    <li><span class="ui">境界</span>: <span class="ui">シャープ</span>は境界線できれいに切り、<span class="ui">写真のぼけ</span>は写真の中の境界がぼけている分だけやわらかく切ります。</li>
+  </ul>
+  <div class="note"><b class="tag">写真のマスク</b><br>空のマスクで写真の上をはじめて切り抜くと、その写真の元のピクセル解像度で作られます。そのあと写真を動かしたり回したり縮めたりしても、マスクはそのまま付いていきます。</div>
+  <div class="folio">9</div>
+</section>
+
+<!-- ============================================================ 8 FX -->
+<section class="page" id="ja-c8" aria-labelledby="ja-c8-h">
+  <div class="running"><span>08</span><span>FX レイヤー</span></div>
+  <div class="chapter-no">08</div>
+  <h2 id="ja-c8-h">FX レイヤー</h2>
+  <p class="lede">ピクセルの代わりにフィルターを 1 つ持つレイヤーです。一覧で自分より下にあるレイヤーすべてにフィルターをかけ、いちばん上に置けばすべてにかかります。元のレイヤーは変わりません。</p>
+
+  <figure class="bleed">
+    <img src="img/fx.jpg" alt="いちばん上の FX レイヤーがビネットで画面の端を暗くした様子。右のカードにフィルター、合成、量、サイズ、柔らかさ。" width="1920" height="1080" loading="lazy">
+    <figcaption>いちばん上の FX レイヤー(ビネット)が、下のすべてのレイヤーにかかった様子</figcaption>
+  </figure>
+
+  <h3>使い方</h3>
+  <ol class="steps">
+    <li>レイヤーカードのきらめきボタン、または<span class="ui">編集</span> › <span class="ui">FX レイヤーを追加</span>。選んだレイヤーの上にできます。</li>
+    <li>カードの<span class="ui">フィルター</span>で効果を選び、値をダイヤルで決めます。値ごとにタイムラインのキーを打てます。</li>
+    <li><span class="ui">合成</span>は最初<span class="ui">コピー</span>(下の絵をフィルターの結果に置き換え)です。ほかのモードで混ぜることもできます。</li>
+    <li>FX レイヤーにもマスクを付けて、一部にだけかけられます。レイヤーの順番を変えると、かかる範囲が変わります。</li>
+  </ol>
+
+  <h3>フィルター</h3>
+  <table>
+    <tr><th>種類</th><th>フィルター</th></tr>
+    <tr><td>ぼかしとシャープ</td><td>ガウスぼかし、モーションぼかし、アンシャープマスク</td></tr>
+    <tr><td>色</td><td>明るさ・コントラスト、色相・彩度・明度、レベル補正、トーンカーブ、白黒、反転、ポスタリゼーション、しきい値、グラデーションマップ</td></tr>
+    <tr><td>質感と画面</td><td>ノイズ、ビネット、色収差、モザイク、ハーフトーン、グロー</td></tr>
+  </table>
+  <p>ノイズ、モザイク、ハーフトーンはキャンバスに固定した格子を使うので、表示を動かしても模様がすべりません。ビネットと色収差は書き出し範囲(なければ内容全体)を基準にします。</p>
+  <div class="folio">10</div>
+</section>
+
+<!-- ============================================================ 9 spaces -->
+<section class="page" id="ja-c9" aria-labelledby="ja-c9-h">
+  <div class="running"><span>09</span><span>3D 空間</span></div>
+  <div class="chapter-no">09</div>
+  <h2 id="ja-c9-h">3D 空間</h2>
+  <p class="lede">写真の中で平行な辺に沿って線を何本か引くと、その写真を撮ったカメラを割り出します。その空間に文字や絵を立てたり寝かせたりして、写真の遠近に合わせて置けます。</p>
+
+  <figure class="bleed compact">
+    <img src="img/space.jpg" alt="部屋の写真に 3D 空間を合わせた画面。箱の辺に軸ごとの消失線が引かれ、厚みを付けた青い文字が床に置かれている。" width="1920" height="1080" loading="lazy">
+    <figcaption>箱の辺で合わせた空間に、厚みを付けた文字が 2 つ。カードに焦点距離、画角、線の誤差が出ます。</figcaption>
+  </figure>
+
+  <h3>空間を作る <kbd>K</kbd></h3>
+  <ol class="steps">
+    <li>写真の上をドラッグして空間の範囲を決めるか、写真を押してその写真に合わせます。</li>
+    <li>現実で互いに平行な辺に沿って線を引きます。軸は <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> または <kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd> で切り替えます: <span class="ax x">X</span> <span class="ax y">Y</span> は床の方向、<span class="ax z">Z</span> は上。2 つの軸に 2 本ずつ、少なくとも 4 本必要です。</li>
+    <li>線の端をドラッグして整えます。ドラッグ中はルーペが出て、<kbd>Shift</kbd> で境界を強調して見せます。<kbd>Delete</kbd> か右クリックで線を消します。</li>
+    <li>カメラは線を引くたびにすぐ計算し直します。レイヤーをレイヤーカードの空間フォルダーにドラッグすると、見えているとおりの姿で空間に入ります。</li>
+  </ol>
+
+  <h3>線を検出と自動選択</h3>
+  <div class="side">
+    <div>
+      <p><span class="ui">線を検出</span>は写真の中のまっすぐな辺を探し、薄い色の候補として見せます。候補を押すといまの軸の線になり、そのままドラッグして端を整えられます。候補が勝手に軸を決めることはありません。</p>
+      <p><span class="ui">自動選択</span>を押すと、候補の中から互いに直角に合う 3 方向を選び、軸ごとに何本かずつ入れます。結果がおかしければ元に戻して、手で選んでください。</p>
+    </div>
+    <figure><img src="img/lines.jpg" alt="線を検出で、箱と床の辺に薄い候補線が表示された様子" width="1600" height="700" loading="lazy"><figcaption>線を検出の候補</figcaption></figure>
+  </div>
+
+  <h3>空間のカード</h3>
+  <table>
+    <tr><td><span class="ui">基準の長さ</span> · <span class="ui">メジャー</span></td><td>写真の中の 1 つの長さを実際のメートルで教えると、ほかの長さを測れます</td></tr>
+    <tr><td><span class="ui">+ 壁</span> · <span class="ui">+ 基線の壁</span></td><td>壁を作り、その上のレイヤーは壁を基準に動きます</td></tr>
+    <tr><td><span class="ui">マスクを描く</span></td><td>空間が見える範囲を決めます (手前の物の後ろに隠す)</td></tr>
+    <tr><td><span class="ui">照明</span></td><td>立体の面に光と陰を付けます (落ち影はなし)</td></tr>
+  </table>
+
+  <div class="folio">11</div>
+</section>
+
+<!-- ============================================================ 10 3D workspace -->
+<section class="page" id="ja-c10" aria-labelledby="ja-c10-h">
+  <div class="running"><span>10</span><span>3D ワークスペース</span></div>
+  <div class="chapter-no">10</div>
+  <h2 id="ja-c10-h">3D ワークスペース</h2>
+  <p class="lede">空間を横や上から見ながらレイヤーを配置します。キーは Blender と同じです。</p>
+
+  <figure class="bleed">
+    <img src="img/ws3d.jpg" alt="3D ワークスペース。暗い地に軸、厚みを付けた文字、右に写真のカメラ、左に光のコンパス。" width="1920" height="1080" loading="lazy">
+    <figcaption>上のボタンで視点を、左のコンパスで光の向きを変えます。円すいが写真のカメラです。</figcaption>
+  </figure>
+
+  <h3>切り替え</h3>
+  <p><kbd>Tab</kbd> を短く押すと、2D キャンバスと 3D ワークスペースを行き来します。<strong>押したままにすると</strong>、切り替えずに反対側を少しのぞけます。のぞき見までの時間は<span class="ui">設定</span> › <span class="ui">待ち時間</span>で決めます。</p>
+
+  <div class="two">
+    <div>
+      <h3>視点</h3>
+      <table>
+        <tr><td>中ボタン · ペンのサイドボタン</td><td>軌道回転</td></tr>
+        <tr><td><kbd>Shift</kbd> · <kbd>Ctrl</kbd>+同じドラッグ</td><td>移動 · ズーム</td></tr>
+        <tr><td>ホイール</td><td>ズーム</td></tr>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd></td><td>前 · 右 · 上 (<kbd>Ctrl</kbd>: 反対側)</td></tr>
+        <tr><td><kbd>5</kbd></td><td>透視 ↔ 平行投影</td></tr>
+        <tr><td><kbd>0</kbd></td><td>写真のカメラから見る</td></tr>
+        <tr><td><kbd>.</kbd> · <kbd>Home</kbd></td><td>選んだものに合わせる · 最初の視点</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>動かす G/R/S</h3>
+      <table>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>移動 · 回転 · サイズ</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>その軸だけ。もう 1 回: レイヤー自身の軸、さらに 1 回: 解除</td></tr>
+        <tr><td>数値の入力</td><td>その値だけ</td></tr>
+        <tr><td><kbd>Ctrl</kbd> · <kbd>Shift</kbd></td><td>単位に合わせる · 微調整</td></tr>
+        <tr><td><kbd>Enter</kbd>·クリック / <kbd>Esc</kbd>·右クリック</td><td>確定 / 取り消し</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>値のリセット</td></tr>
+      </table>
+    </div>
+  </div>
+  <p>カードの<span class="ui">床に立てる</span>、<span class="ui">床に寝かせる</span>は、選んだレイヤーを床の上にまっすぐ立てたり寝かせたりします。高さ 0(グリッド)は床ではなく、カメラの目の高さです。</p>
+  
+  <h3>厚みと彫り込み</h3>
+  <p>文字、ペンのストローク、ブラシの絵の<span class="ui">厚み</span>を上げると立体になります。<span class="ui">セグメント</span>と<span class="ui">スムーズシェーディング</span>で側面を整え、<span class="ui">彫り込み</span>をオンにすると表面の内側へ彫り込みます。空間の中のレイヤーを <kbd>Alt</kbd> を押したままドラッグすると、床に沿ってすべります。</p>
+  <div class="folio">12</div>
+</section>
+
+<!-- ============================================================ 11 timeline -->
+<section class="page" id="ja-c11" aria-labelledby="ja-c11-h">
+  <div class="running"><span>11</span><span>タイムライン、動画、音</span></div>
+  <div class="chapter-no">11</div>
+  <h2 id="ja-c11-h">タイムライン、動画、音</h2>
+  <p class="lede">キャンバスをそのまま動く絵にします。動画と音の機能には ffmpeg が必要です。</p>
+
+  <figure class="bleed">
+    <img src="img/timeline-bar.jpg" alt="タイムライン: 再生、先頭、時間、fps、長さ、自動キー、録画、キーを追加、キーを削除、動画を書き出し、そしてカメラの位置、サイズ、回転、追従の行" width="2480" height="220" loading="lazy">
+    <figcaption>タイムライン (<kbd>Ctrl</kbd>+<kbd>T</kbd>)。カメラの下に、キーのある値ごとに 1 行。</figcaption>
+  </figure>
+
+  <h3>キーアニメーション</h3>
+  <ul>
+    <li><kbd>Alt</kbd>+<kbd>A</kbd> で再生・停止、<kbd>,</kbd> <kbd>.</kbd> で 1 フレームずつ。</li>
+    <li><kbd>I</kbd> は選んだものの今の値をキーにし、<kbd>Alt</kbd>+<kbd>I</kbd> は再生ヘッド位置のキーをすべて消します。プロパティの行ごとにキーボタンがあり、値を 1 つずつキーにでき、<span class="ui">&lt;</span> <span class="ui">&gt;</span> で前後のキーへ飛びます。</li>
+    <li>各レイヤーの名前の行の下に、キーのある値(位置、サイズ、回転、不透明度、3D の位置、厚み、音量、FX の値など)が 1 行ずつ出ます。キーは自分の行でだけ選び、動かし、消します。</li>
+    <li><span class="ui">自動キー</span>をオンにすると、変えた値にだけキーが入ります。</li>
+    <li>キーはドラッグで動かし、<kbd>Shift</kbd>+ドラッグで複数選びます。再生ヘッドを <kbd>Shift</kbd> を押したままドラッグすると、近くのキーに吸着します。キーの形は補間(スムーズ、リニア、ホールド)を表します。</li>
+    <li>名前の行を右クリックすると、レイヤーが現れる時と消える時を決められます。</li>
+  </ul>
+
+  <h3>カメラと録画</h3>
+  <ul>
+    <li><kbd>F</kbd> ツールでキャンバスのカメラを作り、位置とサイズにキーを打って画面を動かします。</li>
+    <li><span class="ui">● 録画</span>をオンにして描くと、ペンとブラシのストロークが描いた順番と速さのまま再生されます。</li>
+    <li>再生時は描き終えたフレームをメモリーにためておく(再生キャッシュ)ので、重い場面もなめらかに再生できます。</li>
+  </ul>
+
+  <h3>動画と音のレイヤー</h3>
+  <ul>
+    <li>動画をドロップすると、タイムラインではクリップになります。動かしたり前後を切ったりでき、クリップの外では最初か最後のフレームで止まっています。</li>
+    <li>プロパティカードで、いまのフレームを写真レイヤーにできます。</li>
+    <li>音のファイルはキャンバスにスピーカーの印で置かれ、タイムラインで動かしたり切ったりできます。音量にもキーを打てます。</li>
+  </ul>
+  <div class="folio">13</div>
+</section>
+
+<!-- ============================================================ 12 export -->
+<section class="page" id="ja-c12" aria-labelledby="ja-c12-h">
+  <div class="running"><span>12</span><span>書き出しと保存</span></div>
+  <div class="chapter-no">12</div>
+  <h2 id="ja-c12-h">書き出しと保存</h2>
+  <p class="lede">キャンバス全体ではなく、欲しい部分だけを欲しいサイズで書き出します。書き出しは画面と同じ GPU レンダラーで描きます。</p>
+
+  <h3>範囲を決める <kbd>F</kbd></h3>
+  <p><span class="ui">書き出し範囲</span>ツールで四角を描きます。何かを選んだまま使うと、それにぴったり合わせます。</p>
+
+  <h3>画像 <kbd>Ctrl</kbd>+<kbd>E</kbd></h3>
+  <p>PNG か JPEG で書き出します。<span class="ui">余白</span>は範囲の外に取る距離で、<span class="ui">サンプル数</span>を上げると大きく描いてから縮め、ふちがよりなめらかになります。背景は透明、白、選んだ色から決めます。<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> は範囲をそのままクリップボードへコピーします。</p>
+
+  <h3>動画 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></h3>
+  <div class="side">
+    <div>
+      <table>
+        <tr><td><span class="ui">範囲</span></td><td>書き出し範囲かカメラ、内容全体、いまの画面</td></tr>
+        <tr><td><span class="ui">サイズ</span></td><td>幅か高さを基準に。はじめは範囲の実際のピクセル数</td></tr>
+        <tr><td><span class="ui">形式</span></td><td>H.264、H.265、AV1、ProRes 4444(透明)、VP9(透明)、GIF、PNG 連番</td></tr>
+        <tr><td><span class="ui">画質の基準</span></td><td>品質の値(低いほど高画質)、またはビットレート</td></tr>
+        <tr><td><span class="ui">GPU エンコード</span></td><td>NVIDIA のグラフィックカードなら既定でオン (NVENC)</td></tr>
+        <tr><td><span class="ui">サンプル数</span> · <span class="ui">背景</span></td><td>1–4 倍 · 透明、白、色</td></tr>
+        <tr><td><span class="ui">音声を含む</span></td><td>タイムラインの音と動画の音を混ぜて入れます</td></tr>
+      </table>
+      <p>進み具合はウィンドウに出て、いつでも取り消せます。</p>
+    </div>
+    <figure><img src="img/vexport-card.jpg" alt="動画の書き出しウィンドウ: 範囲、サイズ、fps、形式、画質の基準、品質、GPU エンコード、サンプル数、背景、音声を含む" width="360" height="500" loading="lazy"><figcaption>動画の書き出しウィンドウ</figcaption></figure>
+  </div>
+
+  <h3>保存</h3>
+  <p><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存、<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> 名前を付けて保存、<kbd>Ctrl</kbd>+<kbd>O</kbd> 開く、<kbd>Ctrl</kbd>+<kbd>N</kbd> 新規。<code>.void</code> ファイルをダブルクリックしても開けます。</p>
+  <div class="note"><b class="tag">動画と音のファイル</b><br>写真は <code>.void</code> の中に一緒に保存されますが、動画と音は元のファイルを参照します。プロジェクトを別の PC へ移すときは、動画と音のファイルも一緒に移してください。</div>
+  <div class="folio">14</div>
+</section>
+
+<!-- ============================================================ 13 keys -->
+<section class="page" id="ja-keys" aria-labelledby="ja-keys-h">
+  <div class="running"><span>13</span><span>ショートカット一覧</span></div>
+  <div class="chapter-no">13</div>
+  <h2 id="ja-keys-h">ショートカット一覧</h2>
+  <div class="two">
+    <div>
+      <h4>ツール</h4>
+      <table>
+        <tr><td><kbd>V</kbd> <kbd>Q</kbd> <kbd>H</kbd></td><td>選択 · なげなわ · 表示の移動</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>P</kbd> <kbd>E</kbd></td><td>ブラシ · ペン · 消しゴム</td></tr>
+        <tr><td><kbd>T</kbd> <kbd>L</kbd> <kbd>A</kbd></td><td>テキスト · 線 · 矢印</td></tr>
+        <tr><td><kbd>R</kbd> <kbd>O</kbd> <kbd>C</kbd></td><td>四角形 · 楕円 · 写真の切り抜き</td></tr>
+        <tr><td><kbd>F</kbd> <kbd>K</kbd> <kbd>I</kbd></td><td>書き出し範囲 · 3D 空間 · スポイト</td></tr>
+      </table>
+      <h4>ファイル</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>O</kbd> <kbd>S</kbd></td><td>新規 · 開く · 保存</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>名前を付けて保存</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>写真の読み込み</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>画像の書き出し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>動画の書き出し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></td><td>範囲をクリップボードへ</td></tr>
+      </table>
+      <h4>編集</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Y</kbd></td><td>元に戻す · やり直し</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd> · <kbd>D</kbd></td><td>貼り付け(絵、文字、画像のリンク) · 複製</td></tr>
+        <tr><td><kbd>Backspace</kbd> · <kbd>Delete</kbd></td><td>削除 · 空にする</td></tr>
+        <tr><td><kbd>G</kbd> <kbd>R</kbd> <kbd>S</kbd></td><td>移動 · 回転 · サイズ</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>取り消し (ハサミ: 2 回でモードを終える)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h4>表示</h4>
+      <table>
+        <tr><td>ホイール · 中ドラッグ</td><td>ズーム · 移動</td></tr>
+        <tr><td><kbd>Space</kbd>+ドラッグ</td><td>移動 (ドラッグ中も)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> · <kbd>1</kbd></td><td>全体表示 · 100 %</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>UI 倍率</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>UI を隠す</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>2D ↔ 3D · 押したままでのぞき見</td></tr>
+      </table>
+      <h4>描画と色</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+ドラッグ · <kbd>[</kbd> <kbd>]</kbd></td><td>サイズ · 線の太さ</td></tr>
+        <tr><td><kbd>Alt</kbd>+クリック</td><td>パレット</td></tr>
+        <tr><td><kbd>Alt</kbd> (マスク)</td><td>元に戻す</td></tr>
+      </table>
+      <h4>タイムライン</h4>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>タイムラインを開く</td></tr>
+        <tr><td><kbd>Alt</kbd>+<kbd>A</kbd></td><td>再生 · 停止</td></tr>
+        <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>1 フレーム前 · 後</td></tr>
+        <tr><td><kbd>I</kbd> · <kbd>Alt</kbd>+<kbd>I</kbd></td><td>キーを追加 · 削除</td></tr>
+      </table>
+      <h4>3D ワークスペース</h4>
+      <table>
+        <tr><td><kbd>1</kbd> <kbd>3</kbd> <kbd>7</kbd> · <kbd>5</kbd></td><td>前 · 右 · 上 · 平行投影</td></tr>
+        <tr><td><kbd>0</kbd> · <kbd>.</kbd> · <kbd>Home</kbd></td><td>カメラ · 合わせる · 最初</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>Y</kbd> <kbd>Z</kbd></td><td>G/R/S の軸を固定</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="folio">15</div>
+</section>
+
+<!-- ============================================================ 14 help -->
+<section class="page" id="ja-c14" aria-labelledby="ja-c14-h">
+  <div class="running"><span>14</span><span>ヘルプとライセンス</span></div>
+  <div class="chapter-no">14</div>
+  <h2 id="ja-c14-h">ヘルプとライセンス</h2>
+  <p class="lede">おかしな点があれば、小さなことでも知らせてください。次のものを一緒に送っていただくと、早く直せます。</p>
+
+  <h3>問題を知らせるとき</h3>
+  <ul>
+    <li>何をしていてどうなったか、もう一度やっても同じか。</li>
+    <li>アプリが突然終了したときは <code>%APPDATA%\DriftingVOID\crash.log</code>。</li>
+    <li>できれば画面のキャプチャーと、問題が起きた <code>.void</code> ファイル。</li>
+    <li>グラフィックカードとペンタブレットの種類。</li>
+  </ul>
+
+  <h3>既知の制限</h3>
+  <ul>
+    <li>Windows 10/11 専用です。DirectX 12 か Vulkan に対応したグラフィックカードが必要です。</li>
+    <li>コード署名がないため、初回起動時に Windows の保護画面が出ます。</li>
+    <li>フォントにない文字は別のフォントで代わりに描かず、空の四角で表示します (意図した動作)。</li>
+    <li>とても大きな録画ペンレイヤーは、読み込みに少し時間がかかることがあります。</li>
+    <li>再生キャッシュはメモリーを多く使うことがあります (最大で物理メモリーの 75 %)。</li>
+  </ul>
+
+  <h3>ffmpeg とライセンス</h3>
+  <p>Drifting VOID は動画の処理に <a href="https://ffmpeg.org">FFmpeg</a> を別のプログラムとして実行します。ffmpeg はこの配布ファイルに含まれていません。セットアップ中に <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の公開ビルド(GPL)を取得してインストール先の <code>ffmpeg</code> フォルダーに置き、そのフォルダーの <code>LICENSE.txt</code> にライセンス全文が、<code>SOURCE.txt</code> に取得したファイル名、チェックサム、入手元があります。</p>
+  <p>日本語の画面フォント Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
+
+  <div class="note"><b class="tag">このマニュアル</b><br>右上で言語を切り替え、<span class="ui">印刷</span>で A4 の冊子として印刷したり PDF に保存したりできます。最初はブラウザーの言語に合わせて開きます。画面ではシステムのテーマに従い、半円のボタンでライト・ダークを切り替えます。</div>
+  <div class="folio">16</div>
+</section>
+
+</main>
+
+
 <script>
+// the bar in the page's language; switching keeps the reader on the same chapter
+(function () {
+  var root = document.documentElement, key = "dv-manual-lang";
+  var T = {
+    ko: { title: "Drifting VOID 사용 설명서", nav: "설명서 메뉴", toc: "차례", keys: "단축키", print: "인쇄", printTip: "인쇄하거나 PDF로 저장", theme: "밝게/어둡게" },
+    en: { title: "Drifting VOID manual", nav: "Manual", toc: "Contents", keys: "Keys", print: "Print", printTip: "Print or save as PDF", theme: "Light/dark" },
+    ja: { title: "Drifting VOID ユーザーマニュアル", nav: "マニュアルのメニュー", toc: "目次", keys: "ショートカット", print: "印刷", printTip: "印刷または PDF に保存", theme: "ライト/ダーク" }
+  };
+  var $ = function (id) { return document.getElementById(id); };
+  function label(l) {
+    var t = T[l];
+    document.title = t.title;
+    document.querySelector(".bar").setAttribute("aria-label", t.nav);
+    $("go-toc").textContent = t.toc; $("go-toc").href = "#" + l + "-toc";
+    $("go-keys").textContent = t.keys; $("go-keys").href = "#" + l + "-keys";
+    $("print").textContent = t.print; $("print").title = t.printTip;
+    $("theme").title = t.theme; $("theme").setAttribute("aria-label", t.theme);
+    document.querySelectorAll(".langs button").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.lang === l)); });
+  }
+  function set(l) { root.dataset.lang = l; root.lang = l; label(l); }
+  // the chapter at the top of the window (its id without the language)
+  function current() {
+    var best = null;
+    document.querySelectorAll('main.book[lang="' + root.dataset.lang + '"] section[id]').forEach(function (s) {
+      if (s.getBoundingClientRect().top <= 80) best = s;
+    });
+    return best && best.id.replace(/^[a-z]+-/, "");
+  }
+  set(root.dataset.lang);
+  // a link to another language's chapter (#ja-c3) opens that language
+  var m = /^#(ko|en|ja)-/.exec(location.hash);
+  if (m && m[1] !== root.dataset.lang) {
+    set(m[1]);
+    var s = document.getElementById(location.hash.slice(1));
+    if (s) s.scrollIntoView();
+  }
+  document.querySelectorAll(".langs button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var at = current();
+      try { localStorage.setItem(key, b.dataset.lang); } catch (e) {}
+      set(b.dataset.lang);
+      var s = at && document.getElementById(b.dataset.lang + "-" + at);
+      if (s) s.scrollIntoView();
+    });
+  });
+})();
 // the theme toggle: system by default; a choice is kept in this browser
 (function () {
   var root = document.documentElement, key = "dv-manual-theme";
