@@ -1,12 +1,14 @@
 ﻿# Drifting VOID uninstall: removes the install folder (with its ffmpeg),
 # shortcuts, the .void file type and the uninstall entry. Settings in
 # %APPDATA%\DriftingVOID stay unless asked. Projects (.void files) are never touched.
-param([switch]$Quiet)
+param([switch]$Quiet, [string]$Lang = "")
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $dir = $PSScriptRoot
 $appName = "Drifting VOID"
+. (Join-Path $PSScriptRoot "msg.ps1")
+$DvLang = Get-DvLang $Lang
 
 function Ask([string]$q, [bool]$yes) {
     if ($Quiet) { return $yes }
@@ -17,15 +19,15 @@ function Ask([string]$q, [bool]$yes) {
 }
 
 Write-Host ""
-Write-Host "  DRIFTING VOID  ·  제거" -ForegroundColor White
+Write-Host "  DRIFTING VOID  ·  $(T unTitle)" -ForegroundColor White
 Write-Host "  $dir" -ForegroundColor DarkGray
-Write-Host "  .void 프로젝트 파일은 지우지 않습니다." -ForegroundColor DarkGray
-if (-not $Quiet -and -not (Ask "제거할까요?" $false)) { exit 0 }
+Write-Host "  $(T unKeep)" -ForegroundColor DarkGray
+if (-not $Quiet -and -not (Ask (T unAsk) $false)) { exit 0 }
 
 $running = Get-Process -Name "DriftingVOID" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) }
 if ($running) {
-    Write-Host "  Drifting VOID가 실행 중입니다. 저장하고 닫은 뒤 다시 실행하세요." -ForegroundColor Red
+    Write-Host "  $(T unRunning)" -ForegroundColor Red
     if (-not $Quiet) { Read-Host "  Enter" | Out-Null }
     exit 1
 }
@@ -47,10 +49,10 @@ $un = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DriftingVOID"
 if (Test-Path $un) { Remove-Item $un -Recurse -Force }
 
 $data = Join-Path $env:APPDATA "DriftingVOID"
-if ((Test-Path $data) -and (Ask "설정과 오류 기록($data)도 지울까요?" $false)) { Remove-Item $data -Recurse -Force }
+if ((Test-Path $data) -and (Ask (T unData $data) $false)) { Remove-Item $data -Recurse -Force }
 
 # this script lives in the folder it removes: step out first
 Set-Location $env:TEMP
 Remove-Item $dir -Recurse -Force
-Write-Host "  제거했습니다." -ForegroundColor Green
-if (-not $Quiet) { Read-Host "  Enter로 닫기" | Out-Null }
+Write-Host "  $(T unDone)" -ForegroundColor Green
+if (-not $Quiet) { Read-Host "  $(T closeEnter)" | Out-Null }

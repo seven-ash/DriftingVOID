@@ -1,5 +1,11 @@
 ﻿Drifting VOID {VERSION}
 
+한국어 · English (below) · 日本語 (下)
+
+========================================================================
+한국어
+========================================================================
+
 설치
   1. 압축을 모두 풉니다 (압축 파일 안에서 바로 실행하지 마세요).
   2. Setup.cmd를 더블 클릭합니다.
@@ -7,6 +13,8 @@
      (아직 코드 서명이 없어서 나오는 창입니다.)
   3. 영상·소리에 쓰는 ffmpeg가 없으면 GitHub에서 내려받을지 묻습니다 (약 80 MB).
      관리자 권한은 필요 없습니다. 설치 위치: %LOCALAPPDATA%\Programs\DriftingVOID
+  설치 창은 Windows 표시 언어(또는 앱에서 고른 언어)로 나옵니다.
+  다른 언어로 하려면: Setup.cmd -Lang ko | en | ja
 
 사용 설명서
   manual\index.html 을 브라우저로 엽니다. 설치 후에는 시작 메뉴에도 있습니다.
@@ -23,3 +31,65 @@ ffmpeg
   이 패키지에는 들어 있지 않으며, 설치 과정에서 GitHub의 BtbN/FFmpeg-Builds
   공개 빌드를 받아 SHA-256을 확인한 뒤 설치 폴더의 ffmpeg 폴더에만 둡니다.
   라이선스 전문과 출처는 그 폴더의 LICENSE.txt, SOURCE.txt에 있습니다.
+
+========================================================================
+English
+========================================================================
+
+Setup
+  1. Extract the whole zip (do not run it from inside the zip).
+  2. Double-click Setup.cmd.
+     If "Windows protected your PC" appears, choose [More info] → [Run anyway].
+     (The app is not code-signed yet.)
+  3. Without ffmpeg (for video and sound), setup offers to download it from
+     GitHub (about 80 MB).
+     No administrator rights needed. Installs to %LOCALAPPDATA%\Programs\DriftingVOID
+  Setup speaks the Windows display language (or the one chosen in the app).
+  For another language: Setup.cmd -Lang ko | en | ja
+
+Manual
+  Open manual\index.html in a browser. After setup it is in the Start menu too.
+
+Removing
+  Settings > Apps > Drifting VOID > Uninstall
+  .void project files are never deleted.
+
+If something goes wrong
+  Please send %APPDATA%\DriftingVOID\crash.log along.
+
+ffmpeg
+  A separate program from the FFmpeg project (https://ffmpeg.org), under the
+  GPL. It is not in this package: setup downloads the public build from
+  BtbN/FFmpeg-Builds on GitHub, checks its SHA-256 and keeps it only in the
+  install folder's ffmpeg folder, with the full licence and its source in
+  LICENSE.txt and SOURCE.txt there.
+
+========================================================================
+日本語
+========================================================================
+
+インストール
+  1. zip をすべて展開します (zip の中から直接実行しないでください)。
+  2. Setup.cmd をダブルクリックします。
+     「Windows によって PC が保護されました」が出たら [詳細情報] → [実行] を押します。
+     (まだコード署名がないために出る画面です。)
+  3. 動画・音に使う ffmpeg がなければ、GitHub からダウンロードするか聞きます (約 80 MB)。
+     管理者権限は不要です。インストール先: %LOCALAPPDATA%\Programs\DriftingVOID
+  セットアップは Windows の表示言語(またはアプリで選んだ言語)で表示されます。
+  別の言語にするには: Setup.cmd -Lang ko | en | ja
+
+マニュアル
+  manual\index.html をブラウザーで開きます。インストール後はスタートメニューにもあります。
+
+アンインストール
+  設定 > アプリ > Drifting VOID > アンインストール
+  .void プロジェクトファイルは削除しません。
+
+問題が起きたら
+  %APPDATA%\DriftingVOID\crash.log を一緒に送ってください。
+
+ffmpeg
+  FFmpeg プロジェクト(https://ffmpeg.org)の別のプログラムで、GPL ライセンスです。
+  このパッケージには含まれず、セットアップ中に GitHub の BtbN/FFmpeg-Builds の
+  公開ビルドを取得して SHA-256 を確かめ、インストール先の ffmpeg フォルダーにだけ
+  置きます。ライセンス全文と入手元は、そのフォルダーの LICENSE.txt、SOURCE.txt にあります。
