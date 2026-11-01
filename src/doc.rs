@@ -315,6 +315,41 @@ pub struct TextLayer {
     pub rotation: f32,
     pub blend: Blend,
     pub align: TextAlign,
+    pub look: TextLook,
+}
+
+/// A text box's shape and border, and the outline round its letters. Sizes
+/// are fractions of the em size, so they follow the text size.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextLook {
+    /// Box padding, sideways and up/down.
+    pub pad_x: f32,
+    pub pad_y: f32,
+    /// Box corner radius.
+    pub radius: f32,
+    /// Box border, drawn inside the box edge.
+    pub border: Option<Color32>,
+    pub border_w: f32,
+    /// Outline round the letters, drawn under them (half of it shows).
+    pub stroke: Option<Color32>,
+    pub stroke_w: f32,
+}
+
+impl Default for TextLook {
+    fn default() -> Self {
+        TextLook { pad_x: 0.35, pad_y: 0.35, radius: 0.3, border: None, border_w: 0.06, stroke: None, stroke_w: 0.12 }
+    }
+}
+
+impl std::hash::Hash for TextLook {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        for v in [self.pad_x, self.pad_y, self.radius, self.border_w, self.stroke_w] {
+            v.to_bits().hash(h);
+        }
+        self.border.hash(h);
+        self.stroke.hash(h);
+    }
 }
 
 /// Where the lines of a text box sit across it.
@@ -1065,7 +1100,7 @@ mod tests {
 
     #[test]
     fn centred_text_grows_both_ways() {
-        let mut t = TextLayer { pos: pos2(100.0, 50.0), text: "ab".into(), size: 40.0, color: Color32::WHITE, family: String::new(), style: "Regular".into(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: TextAlign::Center };
+        let mut t = TextLayer { pos: pos2(100.0, 50.0), text: "ab".into(), size: 40.0, color: Color32::WHITE, family: String::new(), style: "Regular".into(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: TextAlign::Center, look: Default::default() };
         let mid = |t: &TextLayer| t.pos.x + crate::text::layout(t).size.x * 0.5;
         let before = mid(&t);
         let s0 = crate::text::layout(&t).size;
@@ -1096,6 +1131,7 @@ mod tests {
             rotation: 0.6,
             blend: Blend::Normal,
             align: TextAlign::Left,
+            look: Default::default(),
         };
         let corner = |t: &TextLayer| {
             let s = crate::text::layout(t).size;

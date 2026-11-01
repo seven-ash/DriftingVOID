@@ -11,7 +11,7 @@ use tiny_skia::Pixmap;
 pub const ROOM_LINES: &str = "566.4,407.3,691.6,380.2,0;563.9,198.1,697.9,189.4,0;447.1,181.2,567.5,175.4,0;566.4,407.3,456.0,354.7,1;563.9,198.1,447.1,181.2,1;697.9,189.4,567.5,175.4,1;566.4,407.3,563.9,198.1,2;691.6,380.2,697.9,189.4,2;456.0,354.7,447.1,181.2,2";
 
 fn text(pos: egui::Pos2, s: &str, size: f32, color: Color32) -> TextLayer {
-    TextLayer { pos, text: s.into(), size, color, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: Default::default() }
+    TextLayer { pos, text: s.into(), size, color, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: Default::default(), look: Default::default() }
 }
 
 fn shape(kind: ShapeKind, a: egui::Pos2, b: egui::Pos2, color: Color32, fill: Option<Color32>, rotation: f32) -> ShapeLayer {
@@ -562,6 +562,11 @@ fn gpu_text_matches_cpu() {
         }
         doc.insert("t".into(), LayerKind::Text(t), None);
     }
+    // box options and the letter outline, turned
+    let mut t = text(pos2(380.0, 120.0), "Outline 외곽", 44.0, Color32::from_rgb(255, 230, 90));
+    t.bg = Some(Color32::from_rgb(40, 60, 90));
+    t.look = crate::doc::TextLook { pad_x: 0.6, pad_y: 0.2, radius: 0.5, border: Some(Color32::from_rgb(230, 60, 60)), border_w: 0.08, stroke: Some(Color32::BLACK), stroke_w: 0.1 };
+    doc.insert("t".into(), LayerKind::Text(t), None);
     let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 300.0));
     for scale in [1.0, 2.37] {
         let cpu = render(&doc, region, scale, Some(Color32::WHITE)).unwrap();

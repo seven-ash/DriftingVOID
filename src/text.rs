@@ -43,7 +43,8 @@ pub struct TextLayout {
     /// Glyph id, x, baseline y (relative to the content origin, before padding).
     pub glyphs: Vec<(GlyphId, f32, f32)>,
     pub size: Vec2,
-    pub pad: f32,
+    /// Room round the lines: the box padding, or the letters' outline.
+    pub pad: Vec2,
     /// Caret spot before each character (and after the last), as the top of its
     /// line (x, y relative to the content origin, before padding).
     pub carets: Vec<(f32, f32)>,
@@ -89,8 +90,14 @@ pub fn em_scale(font: &FontArc, size: f32) -> PxScale {
     }
 }
 
-pub fn pad_for(t: &TextLayer) -> f32 {
-    if t.bg.is_some() { (t.size * 0.35).max(2.0) } else { 0.0 }
+/// How far the letters' outline reaches past them (0 without one).
+pub fn stroke_reach(t: &TextLayer) -> f32 {
+    if t.look.stroke.is_some() { (t.size * t.look.stroke_w).max(0.0) } else { 0.0 }
+}
+
+pub fn pad_for(t: &TextLayer) -> Vec2 {
+    let s = stroke_reach(t);
+    if t.bg.is_some() { vec2((t.size * t.look.pad_x).max(s), (t.size * t.look.pad_y).max(s)) } else { Vec2::splat(s) }
 }
 
 pub fn layout(t: &TextLayer) -> TextLayout {
@@ -100,7 +107,7 @@ pub fn layout(t: &TextLayer) -> TextLayout {
     let line_h = sf.height() + sf.line_gap();
     let ascent = sf.ascent();
     let pad = pad_for(t);
-    let maxw = if t.wrap > 0.0 { (t.wrap - pad * 2.0).max(t.size) } else { 0.0 };
+    let maxw = if t.wrap > 0.0 { (t.wrap - pad.x * 2.0).max(t.size) } else { 0.0 };
 
     let width_of = |chars: &[char]| -> f32 {
         let mut x = 0.0;
@@ -217,7 +224,7 @@ pub fn layout(t: &TextLayer) -> TextLayout {
         .map(|c| c.map_or((0.0, shift), |(x, li)| (x + line_dx.get(li).copied().unwrap_or(0.0), shift + li as f32 * line_h)))
         .collect();
     h += bottom - (lines.len().max(1) as f32 * line_h);
-    TextLayout { glyphs, size: vec2(content_w + pad * 2.0, h + pad * 2.0), pad, carets, line_h }
+    TextLayout { glyphs, size: vec2(content_w, h) + pad * 2.0, pad, carets, line_h }
 }
 
 pub fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
@@ -234,6 +241,62 @@ pub fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia:
     pb.quad_to(x, y, x + r, y);
     pb.close();
     pb.finish()
+}
+
+/// The box's fill and its border (path and line width), `scale` pixels per
+/// unit with the box's top-left at `o`. None without a box.
+pub fn box_paths(t: &TextLayer, lay: &TextLayout, o: Vec2, scale: f32) -> Option<(tiny_skia::Path, Option<(tiny_skia::Path, f32)>)> {
+    t.bg?;
+    let (w, h) = (lay.size.x * scale, lay.size.y * scale);
+    let r = (t.size * t.look.radius * scale).max(0.0);
+    let fill = rounded_rect(o.x, o.y, w, h, r)?;
+    let border = t.look.border.and_then(|_| {
+        let lw = (t.size * t.look.border_w * scale).min(w.min(h) * 0.5);
+        if lw <= 0.0 {
+            return None;
+        }
+        // inside the edge: the box keeps its size
+        rounded_rect(o.x + lw * 0.5, o.y + lw * 0.5, w - lw, h - lw, (r.min(w * 0.5).min(h * 0.5) - lw * 0.5).max(0.0)).map(|p| (p, lw))
+    });
+    Some((fill, border))
+}
+
+/// A glyph's outline as a path: font units through (x, y) -> at + (x hs, −y vs).
+pub fn glyph_path(pb: &mut PathBuilder, font: &FontArc, gid: GlyphId, at: (f32, f32), hs: f32, vs: f32) {
+    use ab_glyph::OutlineCurve;
+    let Some(o) = font.outline(gid) else { return };
+    let m = |p: ab_glyph::Point| (at.0 + p.x * hs, at.1 - p.y * vs);
+    let mut last: Option<ab_glyph::Point> = None;
+    for c in &o.curves {
+        let (a, end) = match *c {
+            OutlineCurve::Line(a, b) | OutlineCurve::Quad(a, _, b) | OutlineCurve::Cubic(a, _, _, b) => (a, b),
+        };
+        if last != Some(a) {
+            if last.is_some() {
+                pb.close();
+            }
+            let p = m(a);
+            pb.move_to(p.0, p.1);
+        }
+        match *c {
+            OutlineCurve::Line(_, b) => {
+                let p = m(b);
+                pb.line_to(p.0, p.1);
+            }
+            OutlineCurve::Quad(_, b, e) => {
+                let (q, p) = (m(b), m(e));
+                pb.quad_to(q.0, q.1, p.0, p.1);
+            }
+            OutlineCurve::Cubic(_, b, c2, e) => {
+                let (q, r, p) = (m(b), m(c2), m(e));
+                pb.cubic_to(q.0, q.1, r.0, r.1, p.0, p.1);
+            }
+        }
+        last = Some(end);
+    }
+    if last.is_some() {
+        pb.close();
+    }
 }
 
 /// Renders the text box at `scale` into a new pixmap. `frac` is a sub-pixel
@@ -254,27 +317,51 @@ pub fn render_window(t: &TextLayer, lay: &TextLayout, scale: f32, win: Rect) -> 
 
 fn render_into(t: &TextLayer, lay: &TextLayout, scale: f32, frac: Vec2, w: u32, h: u32) -> Option<Pixmap> {
     let mut pm = Pixmap::new(w, h)?;
-    if let Some(bg) = t.bg {
-        if let Some(path) = rounded_rect(frac.x, frac.y, lay.size.x * scale, lay.size.y * scale, t.size * 0.3 * scale) {
-            let mut paint = Paint::default();
-            let [r, g, b, a] = bg.to_srgba_unmultiplied();
-            paint.set_color_rgba8(r, g, b, a);
-            paint.anti_alias = true;
-            pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    let paint = |c: egui::Color32| {
+        let mut paint = Paint::default();
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        paint.set_color_rgba8(r, g, b, a);
+        paint.anti_alias = true;
+        paint
+    };
+    if let (Some(bg), Some((fill, border))) = (t.bg, box_paths(t, lay, frac, scale)) {
+        pm.fill_path(&fill, &paint(bg), FillRule::Winding, Transform::identity(), None);
+        if let (Some(bc), Some((path, lw))) = (t.look.border, border) {
+            let st = tiny_skia::Stroke { width: lw, ..Default::default() };
+            pm.stroke_path(&path, &paint(bc), &st, Transform::identity(), None);
         }
     }
     let font = &font_for(t);
     let px = em_scale(font, (t.size * scale).max(0.5));
+    // glyphs well outside the pixmap are skipped (windows of long boxes)
+    let reach = t.size * 2.0 * scale;
+    let near = |x: f32, y: f32| !(x < -reach || x > w as f32 + reach || y < -reach || y > h as f32 + reach);
+    if let Some(sc) = t.look.stroke {
+        let sw = stroke_reach(t) * scale;
+        if sw > 0.0 {
+            let sf = font.as_scaled(px);
+            let mut pb = PathBuilder::new();
+            for &(gid, x, y) in &lay.glyphs {
+                let at = (frac.x + (lay.pad.x + x) * scale, frac.y + (lay.pad.y + y) * scale);
+                if near(at.0, at.1) {
+                    glyph_path(&mut pb, font, gid, at, sf.h_scale_factor(), sf.v_scale_factor());
+                }
+            }
+            if let Some(path) = pb.finish() {
+                // centred on the edge: the fill covers the inner half
+                let st = tiny_skia::Stroke { width: sw * 2.0, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+                pm.stroke_path(&path, &paint(sc), &st, Transform::identity(), None);
+            }
+        }
+    }
     let [cr, cg, cb, ca] = t.color.to_srgba_unmultiplied();
     let ca = ca as f32 / 255.0;
     let col = [cr as f32, cg as f32, cb as f32];
     let (pw, ph) = (w as i32, h as i32);
     let data = pm.data_mut();
-    // glyphs well outside the pixmap are skipped (windows of long boxes)
-    let reach = t.size * 2.0 * scale;
     for &(gid, x, y) in &lay.glyphs {
-        let pos = point(frac.x + (lay.pad + x) * scale, frac.y + (lay.pad + y) * scale);
-        if pos.x < -reach || pos.x > w as f32 + reach || pos.y < -reach || pos.y > h as f32 + reach {
+        let pos = point(frac.x + (lay.pad.x + x) * scale, frac.y + (lay.pad.y + y) * scale);
+        if !near(pos.x, pos.y) {
             continue;
         }
         let Some(og) = font.outline_glyph(gid.with_scale_and_position(px, pos)) else { continue };
@@ -306,13 +393,30 @@ mod tests {
     #[test]
     fn box_holds_every_glyph() {
         // whatever the font's ascent/descent say, the rendered ink stays inside
-        let t = TextLayer { pos: Pos2::ZERO, text: "gjpqy ÅÉ Drifting".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+        let t = TextLayer { pos: Pos2::ZERO, text: "gjpqy ÅÉ Drifting".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default(), look: Default::default() };
         let lay = layout(&t);
         let pm = render(&t, &lay, 1.0, Vec2::ZERO).unwrap();
         let (w, h) = (pm.width() as usize, pm.height() as usize);
         let row = |y: usize| (0..w).any(|x| pm.data()[(y * w + x) * 4 + 3] > 0);
         // the box edges (last row is the +1 margin) carry no ink
         assert!(!row(0) && !row(h - 1), "ink touches the box edge");
+    }
+
+    #[test]
+    fn outline_without_a_box_stays_inside() {
+        // the outline reaches past the letters: the layer grows to hold it
+        let mut t = TextLayer { pos: Pos2::ZERO, text: "gjpqy Wl".into(), size: 60.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default(), look: Default::default() };
+        t.look.stroke = Some(egui::Color32::BLACK);
+        t.look.stroke_w = 0.15;
+        let lay = layout(&t);
+        assert_eq!(lay.pad, Vec2::splat(9.0));
+        let pm = render(&t, &lay, 1.0, Vec2::ZERO).unwrap();
+        let (w, h) = (pm.width() as usize, pm.height() as usize);
+        let ink = |x: usize, y: usize| pm.data()[(y * w + x) * 4 + 3] > 0;
+        assert!(!(0..w).any(|x| ink(x, 0) || ink(x, h - 1)), "outline cut at the top or bottom");
+        assert!(!(0..h).any(|y| ink(0, y)), "outline cut on the left");
+        // black outline pixels round the white letters
+        assert!(pm.data().chunks(4).any(|p| p[3] == 255 && p[0] == 0));
     }
 }
 
@@ -322,7 +426,7 @@ mod caret_tests {
 
     #[test]
     fn carets_follow_lines_and_alignment() {
-        let mut t = TextLayer { pos: Pos2::ZERO, text: "ab\nc".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+        let mut t = TextLayer { pos: Pos2::ZERO, text: "ab\nc".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default(), look: Default::default() };
         let lay = layout(&t);
         assert_eq!(lay.carets.len(), 5);
         assert_eq!(lay.carets[0].0, 0.0);
@@ -338,7 +442,7 @@ mod caret_tests {
     #[test]
     fn clicks_find_the_caret_on_the_line() {
         let t = TextLayer { pos: Pos2::ZERO, text: "ab
-cd".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+cd".into(), size: 40.0, color: egui::Color32::WHITE, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default(), look: Default::default() };
         let lay = layout(&t);
         let (x1, y0) = lay.carets[1];
         assert_eq!(lay.caret_at(Pos2::new(x1 + 1.0, y0 + lay.line_h * 0.5)), 1);

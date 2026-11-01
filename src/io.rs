@@ -131,6 +131,8 @@ enum FileKind {
         blend: Blend,
         #[serde(default)]
         align: crate::doc::TextAlign,
+        #[serde(default)]
+        look: crate::doc::TextLook,
     },
     Shape {
         kind: ShapeKind,
@@ -233,6 +235,7 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
                     rotation: t.rotation,
                     blend: t.blend,
                     align: t.align,
+                    look: t.look,
                 },
                 LayerKind::Shape(s) => FileKind::Shape {
                     kind: s.kind,
@@ -317,7 +320,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 }
                 LayerKind::Image(ImageLayer { src, center: pos2(center[0], center[1]), scale, rotation, crop: a2r(crop), adjust, video })
             }
-            FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation, blend, align } => LayerKind::Text(TextLayer {
+            FileKind::Text { pos, text, size, color, family, style, bg, wrap, rotation, blend, align, look } => LayerKind::Text(TextLayer {
                 pos: pos2(pos[0], pos[1]),
                 text,
                 size,
@@ -329,6 +332,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 rotation,
                 blend,
                 align,
+                look,
             }),
             FileKind::Shape { kind, a, b, color, width, fill, rotation } => LayerKind::Shape(ShapeLayer {
                 kind,

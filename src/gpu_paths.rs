@@ -268,18 +268,21 @@ pub fn drawing(glyphs: &mut Glyphs, layer: &Layer, base: Transform, scale: f32) 
                 }
                 None => p,
             };
-            if let Some(bg) = t.bg {
-                if let Some(path) = crate::text::rounded_rect(o.x, o.y, lay.size.x * scale, lay.size.y * scale, t.size * 0.3 * scale) {
-                    let mut e = Vec::new();
-                    path_edges(&path, Transform::identity(), &mut e);
-                    let e: Vec<[f32; 4]> = e
-                        .into_iter()
-                        .map(|s| {
-                            let (a, b) = (turn([s[0], s[1]]), turn([s[2], s[3]]));
-                            [a[0], a[1], b[0], b[1]]
-                        })
-                        .collect();
-                    fill(&mut d, &e, premul(bg));
+            // box, border and letter outline through the box's turn
+            let ts = match rot {
+                Some(_) => Transform::from_rotate_at(t.rotation.to_degrees(), o.x + lay.size.x * scale * 0.5, o.y + lay.size.y * scale * 0.5),
+                None => Transform::identity(),
+            };
+            if let (Some(bg), Some((path, border))) = (t.bg, crate::text::box_paths(t, &lay, o, scale)) {
+                let mut e = Vec::new();
+                path_edges(&path, ts, &mut e);
+                fill(&mut d, &e, premul(bg));
+                if let (Some(bc), Some((bp, lw))) = (t.look.border, border) {
+                    if let Some(ol) = bp.stroke(&Stroke { width: lw, ..Default::default() }, 1.0) {
+                        let mut e = Vec::new();
+                        path_edges(&ol, ts, &mut e);
+                        fill(&mut d, &e, premul(bc));
+                    }
                 }
             }
             let font = crate::text::font_for(t);
@@ -294,9 +297,24 @@ pub fn drawing(glyphs: &mut Glyphs, layer: &Layer, base: Transform, scale: f32) 
                 Some(((sn, cs), _)) => ([cs * hs, sn * hs, sn * vs, -cs * vs], true),
                 None => ([hs, 0.0, 0.0, -vs], false),
             };
+            if let Some(sc) = t.look.stroke {
+                let sw = crate::text::stroke_reach(t) * scale;
+                let mut pb = PathBuilder::new();
+                for &(gid, x, y) in &lay.glyphs {
+                    crate::text::glyph_path(&mut pb, &font, gid, (o.x + (lay.pad.x + x) * scale, o.y + (lay.pad.y + y) * scale), hs, vs);
+                }
+                if let Some(path) = pb.finish().filter(|_| sw > 0.0) {
+                    // centred on the edge, under the letters: their fill covers the inner half
+                    if let Some(ol) = path.stroke(&Stroke { width: sw * 2.0, line_join: LineJoin::Round, ..Default::default() }, 1.0) {
+                        let mut e = Vec::new();
+                        path_edges(&ol, ts, &mut e);
+                        fill(&mut d, &e, premul(sc));
+                    }
+                }
+            }
             for &(gid, x, y) in &lay.glyphs {
                 let Some(r) = glyphs.get(fkey, &font, gid) else { continue };
-                let pos = [o.x + (lay.pad + x) * scale, o.y + (lay.pad + y) * scale];
+                let pos = [o.x + (lay.pad.x + x) * scale, o.y + (lay.pad.y + y) * scale];
                 let t = if turn_t { turn(pos) } else { pos };
                 d.glyphs.push(Inst::new(&r, m, t, col));
             }

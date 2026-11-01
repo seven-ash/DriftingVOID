@@ -842,7 +842,7 @@ mod tests {
             let thick: f64 = std::env::var("DV_BENCH_THICK").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
             for (k, txt) in ["Drifting VOID", "벽에 붙인 글자"].iter().enumerate() {
                 let c = im.center + egui::vec2(-150.0, 60.0 + 70.0 * k as f32);
-                let t = crate::doc::TextLayer { pos: c, text: txt.to_string(), size: 48.0, color: Color32::from_rgb(255, 214, 90), family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default() };
+                let t = crate::doc::TextLayer { pos: c, text: txt.to_string(), size: 48.0, color: Color32::from_rgb(255, 214, 90), family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Default::default(), align: Default::default(), look: Default::default() };
                 let id = doc.insert("t".into(), LayerKind::Text(t), None);
                 let l = doc.get_mut(id).unwrap();
                 let b = l.bounds().unwrap();
