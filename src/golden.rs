@@ -8,7 +8,7 @@ use crate::export::{render, render_ss};
 use egui::{Color32, Rect, pos2, vec2};
 use tiny_skia::Pixmap;
 
-const ROOM_LINES: &str = "566.4,407.3,691.6,380.2,0;563.9,198.1,697.9,189.4,0;447.1,181.2,567.5,175.4,0;566.4,407.3,456.0,354.7,1;563.9,198.1,447.1,181.2,1;697.9,189.4,567.5,175.4,1;566.4,407.3,563.9,198.1,2;691.6,380.2,697.9,189.4,2;456.0,354.7,447.1,181.2,2";
+pub const ROOM_LINES: &str = "566.4,407.3,691.6,380.2,0;563.9,198.1,697.9,189.4,0;447.1,181.2,567.5,175.4,0;566.4,407.3,456.0,354.7,1;563.9,198.1,447.1,181.2,1;697.9,189.4,567.5,175.4,1;566.4,407.3,563.9,198.1,2;691.6,380.2,697.9,189.4,2;456.0,354.7,447.1,181.2,2";
 
 fn text(pos: egui::Pos2, s: &str, size: f32, color: Color32) -> TextLayer {
     TextLayer { pos, text: s.into(), size, color, family: String::new(), style: String::new(), bg: None, wrap: 0.0, rotation: 0.0, blend: Blend::Normal, align: Default::default() }

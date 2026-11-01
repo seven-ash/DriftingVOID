@@ -25,6 +25,7 @@ mod playcache;
 mod theme;
 mod io;
 mod kit;
+mod lines;
 mod raster;
 mod scene;
 mod segment;

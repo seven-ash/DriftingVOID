@@ -997,6 +997,8 @@ pub struct App {
     space_axis: u8,
     space_line: Option<usize>,
     space_new: bool,
+    /// 선 찾기: line candidates of a space (docs/updates/line-suggest.md).
+    line_cands: Option<LineCands>,
     /// 3D workspace (phase 3): on/off, its view, a running G/R/S, a navigation drag,
     /// when Tab went down, and the hold-Tab peek at the other workspace.
     ws3d: bool,
@@ -1150,6 +1152,39 @@ struct CanvasGpu {
     rs: eframe::egui_wgpu::RenderState,
     /// The last zoom and when it changed.
     zoom: (f32, f64),
+}
+
+/// Straight-edge candidates found in a space's frame (canvas coordinates),
+/// grouped by vanishing point. Valid while the frame stays as it was.
+struct LineCands {
+    sid: u64,
+    frame: Rect,
+    segs: Vec<crate::lines::Seg>,
+    groups: Vec<crate::lines::Group>,
+    /// Each segment's group.
+    of: Vec<Option<usize>>,
+    norm: crate::lines::Norm,
+}
+
+/// Candidate tints, one per group: neutral hues away from the axis colours
+/// (a candidate isn't on an axis until it is taken).
+const CAND_COLORS: [Color32; 5] = [
+    Color32::from_rgb(255, 170, 60),
+    Color32::from_rgb(200, 130, 255),
+    Color32::from_rgb(60, 220, 200),
+    Color32::from_rgb(255, 120, 200),
+    Color32::from_rgb(225, 225, 120),
+];
+
+impl LineCands {
+    fn of_space(&self, s: &crate::persp::Space) -> bool {
+        self.sid == s.id && self.frame == s.frame
+    }
+
+    /// Candidates not yet taken as one of the space's lines.
+    fn open<'a>(&'a self, s: &'a crate::persp::Space) -> impl Iterator<Item = (usize, &'a crate::lines::Seg)> + 'a {
+        self.segs.iter().enumerate().filter(move |(_, c)| !s.lines.iter().any(|l| l.a.distance(c.a) < 0.01 && l.b.distance(c.b) < 0.01))
+    }
 }
 
 /// `export::render` on the canvas's GPU renderer when there is one (its
@@ -1332,6 +1367,7 @@ impl App {
             space_axis: 0,
             space_line: None,
             space_new: false,
+            line_cands: None,
             ws3d: false,
             view3d: None,
             modal3d: None,
@@ -1580,6 +1616,13 @@ impl App {
                     if let Some(l) = app.doc.spaces.last().and_then(|s| s.lines.first()).copied() {
                         app.space_line = Some(0);
                         app.drag = Some(Drag::SpaceLine { id, idx: 0, end: 1, start: l.b, orig: l });
+                    }
+                }
+                if std::env::var_os("DV_LINE_FIND").is_some() {
+                    // 선 찾기 at start; DV_LINE_AUTO=1 then presses 자동 선택
+                    app.find_lines();
+                    if std::env::var_os("DV_LINE_AUTO").is_some() {
+                        app.auto_pick_lines();
                     }
                 }
                 if let Ok(mode) = std::env::var("DV_SPACE_DEMO") {
@@ -6579,6 +6622,83 @@ impl App {
         }
     }
 
+    /// 선 찾기: renders the active space's frame and finds straight-edge
+    /// candidates in it (`lines.rs`), shown until toggled off.
+    fn find_lines(&mut self) {
+        let Some(i) = self.space_idx() else { return };
+        let (sid, fr) = (self.doc.spaces[i].id, self.doc.spaces[i].frame);
+        let long = fr.width().max(fr.height());
+        if long < 8.0 {
+            return;
+        }
+        // about 1600 px on the long side: enough for edges, fast enough to wait for
+        let m = (1600.0 / long).min(4.0);
+        let pm = match render_region(&mut self.cgpu, &self.doc, fr, m, None) {
+            Ok(pm) => pm,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let t = std::time::Instant::now();
+        let (w, h) = (pm.width() as usize, pm.height() as usize);
+        let segs: Vec<crate::lines::Seg> = crate::lines::detect(&crate::edges::luminance(pm.data()), w, h)
+            .into_iter()
+            .map(|s| crate::lines::Seg { a: fr.min + s.a.to_vec2() / m, b: fr.min + s.b.to_vec2() / m })
+            .filter(|s| s.len() >= 0.015 * long)
+            .collect();
+        let norm = crate::lines::Norm { c: fr.center(), l: long };
+        let groups = crate::lines::group(&segs, &norm, CAND_COLORS.len());
+        let mut of = vec![None; segs.len()];
+        for (g, gr) in groups.iter().enumerate() {
+            for &k in &gr.members {
+                of[k] = Some(g);
+            }
+        }
+        if std::env::var_os("DV_LAYOUT_LOG").is_some() {
+            eprintln!("lines: {} segments, {} groups, {:?} ({w}x{h})", segs.len(), groups.len(), t.elapsed());
+        }
+        self.status = crate::i18n::trf("직선 후보 {}개", &[format!("{}", segs.len())]);
+        self.line_cands = Some(LineCands { sid, frame: fr, segs, groups, of, norm });
+    }
+
+    /// 자동 선택: adds up to four candidate lines per axis to the active space,
+    /// in one undo step. Axes come from the space's camera when its own lines
+    /// already fix one (two axes of two lines), else from the candidates'
+    /// orthogonality (`lines::auto_axes`).
+    fn auto_pick_lines(&mut self) {
+        use crate::lines::Seg;
+        let Some(i) = self.space_idx() else { return };
+        let sp = &self.doc.spaces[i];
+        let Some(lc) = self.line_cands.as_ref().filter(|c| c.of_space(sp)) else { return };
+        let fixed = (0..3).filter(|&a| sp.count(a) >= 2).count() >= 2;
+        let axes: [Option<usize>; 3] = match crate::persp::solve(sp).ok().filter(|_| fixed) {
+            Some(cam) => {
+                let named = crate::lines::axes_from_camera(&lc.groups, &lc.segs, &cam);
+                // groups come strongest first: each axis takes its first
+                std::array::from_fn(|a| named.iter().position(|n| *n == Some(a as u8)))
+            }
+            None => crate::lines::auto_axes(&lc.groups, &lc.segs),
+        };
+        let taken: Vec<Seg> = sp.lines.iter().map(|l| Seg { a: l.a, b: l.b }).collect();
+        let mut add = Vec::new();
+        for (ax, g) in axes.iter().enumerate() {
+            let Some(g) = g else { continue };
+            let need = 4usize.saturating_sub(sp.count(ax as u8));
+            for k in crate::lines::pick_lines(&lc.groups[*g], &lc.segs, &lc.norm, &taken, need) {
+                add.push(crate::persp::VLine { a: lc.segs[k].a, b: lc.segs[k].b, axis: ax as u8 });
+            }
+        }
+        if add.is_empty() {
+            self.status = crate::i18n::tr("고를 축 후보 없음").into();
+            return;
+        }
+        self.status = crate::i18n::trf("선 {}개 추가", &[format!("{}", add.len())]);
+        self.doc.spaces[i].lines.extend(add);
+        self.space_line = None;
+        self.mark();
+    }
+
     fn space_down(&mut self, sp: Pos2, w: Pos2) {
         let xf = self.xf();
         if self.wall_base_new {
@@ -6689,8 +6809,24 @@ impl App {
                     }
                 }
             }
+            // a candidate line under the pointer: taken on the current axis
+            let cand = if hit.is_some() {
+                None
+            } else {
+                self.line_cands.as_ref().filter(|c| c.of_space(s)).and_then(|c| {
+                    c.open(s).map(|(_, g)| (seg_dist(sp, xf.w2s(g.a), xf.w2s(g.b)), *g)).filter(|(d, _)| *d <= 5.0).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1)
+                })
+            };
             let drag = match hit {
                 Some(d) => d,
+                None if cand.is_some() => {
+                    let g = cand.unwrap();
+                    let l = crate::persp::VLine { a: g.a, b: g.b, axis: self.space_axis };
+                    self.doc.spaces[i].lines.push(l);
+                    let idx = self.doc.spaces[i].lines.len() - 1;
+                    self.space_line = Some(idx);
+                    Drag::SpaceLine { id, idx, end: 2, start: w, orig: l }
+                }
                 None => {
                     // a new vanishing line on the current axis
                     let l = crate::persp::VLine { a: w, b: w, axis: self.space_axis };
@@ -10800,6 +10936,26 @@ impl App {
         if let Some(ax) = axis_pick {
             self.set_space_axis(ax);
         }
+        // line suggestions: candidates only; 자동 선택 is a separate, explicit step
+        let shown = self.line_cands.as_ref().is_some_and(|c| c.of_space(&self.doc.spaces[i]));
+        let (mut find, mut auto) = (false, false);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
+            find = ui.selectable_label(shown, crate::i18n::tr("선 찾기")).glass_tip(crate::i18n::tr("사진의 직선 후보 · 클릭: 현재 축에 추가")).clicked();
+            if shown {
+                auto = ui.button(crate::i18n::tr_ctx("선", "자동 선택")).glass_tip(crate::i18n::tr("후보에서 X·Y·Z 선 추가")).clicked();
+            }
+        });
+        if find {
+            if shown {
+                self.line_cands = None;
+            } else {
+                self.find_lines();
+            }
+        }
+        if auto {
+            self.auto_pick_lines();
+        }
         let mut floor_req: Option<f64> = None;
         let mut place_toggle: Option<(LayerId, bool)> = None;
         let (mut tape_toggle, mut tape_clear) = (false, false);
@@ -11202,6 +11358,21 @@ impl App {
                 }
                 let label = cam.as_ref().and_then(|c| s.tape_metres(c)).map_or("?".to_string(), |m| format!("{m:.2} m"));
                 painter.text(a.lerp(b, 0.5) + n * 2.0, Align2::CENTER_CENTER, label, FontId::proportional(12.0), col);
+            }
+            if let Some(lc) = self.line_cands.as_ref().filter(|c| c.of_space(s)) {
+                // the candidate under the pointer stands out (a click takes it)
+                let hp = painter.ctx().pointer_hover_pos();
+                let hover = hp.and_then(|p| lc.open(s).map(|(k, g)| (k, seg_dist(p, xf.w2s(g.a), xf.w2s(g.b)))).filter(|x| x.1 <= 5.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0));
+                for (k, g) in lc.open(s) {
+                    let col = lc.of[k].map_or(Color32::from_white_alpha(110), |gi| CAND_COLORS[gi % CAND_COLORS.len()]);
+                    let (a, b) = (xf.w2s(g.a), xf.w2s(g.b));
+                    if hover == Some(k) {
+                        painter.line_segment([a, b], Stroke::new(6.0, Color32::from_white_alpha(70)));
+                        painter.line_segment([a, b], Stroke::new(2.5, col));
+                    } else {
+                        painter.line_segment([a, b], Stroke::new(1.4, col.gamma_multiply(0.8)));
+                    }
+                }
             }
             for (i, l) in s.lines.iter().enumerate() {
                 let c = AXIS_COLORS[(l.axis as usize).min(2)];

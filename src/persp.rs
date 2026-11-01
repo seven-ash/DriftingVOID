@@ -82,7 +82,7 @@ pub fn rodrigues(w: V3) -> M3 {
 }
 
 /// Eigenvector of the smallest eigenvalue of a symmetric 3×3 (cyclic Jacobi).
-fn smallest_eigvec(mut a: M3) -> V3 {
+pub fn smallest_eigvec(mut a: M3) -> V3 {
     let mut v: M3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     for _ in 0..50 {
         let off = a[0][1].abs() + a[0][2].abs() + a[1][2].abs();

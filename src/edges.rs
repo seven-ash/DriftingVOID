@@ -54,7 +54,7 @@ pub fn levels(rgba: &mut [u8]) {
     }
 }
 
-fn blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+pub fn blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     let r = (sigma * 3.0).ceil().max(1.0) as isize;
     let ker: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let sum: f32 = ker.iter().sum();
