@@ -1868,8 +1868,18 @@ impl App {
                 if f == crate::doc::Filter::Curves {
                     // an S on RGB and red lifted (captures of the editor)
                     fx.v[0] = 1.0;
-                    fx.curves[0] = vec![[0.0, 0.0], [0.25, 0.15], [0.75, 0.88], [1.0, 1.0]];
-                    fx.curves[1] = vec![[0.0, 0.08], [0.5, 0.62], [1.0, 1.0]];
+                    fx.curves[0] = crate::doc::curve_pts(&[[0.0, 0.0], [0.25, 0.15], [0.75, 0.88], [1.0, 1.0]]);
+                    fx.curves[1] = crate::doc::curve_pts(&[[0.0, 0.08], [0.5, 0.62], [1.0, 1.0]]);
+                    // the S's upper point: a Free right side and a Constant
+                    // left one (captures of the handles and the menu)
+                    fx.curves[0][2].l = crate::doc::Tan::Constant;
+                    fx.curves[0][2].r = crate::doc::Tan::Free;
+                    fx.curves[0][2].rs = 1.2;
+                }
+                if f == crate::doc::Filter::ChannelAlpha {
+                    // red made the alpha, lifted (captures)
+                    fx.source = 0;
+                    fx.curves[0] = crate::doc::curve_pts(&[[0.0, 0.0], [0.4, 0.7], [1.0, 1.0]]);
                 }
                 fx.blend = n.get(3).filter(|b| **b >= 0.0).and_then(|b| Blend::ALL.get(*b as usize).copied());
             }
@@ -9016,7 +9026,7 @@ impl App {
                     if fx.filter == crate::doc::Filter::GradientMap {
                         gradient_bar(ui, fx.colors, id, &mut pal_req);
                     }
-                    if fx.filter == crate::doc::Filter::Curves {
+                    if matches!(fx.filter, crate::doc::Filter::Curves | crate::doc::Filter::ChannelAlpha) {
                         changed |= curve_editor(ui, fx, id);
                     }
                     for (i, p) in fx.filter.params().iter().enumerate() {
@@ -13216,16 +13226,23 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
     changed
 }
 
-/// A 커브 FX layer's curves as points on a graph (11-02): the channel picked
-/// above it (RGB, red, green, blue). A click adds a point, a drag moves one
-/// (between its neighbours), dragging one off the graph or double-clicking
-/// it removes it (two always stay).
+/// A curve FX layer's curves as points on a graph (11-02). 커브: the channel
+/// picked above it (RGB, red, green, blue); 채널을 알파로: one curve, the
+/// row picks the channel made the alpha (R, G, B, L). A click adds a point,
+/// a drag moves one (between its neighbours), dragging one off the graph or
+/// double-clicking it removes it (two always stay). A right click on a
+/// point sets how its left, right or both sides meet their segments
+/// (Unity's tangent modes, Ash 11-02); a Free side has a handle on the
+/// picked point.
 fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) -> bool {
-    use crate::doc::curve_identity;
+    use crate::doc::{CurvePt, Tan, curve_identity, curve_slope};
     let mut changed = false;
+    let alpha = fx.filter == crate::doc::Filter::ChannelAlpha;
     let ch_id = egui::Id::new(("fx_curve_ch", id));
     let drag_id = egui::Id::new(("fx_curve_drag", id));
-    let mut ch: usize = ui.data(|d| d.get_temp(ch_id)).unwrap_or(0);
+    let sel_id = egui::Id::new(("fx_curve_sel", id));
+    let menu_id = egui::Id::new(("fx_curve_menu", id));
+    let mut ch: usize = if alpha { 0 } else { ui.data(|d| d.get_temp(ch_id)).unwrap_or(0) };
     crate::kit::row(ui, crate::i18n::tr("채널"), |ui| {
         // the channels fill the row up to the reset button (segmented takes
         // all the room it is given)
@@ -13233,54 +13250,105 @@ fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) ->
         let bw = ui.painter().layout_no_wrap(label.to_owned(), egui::TextStyle::Button.resolve(ui.style()), INK()).size().x + ui.spacing().button_padding.x * 2.0;
         let seg_w = (ui.available_width() - bw - SPACE_XS).max(80.0);
         ui.allocate_ui_with_layout(vec2(seg_w, theme::ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            crate::kit::segmented(ui, &mut ch, &[(0, "RGB"), (1, "R"), (2, "G"), (3, "B")]);
+            if alpha {
+                let was = fx.source;
+                crate::kit::segmented(ui, &mut fx.source, &[(0, "R"), (1, "G"), (2, "B"), (3, "L")]);
+                changed |= fx.source != was;
+            } else {
+                crate::kit::segmented(ui, &mut ch, &[(0, "RGB"), (1, "R"), (2, "G"), (3, "B")]);
+            }
         });
         if ui.add_enabled(fx.curves[ch] != curve_identity(), egui::Button::new(crate::i18n::tr("초기화"))).clicked() {
             fx.curves[ch] = curve_identity();
             changed = true;
         }
     });
-    ui.data_mut(|d| d.insert_temp(ch_id, ch));
+    if !alpha {
+        ui.data_mut(|d| d.insert_temp(ch_id, ch));
+    }
     let tint = |c: usize| match c {
         1 => Color32::from_rgb(235, 85, 80),
         2 => Color32::from_rgb(90, 200, 110),
         3 => Color32::from_rgb(90, 140, 245),
         _ => INK(),
     };
+    // the alpha's curve in the colour of its channel (L: ink)
+    let ink = if alpha { tint((fx.source as usize + 1) % 4) } else { tint(ch) };
     let w = ui.available_width();
     let (g, resp) = ui.allocate_exact_size(vec2(w, (w * 0.75).round()), Sense::click_and_drag());
     let g = g.shrink(4.0);
-    let to_s = |p: [f32; 2]| pos2(g.left() + p[0] * g.width(), g.bottom() - p[1] * g.height());
+    let to_s = |p: &CurvePt| pos2(g.left() + p.x * g.width(), g.bottom() - p.y * g.height());
     let to_c = |s: Pos2| [((s.x - g.left()) / g.width()).clamp(0.0, 1.0), ((g.bottom() - s.y) / g.height()).clamp(0.0, 1.0)];
-    let near = |pts: &[[f32; 2]], s: Pos2| pts.iter().enumerate().map(|(i, p)| (i, to_s(*p).distance(s))).filter(|(_, d)| *d <= 9.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i);
+    let near = |pts: &[CurvePt], s: Pos2| pts.iter().enumerate().map(|(i, p)| (i, to_s(p).distance(s))).filter(|(_, d)| *d <= 9.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i);
+    // a Free side's handle: along its slope, a set length on screen
+    let handle = |pts: &[CurvePt], i: usize, right: bool| {
+        let d = vec2(g.width(), -curve_slope(pts, i, right) * g.height()).normalized() * 30.0;
+        to_s(&pts[i]) + if right { d } else { -d }
+    };
     let pts = &mut fx.curves[ch];
-    let mut drag: Option<usize> = ui.data(|d| d.get_temp(drag_id)).flatten();
-    if resp.drag_started() {
-        let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(g.center());
-        drag = near(pts, at).or_else(|| {
-            // a new point where the press was
-            let p = to_c(at);
-            let i = pts.iter().position(|q| q[0] > p[0]).unwrap_or(pts.len());
-            let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
-            let hi = if i < pts.len() { pts[i][0] - 0.01 } else { 1.0 };
-            (lo <= hi).then(|| {
-                pts.insert(i, [p[0].clamp(lo, hi), p[1]]);
-                changed = true;
-                i
-            })
-        });
+    // the picked point (its Free handles show), per channel
+    let mut sel: Option<usize> = ui.data(|d| d.get_temp::<Option<(usize, usize)>>(sel_id)).flatten().filter(|(c, i)| *c == ch && *i < pts.len()).map(|(_, i)| i);
+    let handles = |pts: &[CurvePt], sel: Option<usize>| -> Vec<(usize, bool, Pos2)> {
+        let Some(i) = sel else { return Vec::new() };
+        let p = pts[i];
+        [(false, p.l), (true, p.r)].into_iter().filter(|(_, t)| *t == Tan::Free).map(|(r, _)| (i, r, handle(pts, i, r))).collect()
+    };
+    // DV_CURVE_SEL=i: that point picked; with DV_CURVE_MENU its menu open (captures)
+    let dbg = std::env::var("DV_CURVE_SEL").ok().and_then(|v| v.parse::<usize>().ok()).filter(|i| *i < pts.len());
+    if let Some(i) = dbg {
+        sel = sel.or(Some(i));
+        if std::env::var_os("DV_CURVE_MENU").is_some() {
+            ui.data_mut(|d| d.insert_temp(menu_id.with("pt"), Some((ch, i))));
+        }
     }
-    if let (true, Some(i), Some(s)) = (resp.dragged(), drag, resp.interact_pointer_pos()) {
+    let on_handle = |pts: &[CurvePt], sel: Option<usize>, s: Pos2| handles(pts, sel).into_iter().find(|h| h.2.distance(s) <= 7.0).map(|h| (h.0, h.1));
+    // what is dragged: a point (i, None) or a handle (i, Some(right))
+    let mut drag: Option<(usize, Option<bool>)> = ui.data(|d| d.get_temp(drag_id)).flatten();
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(g.center());
+        drag = on_handle(pts, sel, at).map(|(i, r)| (i, Some(r))).or_else(|| {
+            near(pts, at).or_else(|| {
+                // a new point where the press was
+                let p = to_c(at);
+                let i = pts.iter().position(|q| q.x > p[0]).unwrap_or(pts.len());
+                let lo = if i > 0 { pts[i - 1].x + 0.01 } else { 0.0 };
+                let hi = if i < pts.len() { pts[i].x - 0.01 } else { 1.0 };
+                (lo <= hi).then(|| {
+                    pts.insert(i, CurvePt::from([p[0].clamp(lo, hi), p[1]]));
+                    changed = true;
+                    i
+                })
+            })
+            .map(|i| (i, None))
+        });
+        if let Some((i, _)) = drag {
+            sel = Some(i);
+        }
+    }
+    if let (true, Some((i, h)), Some(s)) = (resp.dragged_by(egui::PointerButton::Primary), drag, resp.interact_pointer_pos()) {
         if i < pts.len() {
-            if !g.expand(24.0).contains(s) && pts.len() > 2 {
+            if let Some(right) = h {
+                // the handle sets its side's slope; it stays on its side
+                let dv = s - to_s(&pts[i]);
+                let (dx, dy) = (dv.x / g.width(), -dv.y / g.height());
+                let dx = if right { dx.max(1e-3) } else { dx.min(-1e-3) };
+                let m = (dy / dx).clamp(-50.0, 50.0);
+                if right {
+                    pts[i].rs = m;
+                } else {
+                    pts[i].ls = m;
+                }
+            } else if !g.expand(24.0).contains(s) && pts.len() > 2 {
                 // dragged off the graph: gone
                 pts.remove(i);
                 drag = None;
+                sel = None;
             } else {
                 let p = to_c(s);
-                let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
-                let hi = if i + 1 < pts.len() { pts[i + 1][0] - 0.01 } else { 1.0 };
-                pts[i] = [p[0].clamp(lo, hi.max(lo)), p[1]];
+                let lo = if i > 0 { pts[i - 1].x + 0.01 } else { 0.0 };
+                let hi = if i + 1 < pts.len() { pts[i + 1].x - 0.01 } else { 1.0 };
+                pts[i].x = p[0].clamp(lo, hi.max(lo));
+                pts[i].y = p[1];
             }
             changed = true;
         }
@@ -13291,25 +13359,155 @@ fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) ->
     if resp.double_clicked() && pts.len() > 2 {
         if let Some(i) = resp.interact_pointer_pos().and_then(|s| near(pts, s)) {
             pts.remove(i);
+            sel = None;
             changed = true;
         }
     } else if resp.clicked() {
-        // a click on the curve's graph away from the points: a point there
-        if let Some(s) = resp.interact_pointer_pos().filter(|s| near(pts, *s).is_none()) {
+        // a click on a point picks it; away from the points (and handles)
+        // it puts one there
+        let s = resp.interact_pointer_pos();
+        if let Some(i) = s.and_then(|s| near(pts, s)) {
+            sel = Some(i);
+        } else if let Some(s) = s.filter(|s| on_handle(pts, sel, *s).is_none()) {
             let p = to_c(s);
-            let i = pts.iter().position(|q| q[0] > p[0]).unwrap_or(pts.len());
-            let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
-            let hi = if i < pts.len() { pts[i][0] - 0.01 } else { 1.0 };
+            let i = pts.iter().position(|q| q.x > p[0]).unwrap_or(pts.len());
+            let lo = if i > 0 { pts[i - 1].x + 0.01 } else { 0.0 };
+            let hi = if i < pts.len() { pts[i].x - 0.01 } else { 1.0 };
             if lo <= hi {
-                pts.insert(i, [p[0].clamp(lo, hi), p[1]]);
+                pts.insert(i, CurvePt::from([p[0].clamp(lo, hi), p[1]]));
+                sel = Some(i);
                 changed = true;
             }
         }
     }
-    ui.data_mut(|d| d.insert_temp(drag_id, drag));
-    let hover = drag.or_else(|| resp.hover_pos().and_then(|s| near(pts, s)));
+    // a right click on a point: its tangent menu (elsewhere none)
+    if resp.secondary_clicked() {
+        let t = resp.interact_pointer_pos().and_then(|s| near(pts, s));
+        ui.data_mut(|d| d.insert_temp(menu_id.with("pt"), t.map(|i| (ch, i))));
+        ui.data_mut(|d| d.remove::<Option<usize>>(menu_id.with("side")));
+        if t.is_some() {
+            sel = t;
+        }
+    }
+    let target = ui.data(|d| d.get_temp::<Option<(usize, usize)>>(menu_id.with("pt"))).flatten().filter(|(c, i)| *c == ch && *i < pts.len()).map(|(_, i)| i);
+    let open = if (resp.secondary_clicked() || dbg.is_some() && std::env::var_os("DV_CURVE_MENU").is_some()) && target.is_some() {
+        Some(egui::containers::SetOpenCommand::Bool(true))
+    } else if resp.clicked() || resp.drag_started() || target.is_none() {
+        Some(egui::containers::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    // beside the pin, not the pointer (Ash, 11-02): right of it, else left,
+    // else above or below, whichever fits on the screen
+    let pin = target.map_or(g.center(), |i| to_s(&pts[i]));
+    const SIDES: [egui::RectAlign; 5] = [egui::RectAlign::LEFT_START, egui::RectAlign::RIGHT_END, egui::RectAlign::LEFT_END, egui::RectAlign::BOTTOM_START, egui::RectAlign::TOP_START];
+    egui::Popup::menu(&resp)
+        .id(menu_id)
+        .open_memory(open)
+        .anchor(Rect::from_center_size(pin, Vec2::splat(10.0)))
+        .align(egui::RectAlign::RIGHT_START)
+        .align_alternatives(&SIDES)
+        .gap(SPACE_XS)
+        .style(theme::glass_popup_style(true))
+        .show(|ui| {
+            theme::glass_popup(ui, |ui| {
+                let Some(i) = target else { return };
+                // the side whose modes show beside the rows, in the same
+                // panel, which widens to them (Ash, 11-02: no submenus); the
+                // row last hovered. DV_CURVE_MENU=1..3 opens one (captures)
+                let side_id = menu_id.with("side");
+                let mut side: Option<usize> = ui.data(|d| d.get_temp(side_id)).unwrap_or_else(|| std::env::var("DV_CURVE_MENU").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=3).contains(n)).map(|n| n - 1));
+                let p = pts[i];
+                // the slopes as drawn now: a side made Free starts from it
+                let (ls, rs) = (curve_slope(pts, i, false), curve_slope(pts, i, true));
+                let cur = |k: usize| match k {
+                    0 => Some(p.l),
+                    1 => Some(p.r),
+                    _ => (p.l == p.r).then_some(p.l),
+                };
+                let round = egui::CornerRadius::same(theme::inner(theme::radius_card(), SPACE_SM));
+                let mut pick = None;
+                let mut delete = false;
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
+                    let rows = ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        ui.spacing_mut().item_spacing.y = SPACE_XS;
+                        for (k, label) in [(0, crate::i18n::tr("왼쪽")), (1, crate::i18n::tr("오른쪽")), (2, crate::i18n::tr("양쪽"))] {
+                            let bg = ui.painter().add(Shape::Noop);
+                            let r = crate::kit::menu_row(ui, label, cur(k).map_or("—", |t| t.label()));
+                            if r.hovered() || r.clicked() {
+                                side = Some(k);
+                            }
+                            if side == Some(k) && !r.hovered() {
+                                ui.painter().set(bg, Shape::rect_filled(r.rect, round, FILL_2()));
+                            }
+                        }
+                        ui.separator();
+                        ui.add_enabled_ui(pts.len() > 2, |ui| {
+                            let r = crate::kit::menu_row(ui, crate::i18n::tr("점 삭제"), "");
+                            if r.hovered() {
+                                side = None;
+                            }
+                            delete = r.clicked();
+                        });
+                    });
+                    // the modes, from the panel's top whichever row opened them
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let full = Tan::ALL.iter().map(|t| ui.painter().layout_no_wrap(t.label().to_owned(), font.clone(), INK()).size().x).fold(0.0, f32::max) + SPACE_SM * 2.0 + 24.0;
+                    let t = ui.ctx().animate_bool_with_time(side_id.with("open"), side.is_some(), 0.12);
+                    if t > 0.0 {
+                        let h = rows.response.rect.height();
+                        let (col, _) = ui.allocate_exact_size(vec2((full + SPACE_XS) * t, h), Sense::hover());
+                        let body = Rect::from_min_size(pos2(col.left() + SPACE_XS, col.top()), vec2(full, h));
+                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
+                        cu.set_clip_rect(col.intersect(ui.clip_rect()));
+                        cu.spacing_mut().item_spacing.y = SPACE_XS;
+                        cu.painter().vline(col.left(), col.y_range(), Stroke::new(1.0, FILL_3()));
+                        if let Some(k) = side {
+                            for m in Tan::ALL {
+                                let bg = cu.painter().add(Shape::Noop);
+                                let r = crate::kit::menu_row(&mut cu, m.label(), "");
+                                if cur(k) == Some(m) && !r.hovered() {
+                                    cu.painter().set(bg, Shape::rect_filled(r.rect, round, cu.visuals().selection.bg_fill));
+                                }
+                                if r.clicked() {
+                                    pick = Some((k, m));
+                                }
+                            }
+                        }
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(side_id, side));
+                if let Some((k, t)) = pick {
+                    let q = &mut pts[i];
+                    if k != 1 {
+                        q.ls = if t != Tan::Free { 0.0 } else if q.l == Tan::Free { q.ls } else { ls };
+                        q.l = t;
+                    }
+                    if k != 0 {
+                        q.rs = if t != Tan::Free { 0.0 } else if q.r == Tan::Free { q.rs } else { rs };
+                        q.r = t;
+                    }
+                    changed = true;
+                    ui.close();
+                }
+                if delete {
+                    pts.remove(i);
+                    sel = None;
+                    changed = true;
+                    ui.close();
+                }
+            })
+        });
+    ui.data_mut(|d| {
+        d.insert_temp(drag_id, drag);
+        d.insert_temp(sel_id, sel.map(|i| (ch, i)));
+    });
+    let hover = drag.map(|d| d.0).or_else(|| resp.hover_pos().and_then(|s| near(pts, s)));
     // the graph: quarters, the straight line, the other channels' curves
-    // faintly, then this channel's curve and its points
+    // faintly, then this channel's curve, its points and the picked one's
+    // Free handles
     let p = ui.painter();
     p.rect_filled(g.expand(4.0), 6.0, FILL_1());
     for k in 1..4 {
@@ -13318,19 +13516,28 @@ fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) ->
         p.line_segment([pos2(g.left(), g.top() + t * g.height()), pos2(g.right(), g.top() + t * g.height())], Stroke::new(1.0, FILL_2()));
     }
     p.line_segment([g.left_bottom(), g.right_top()], Stroke::new(1.0, FILL_3()));
-    let line = |c: &[[f32; 2]]| (0..=96).map(|k| k as f32 / 96.0).map(|x| to_s([x, crate::doc::curve_at(c, x)])).collect::<Vec<_>>();
-    for c in 0..4 {
-        if c != ch && fx.curves[c] != curve_identity() {
-            p.add(Shape::line(line(&fx.curves[c]), Stroke::new(1.0, tint(c).gamma_multiply(0.45))));
+    // enough samples that a Constant step stands straight
+    let line = |c: &[CurvePt]| (0..=256).map(|k| k as f32 / 256.0).map(|x| to_s(&CurvePt::from([x, crate::doc::curve_at(c, x)]))).collect::<Vec<_>>();
+    if !alpha {
+        for c in 0..4 {
+            if c != ch && fx.curves[c] != curve_identity() {
+                p.add(Shape::line(line(&fx.curves[c]), Stroke::new(1.0, tint(c).gamma_multiply(0.45))));
+            }
         }
     }
     let pts = &fx.curves[ch];
-    p.add(Shape::line(line(pts), Stroke::new(1.5, tint(ch))));
+    p.add(Shape::line(line(pts), Stroke::new(1.5, ink)));
+    for (i, r, h) in handles(pts, sel) {
+        p.line_segment([to_s(&pts[i]), h], Stroke::new(1.0, theme::LABEL()));
+        let on = drag == Some((i, Some(r)));
+        p.circle(h, 3.5, if on { ACCENT } else { FILL_1() }, Stroke::new(1.2, if on { ACCENT } else { theme::LABEL() }));
+    }
     for (i, q) in pts.iter().enumerate() {
         let on = hover == Some(i);
-        p.circle(to_s(*q), if on { 5.0 } else { 4.0 }, FILL_1(), Stroke::new(1.5, if on { ACCENT } else { tint(ch) }));
+        let fill = if sel == Some(i) { ink } else { FILL_1() };
+        p.circle(to_s(q), if on { 5.0 } else { 4.0 }, fill, Stroke::new(1.5, if on { ACCENT } else { ink }));
     }
-    resp.glass_tip(crate::i18n::tr("클릭: 점 추가 · 밖으로 끌기: 삭제"));
+    resp.glass_tip(crate::i18n::tr("클릭: 점 추가 · 밖으로 끌기: 삭제 · 우클릭: 탄젠트"));
     changed
 }
 

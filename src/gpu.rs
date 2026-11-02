@@ -2272,13 +2272,13 @@ impl Gpu {
             }
             point => {
                 let mut u = Uniform::new(bfull, bw, bh);
-                u.p0 = [2.0, point.point_code().unwrap_or(0.0), 0.0, 0.0];
+                u.p0 = [2.0, point.point_code().unwrap_or(0.0), fx.source as f32, 0.0];
                 u.h0 = fx.v;
                 let col = |c: [u8; 4]| c.map(|x| x as f32 / 255.0);
                 u.h1 = col(fx.colors[0]);
                 u.h2 = col(fx.colors[1]);
                 // the curves as a table the shader reads between entries
-                let table = (point == Filter::Curves).then(|| self.curve_texture(fx));
+                let table = matches!(point, Filter::Curves | Filter::ChannelAlpha).then(|| self.curve_texture(fx));
                 self.fx_pass(enc, &f2, &u, &src, table.as_ref().unwrap_or(&self.dummy), &self.dummy);
             }
         }

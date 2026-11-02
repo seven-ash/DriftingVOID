@@ -559,6 +559,7 @@ pub enum Filter {
     Posterize,
     Threshold,
     GradientMap,
+    ChannelAlpha,
     Grain,
     Vignette,
     Aberration,
@@ -578,7 +579,7 @@ pub struct FxParam {
 }
 
 impl Filter {
-    pub const ALL: [Filter; 18] = [
+    pub const ALL: [Filter; 19] = [
         Filter::Blur,
         Filter::MotionBlur,
         Filter::Unsharp,
@@ -591,6 +592,7 @@ impl Filter {
         Filter::Posterize,
         Filter::Threshold,
         Filter::GradientMap,
+        Filter::ChannelAlpha,
         Filter::Grain,
         Filter::Vignette,
         Filter::Aberration,
@@ -613,6 +615,7 @@ impl Filter {
             Filter::Posterize => crate::i18n::tr("포스터화"),
             Filter::Threshold => crate::i18n::tr("임계값"),
             Filter::GradientMap => crate::i18n::tr("그라디언트 맵"),
+            Filter::ChannelAlpha => crate::i18n::tr("채널을 알파로"),
             Filter::Grain => crate::i18n::tr("노이즈"),
             Filter::Vignette => crate::i18n::tr("비네트"),
             Filter::Aberration => crate::i18n::tr("색수차"),
@@ -636,6 +639,7 @@ impl Filter {
             Filter::Posterize => 6.0,
             Filter::Threshold => 7.0,
             Filter::GradientMap => 8.0,
+            Filter::ChannelAlpha => 9.0,
         })
     }
 
@@ -674,6 +678,9 @@ impl Filter {
             // the original and the result (keyable, the points are not)
             Filter::Curves => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
             Filter::Desaturate => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
+            // 양 mixes the old alpha and the one made (`FxLayer::source`
+            // through `curves[0]`)
+            Filter::ChannelAlpha => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
             Filter::Invert | Filter::GradientMap => &[],
             Filter::Posterize => &[FxParam { name: crate::i18n::k!("단계"), lo: 2.0, hi: 32.0, default: 4.0, step: 1.0, suffix: "" }],
             Filter::Threshold => &[
@@ -734,12 +741,111 @@ pub struct FxLayer {
     pub colors: [[u8; 4]; 2],
     /// 커브: the points (x, y in 0..1, sorted by x) of the RGB curve and of
     /// the red, green and blue ones (each channel's own, then RGB, as GIMP).
-    /// Empty in files before 0.102.0 (`upgrade`).
+    /// 채널을 알파로: `curves[0]` maps the channel to the alpha. Empty in
+    /// files before 0.102.0 (`upgrade`).
     #[serde(default)]
-    pub curves: [Vec<[f32; 2]>; 4],
+    pub curves: [Vec<CurvePt>; 4],
     /// 노이즈: a new pattern each frame (at the timeline's fps).
     #[serde(default)]
     pub moving: bool,
+    /// 채널을 알파로: the channel made the alpha, 0..3 = R, G, B, L (Rec.709
+    /// luma, as 흑백; Ash 11-02), of the picture as it shows over black.
+    #[serde(default = "source_luma")]
+    pub source: u8,
+}
+
+fn source_luma() -> u8 {
+    3
+}
+
+/// How one side of a curve point meets its segment (Unity's tangent modes,
+/// Ash 11-02): Auto the smooth monotone slope (as before), Free a slope of
+/// its own (a handle), Linear towards the neighbour on that side, Constant
+/// holds the segment at its left point (either end's Constant does).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub enum Tan {
+    #[default]
+    Auto,
+    Free,
+    Linear,
+    Constant,
+}
+
+impl Tan {
+    /// In the menu's order (Unity's).
+    pub const ALL: [Tan; 4] = [Tan::Constant, Tan::Linear, Tan::Free, Tan::Auto];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tan::Auto => crate::i18n::tr("자동"),
+            Tan::Free => crate::i18n::tr("자유"),
+            Tan::Linear => crate::i18n::tr("직선"),
+            Tan::Constant => crate::i18n::tr("계단"),
+        }
+    }
+}
+
+/// A point of a curve: where it is, how its left and right side meet their
+/// segments, and the Free sides' slopes (dy/dx; 0 for the other modes).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct CurvePt {
+    pub x: f32,
+    pub y: f32,
+    pub l: Tan,
+    pub r: Tan,
+    pub ls: f32,
+    pub rs: f32,
+}
+
+impl From<[f32; 2]> for CurvePt {
+    fn from(p: [f32; 2]) -> Self {
+        CurvePt { x: p[0], y: p[1], ..Default::default() }
+    }
+}
+
+/// Points of these positions, Auto on both sides.
+pub fn curve_pts(p: &[[f32; 2]]) -> Vec<CurvePt> {
+    p.iter().map(|&q| q.into()).collect()
+}
+
+/// In the file: `[x, y]` for a point Auto on both sides (as 0.102.0 wrote
+/// every point), else the whole point.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum CurvePtFile {
+    Pair([f32; 2]),
+    Full {
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        l: Tan,
+        #[serde(default)]
+        r: Tan,
+        #[serde(default)]
+        ls: f32,
+        #[serde(default)]
+        rs: f32,
+    },
+}
+
+impl Serialize for CurvePt {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let p = *self;
+        if (p.l, p.r) == (Tan::Auto, Tan::Auto) {
+            CurvePtFile::Pair([p.x, p.y]).serialize(s)
+        } else {
+            CurvePtFile::Full { x: p.x, y: p.y, l: p.l, r: p.r, ls: p.ls, rs: p.rs }.serialize(s)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CurvePt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match CurvePtFile::deserialize(d)? {
+            CurvePtFile::Pair(p) => p.into(),
+            CurvePtFile::Full { x, y, l, r, ls, rs } => CurvePt { x, y, l, r, ls, rs },
+        })
+    }
 }
 
 fn fx_colors() -> [[u8; 4]; 2] {
@@ -747,42 +853,70 @@ fn fx_colors() -> [[u8; 4]; 2] {
 }
 
 /// A straight curve: (0, 0) to (1, 1).
-pub fn curve_identity() -> Vec<[f32; 2]> {
-    vec![[0.0, 0.0], [1.0, 1.0]]
+pub fn curve_identity() -> Vec<CurvePt> {
+    curve_pts(&[[0.0, 0.0], [1.0, 1.0]])
 }
 
-/// The curve through `pts` (sorted by x) at `x`: a monotone cubic between
-/// the points (Fritsch-Carlson tangents, no overshoot), level past the first
-/// and last point. Fewer than two points: straight.
-pub fn curve_at(pts: &[[f32; 2]], x: f32) -> f32 {
+/// The slope of point `i`'s left (or right) side as its segment uses it:
+/// Free its own, Linear towards the neighbour on that side, Auto (and
+/// Constant, which the segment handles) the monotone Fritsch-Carlson one.
+pub fn curve_slope(pts: &[CurvePt], i: usize, right: bool) -> f32 {
+    let n = pts.len();
+    if n < 2 {
+        return 1.0;
+    }
+    let d = |k: usize| (pts[k + 1].y - pts[k].y) / (pts[k + 1].x - pts[k].x).max(1e-6);
+    let p = pts[i];
+    match if right { p.r } else { p.l } {
+        Tan::Free => {
+            if right {
+                p.rs
+            } else {
+                p.ls
+            }
+        }
+        // the segment on that side (past an end: the one there is)
+        Tan::Linear => d(if right { i.min(n - 2) } else { i.max(1) - 1 }),
+        Tan::Auto | Tan::Constant => {
+            if i == 0 {
+                d(0)
+            } else if i == n - 1 {
+                d(n - 2)
+            } else if d(i - 1) * d(i) <= 0.0 {
+                0.0
+            } else {
+                2.0 / (1.0 / d(i - 1) + 1.0 / d(i))
+            }
+        }
+    }
+}
+
+/// The curve through `pts` (sorted by x) at `x`: a cubic (Hermite) between
+/// the points with each side's slope (`curve_slope`; all Auto is the
+/// monotone cubic, no overshoot), a Constant side holding its segment at
+/// the left point; level past the first and last point, clamped to 0..1.
+/// Fewer than two points: straight.
+pub fn curve_at(pts: &[CurvePt], x: f32) -> f32 {
     let n = pts.len();
     if n < 2 {
         return x.clamp(0.0, 1.0);
     }
-    if x <= pts[0][0] {
-        return pts[0][1];
+    if x <= pts[0].x {
+        return pts[0].y;
     }
-    if x >= pts[n - 1][0] {
-        return pts[n - 1][1];
+    if x >= pts[n - 1].x {
+        return pts[n - 1].y;
     }
-    let d: Vec<f32> = pts.windows(2).map(|w| (w[1][1] - w[0][1]) / (w[1][0] - w[0][0]).max(1e-6)).collect();
-    let m = |i: usize| -> f32 {
-        if i == 0 {
-            d[0]
-        } else if i == n - 1 {
-            d[n - 2]
-        } else if d[i - 1] * d[i] <= 0.0 {
-            0.0
-        } else {
-            2.0 / (1.0 / d[i - 1] + 1.0 / d[i])
-        }
-    };
-    let i = pts.windows(2).position(|w| x < w[1][0]).unwrap_or(n - 2);
+    let i = pts.windows(2).position(|w| x < w[1].x).unwrap_or(n - 2);
     let (a, b) = (pts[i], pts[i + 1]);
-    let h = (b[0] - a[0]).max(1e-6);
-    let s = (x - a[0]) / h;
+    if a.r == Tan::Constant || b.l == Tan::Constant {
+        return a.y.clamp(0.0, 1.0);
+    }
+    let h = (b.x - a.x).max(1e-6);
+    let s = (x - a.x) / h;
     let (s2, s3) = (s * s, s * s * s);
-    let y = (2.0 * s3 - 3.0 * s2 + 1.0) * a[1] + (s3 - 2.0 * s2 + s) * h * m(i) + (-2.0 * s3 + 3.0 * s2) * b[1] + (s3 - s2) * h * m(i + 1);
+    let (ma, mb) = (curve_slope(pts, i, true), curve_slope(pts, i + 1, false));
+    let y = (2.0 * s3 - 3.0 * s2 + 1.0) * a.y + (s3 - 2.0 * s2 + s) * h * ma + (-2.0 * s3 + 3.0 * s2) * b.y + (s3 - s2) * h * mb;
     y.clamp(0.0, 1.0)
 }
 
@@ -798,7 +932,7 @@ pub enum Film {
 impl FxLayer {
     pub fn new(filter: Filter) -> Self {
         let curves = std::array::from_fn(|_| curve_identity());
-        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false }
+        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false, source: source_luma() }
     }
 
     /// Files before 0.102.0: a curve held three dials (y at x = 1/4, 1/2,
@@ -808,7 +942,7 @@ impl FxLayer {
         let mut was = false;
         if self.curves[0].is_empty() && self.filter == Filter::Curves {
             let v = self.v;
-            self.curves[0] = vec![[0.0, 0.0], [0.25, v[0]], [0.5, v[1]], [0.75, v[2]], [1.0, 1.0]];
+            self.curves[0] = curve_pts(&[[0.0, 0.0], [0.25, v[0]], [0.5, v[1]], [0.75, v[2]], [1.0, 1.0]]);
             if v[..3] == [0.25, 0.5, 0.75] {
                 self.curves[0] = curve_identity();
             }
@@ -824,13 +958,14 @@ impl FxLayer {
     }
 
     /// The curves as one table: entry i is the RGB curve of each channel's
-    /// curve at i / (n - 1), as RGBA8 (the shader reads between entries).
+    /// curve at i / (n - 1), as RGBA8 (the shader reads between entries);
+    /// 채널을 알파로: its one curve in every channel.
     pub fn curve_table(&self, n: usize) -> Vec<u8> {
         let mut t = Vec::with_capacity(n * 4);
         for i in 0..n {
             let x = i as f32 / (n - 1) as f32;
             for c in 1..4 {
-                let y = curve_at(&self.curves[0], curve_at(&self.curves[c], x));
+                let y = if self.filter == Filter::ChannelAlpha { curve_at(&self.curves[0], x) } else { curve_at(&self.curves[0], curve_at(&self.curves[c], x)) };
                 t.push((y * 255.0).round() as u8);
             }
             t.push(255);
@@ -874,7 +1009,7 @@ impl FxLayer {
             Filter::Hsl => self.v[..3] == [0.0; 3],
             Filter::Levels => self.v == [0.0, 1.0, 1.0, 0.0],
             Filter::Curves => self.v[0] <= 0.0 || self.curves.iter().all(|c| c.len() < 2 || *c == curve_identity()),
-            Filter::Desaturate => self.v[0] <= 0.0,
+            Filter::Desaturate | Filter::ChannelAlpha => self.v[0] <= 0.0,
             Filter::Invert | Filter::Posterize | Filter::Threshold | Filter::GradientMap | Filter::Pixelate | Filter::Halftone => false,
             Filter::Grain | Filter::Vignette | Filter::Aberration => self.v[0] <= 0.0,
             Filter::Glow => self.v[1] <= 0.0,
@@ -1225,8 +1360,9 @@ mod tests {
     #[test]
     fn curves_through_their_points() {
         let pts = [[0.0, 0.1], [0.3, 0.5], [0.6, 0.4], [1.0, 0.9]];
-        for p in pts {
-            assert!((curve_at(&pts, p[0]) - p[1]).abs() < 1e-6, "{p:?}");
+        let pts = curve_pts(&pts);
+        for p in &pts {
+            assert!((curve_at(&pts, p.x) - p.y).abs() < 1e-6, "{p:?}");
         }
         // between the 0.3 peak and the 0.6 dip: no overshoot
         for k in 0..=30 {
@@ -1234,7 +1370,7 @@ mod tests {
             assert!((0.4 - 1e-6..=0.5 + 1e-6).contains(&y), "{y}");
         }
         // level past the first and last point
-        let short = [[0.2, 0.3], [0.8, 0.6]];
+        let short = curve_pts(&[[0.2, 0.3], [0.8, 0.6]]);
         assert_eq!(curve_at(&short, 0.0), 0.3);
         assert_eq!(curve_at(&short, 1.0), 0.6);
         // a straight table is the identity
@@ -1246,7 +1382,7 @@ mod tests {
     fn old_curves_become_points() {
         let mut f: FxLayer = serde_json::from_str(r#"{"filter":"Curves","v":[0.4,0.7,0.9,0.0]}"#).unwrap();
         assert!(f.upgrade());
-        assert_eq!(f.curves[0], vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [0.75, 0.9], [1.0, 1.0]]);
+        assert_eq!(f.curves[0], curve_pts(&[[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [0.75, 0.9], [1.0, 1.0]]));
         assert_eq!(f.v[0], 1.0);
         assert!(f.curves[1..].iter().all(|c| *c == curve_identity()));
         // untouched dials: a straight curve; other filters only get straight curves
@@ -1256,6 +1392,36 @@ mod tests {
         assert!(!b.upgrade() && b.v[0] == 8.0 && b.curves[0] == curve_identity());
         // a file from now: nothing to do
         assert!(!FxLayer::new(Filter::Curves).upgrade());
+    }
+
+    #[test]
+    fn curve_tangent_modes() {
+        let base = curve_pts(&[[0.0, 0.2], [0.5, 0.6], [1.0, 0.8]]);
+        let at = |p: &[CurvePt], x: f32| curve_at(p, x);
+        // Constant on either end of a segment holds it at its left point
+        let mut c = base.clone();
+        c[0].r = Tan::Constant;
+        assert_eq!(at(&c, 0.49), 0.2);
+        assert!((at(&c, 0.5) - 0.6).abs() < 1e-6);
+        let mut c = base.clone();
+        c[1].l = Tan::Constant;
+        assert_eq!(at(&c, 0.3), 0.2);
+        // Linear on both ends: straight between them
+        let mut c = base.clone();
+        c[0].r = Tan::Linear;
+        c[1].l = Tan::Linear;
+        assert!((at(&c, 0.25) - 0.4).abs() < 1e-6);
+        // Free: the slope given, on that side only (the left segment keeps Auto)
+        let mut c = base.clone();
+        c[1].r = Tan::Free;
+        c[1].rs = 0.0;
+        assert!((curve_slope(&c, 1, true)).abs() < 1e-6);
+        assert_eq!(at(&c, 0.25), at(&base, 0.25));
+        assert!(at(&c, 0.6) > 0.6 && at(&c, 0.6) < at(&base, 0.6));
+        // saved: [x, y] for Auto points, the whole point otherwise; both load
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.starts_with("[[0.0,0.2],"), "{s}");
+        assert_eq!(serde_json::from_str::<Vec<CurvePt>>(&s).unwrap(), c);
     }
 
     #[test]

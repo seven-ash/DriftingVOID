@@ -350,11 +350,11 @@
   <table>
     <tr><th>Kind</th><th>Filters</th></tr>
     <tr><td>Blur and sharpen</td><td>Gaussian blur, motion blur, unsharp mask</td></tr>
-    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map</td></tr>
+    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map, channel to alpha</td></tr>
     <tr><td>Texture and look</td><td>Grain, vignette, colour fringes, pixelate, halftone, glow</td></tr>
   </table>
   <p>Grain, pixelate and halftone use a grid fixed to the canvas, so the pattern does not slide when the view moves. With <b>Changes each frame</b> on, the grain changes every frame. Vignette and colour fringes work about the camera being filmed (else the export area, else all the content), and turn with it.</p>
-  <p>Curves are edited on the graph: click an empty spot to add a point, drag a point to move it, drag it off the graph or double-click it to remove it. <b>Channel</b> picks RGB or red, green and blue on their own; <b>Amount</b> can be keyed.</p>
+  <p>Curves are edited on the graph: click an empty spot to add a point, drag a point to move it, drag it off the graph or double-click it to remove it. <b>Channel</b> picks RGB or red, green and blue on their own; <b>Amount</b> can be keyed. Right-click a point to set its left, right or both tangents to Constant, Linear, Free or Auto; a Free tangent has a handle to drag. <b>Channel to alpha</b> runs R, G, B or L (luminance) through its curve and uses it as the alpha.</p>
   <div class="folio">10</div>
 </section>
 

@@ -22,7 +22,7 @@ $cases = [ordered]@{
   "palette"  = @($room, "DV_SHOW_PALETTE=1")
   "timeline" = @($room, "DV_TL_DEMO=1")
   "vexport"  = @($room, "DV_SHOW_VEXPORT=1|DV_EXPORT_FRAME=0,0,1280,720")
-  "fx"       = @($room, "DV_FX=13,0.8")
+  "fx"       = @($room, "DV_FX=14,0.8")
   "text"     = @("", "DV_TEST_TEXT_FONT=Malgun Gothic|DV_TEST_TEXT_LOOK=1")
 }
 $appdata = $env:APPDATA

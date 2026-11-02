@@ -808,11 +808,11 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <table>
     <tr><th>종류</th><th>필터</th></tr>
     <tr><td>흐림과 선명</td><td>가우시안 흐림, 동작 흐림, 언샤프 마스크</td></tr>
-    <tr><td>색</td><td>밝기/대비, 색조/채도/명도, 레벨, 커브, 흑백, 반전, 포스터화, 임계값, 그라디언트 맵</td></tr>
+    <tr><td>색</td><td>밝기/대비, 색조/채도/명도, 레벨, 커브, 흑백, 반전, 포스터화, 임계값, 그라디언트 맵, 채널을 알파로</td></tr>
     <tr><td>질감과 화면</td><td>노이즈, 비네트, 색수차, 픽셀화, 하프톤, 글로우</td></tr>
   </table>
   <p>노이즈, 픽셀화, 하프톤은 캔버스에 고정된 격자를 써서, 화면을 옮겨도 무늬가 따라 미끄러지지 않습니다. <b>프레임마다 변화</b>를 켜면 노이즈가 프레임마다 바뀝니다. 비네트와 색수차는 촬영하는 카메라(없으면 내보낼 영역, 그것도 없으면 전체 내용)를 기준으로 하며, 카메라가 돌면 같이 돕니다.</p>
-  <p>커브는 그래프에서 직접 편집합니다. 빈 곳을 클릭하면 점이 생기고, 점을 끌어 옮기며, 그래프 밖으로 끌거나 두 번 클릭하면 지워집니다. <b>채널</b>에서 RGB와 R·G·B를 따로 고를 수 있고, <b>양</b>은 키프레임으로 움직일 수 있습니다.</p>
+  <p>커브는 그래프에서 직접 편집합니다. 빈 곳을 클릭하면 점이 생기고, 점을 끌어 옮기며, 그래프 밖으로 끌거나 두 번 클릭하면 지워집니다. <b>채널</b>에서 RGB와 R·G·B를 따로 고를 수 있고, <b>양</b>은 키프레임으로 움직일 수 있습니다. 점을 우클릭하면 왼쪽·오른쪽·양쪽 탄젠트를 계단, 직선, 자유, 자동 중에서 고르며, 자유는 핸들을 끌어 기울기를 정합니다. <b>채널을 알파로</b>는 R, G, B 또는 L(광도)을 커브에 통과시켜 알파로 씁니다.</p>
   <div class="folio">10</div>
 </section>
 
@@ -1430,11 +1430,11 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <table>
     <tr><th>Kind</th><th>Filters</th></tr>
     <tr><td>Blur and sharpen</td><td>Gaussian blur, motion blur, unsharp mask</td></tr>
-    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map</td></tr>
+    <tr><td>Colour</td><td>Brightness/contrast, hue/saturation/lightness, levels, curves, black and white, invert, posterize, cutoff, gradient map, channel to alpha</td></tr>
     <tr><td>Texture and look</td><td>Grain, vignette, colour fringes, pixelate, halftone, glow</td></tr>
   </table>
   <p>Grain, pixelate and halftone use a grid fixed to the canvas, so the pattern does not slide when the view moves. With <b>Changes each frame</b> on, the grain changes every frame. Vignette and colour fringes work about the camera being filmed (else the export area, else all the content), and turn with it.</p>
-  <p>Curves are edited on the graph: click an empty spot to add a point, drag a point to move it, drag it off the graph or double-click it to remove it. <b>Channel</b> picks RGB or red, green and blue on their own; <b>Amount</b> can be keyed.</p>
+  <p>Curves are edited on the graph: click an empty spot to add a point, drag a point to move it, drag it off the graph or double-click it to remove it. <b>Channel</b> picks RGB or red, green and blue on their own; <b>Amount</b> can be keyed. Right-click a point to set its left, right or both tangents to Constant, Linear, Free or Auto; a Free tangent has a handle to drag. <b>Channel to alpha</b> runs R, G, B or L (luminance) through its curve and uses it as the alpha.</p>
   <div class="folio">10</div>
 </section>
 
@@ -2052,11 +2052,11 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <table>
     <tr><th>種類</th><th>フィルター</th></tr>
     <tr><td>ぼかしとシャープ</td><td>ガウスぼかし、モーションぼかし、アンシャープマスク</td></tr>
-    <tr><td>色</td><td>明るさ・コントラスト、色相・彩度・明度、レベル補正、トーンカーブ、白黒、反転、ポスタリゼーション、しきい値、グラデーションマップ</td></tr>
+    <tr><td>色</td><td>明るさ・コントラスト、色相・彩度・明度、レベル補正、トーンカーブ、白黒、反転、ポスタリゼーション、しきい値、グラデーションマップ、チャネルをアルファに</td></tr>
     <tr><td>質感と画面</td><td>ノイズ、ビネット、色収差、モザイク、ハーフトーン、グロー</td></tr>
   </table>
   <p>ノイズ、モザイク、ハーフトーンはキャンバスに固定した格子を使うので、表示を動かしても模様がすべりません。<b>フレームごとに変化</b>をオンにすると、ノイズがフレームごとに変わります。ビネットと色収差は撮影中のカメラ(なければ書き出し範囲、それもなければ内容全体)を基準にし、カメラが回ると一緒に回ります。</p>
-  <p>トーンカーブはグラフで直接編集します。空いた所をクリックすると点が増え、点をドラッグして動かし、グラフの外へドラッグするかダブルクリックすると消えます。<b>チャネル</b>で RGB と R・G・B を個別に選べ、<b>量</b>はキーフレームで動かせます。</p>
+  <p>トーンカーブはグラフで直接編集します。空いた所をクリックすると点が増え、点をドラッグして動かし、グラフの外へドラッグするかダブルクリックすると消えます。<b>チャネル</b>で RGB と R・G・B を個別に選べ、<b>量</b>はキーフレームで動かせます。点を右クリックすると接線の種類を選べ、フリーはハンドルで傾きを決めます。<b>チャネルをアルファに</b>は R・G・B・L(輝度)をカーブに通してアルファにします。</p>
   <div class="folio">10</div>
 </section>
 

@@ -685,7 +685,20 @@ fn fs_fx(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         return acc / max(ws, 1e-6);
     }
     if op == 2 {
-        let c = straight(textureLoad(tex0, q, 0));
+        let o = textureLoad(tex0, q, 0);
+        let c = straight(o);
+        if i32(u.p0.y) == 9 {
+            // 채널을 알파로: channel p0.z (R, G, B, else luma) of the picture
+            // as it shows over black, through the curve; 양 mixes in the old
+            // alpha
+            let k = i32(u.p0.z);
+            var s = luma709(o.rgb);
+            if k < 3 {
+                s = o[k];
+            }
+            let a = mix(o.a, curve(s, 0), clamp(u.h0.x, 0.0, 1.0));
+            return vec4f(c.rgb * a, a);
+        }
         let v = point(i32(u.p0.y), c.rgb);
         return vec4f(v * c.a, c.a);
     }

@@ -819,13 +819,42 @@ fn fx_colour_filters() {
     let s = [[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [0.75, 0.9], [1.0, 1.0]];
     let got = px(Color32::from_gray(128), curves(&s, &[[0.0, 0.0], [1.0, 1.0]], 1.0)).unwrap();
     assert!((got[0] as i32 - 179).abs() <= 3, "커브: {got:?}");
+
+    // 채널을 알파로: the channel (of the picture over black) through the
+    // curve becomes the alpha; 양 mixes in the old one. Alpha and
+    // premultiplied red: R 200 makes alpha 200 (red 200 × 200 / 255)
+    let alpha = |source: u8, curve: &[[f32; 2]], amount: f32| {
+        let mut f = FxLayer::new(Filter::ChannelAlpha);
+        f.source = source;
+        f.curves[0] = crate::doc::curve_pts(curve);
+        f.v[0] = amount;
+        let mut doc = Document::default();
+        doc.insert("c".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(-10.0, -10.0), pos2(50.0, 50.0), c, Some(c), 0.0)), None);
+        doc.insert("fx".into(), LayerKind::Fx(f), None);
+        crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, 1.0, None, 1)).and_then(|r| r.ok()).map(|pm| {
+            let p = pm.pixel(20, 20).unwrap();
+            [p.alpha(), p.red()]
+        })
+    };
+    let id = [[0.0, 0.0], [1.0, 1.0]];
+    for (name, source, curve, amount, want) in [
+        ("R", 0, &id[..], 1.0, [200, 157]),
+        ("G", 1, &id[..], 1.0, [100, 78]),
+        // Rec.709 luma of (200, 100, 50): 0.461
+        ("L", 3, &id[..], 1.0, [118, 92]),
+        ("R, 뒤집은 커브", 0, &[[0.0, 1.0], [1.0, 0.0]][..], 1.0, [55, 43]),
+        ("R, 양 0.5", 0, &id[..], 0.5, [227, 178]),
+    ] {
+        let Some(got) = alpha(source, curve, amount) else { return };
+        assert!(got.iter().zip(want).all(|(g, w)| (*g as i32 - w).abs() <= 2), "채널을 알파로 ({name}): got {got:?}, want {want:?}");
+    }
 }
 
 /// A 커브 layer with these RGB and red curves at this 양.
 fn curves(rgb: &[[f32; 2]], red: &[[f32; 2]], amount: f32) -> crate::doc::FxLayer {
     let mut f = crate::doc::FxLayer::new(crate::doc::Filter::Curves);
-    f.curves[0] = rgb.to_vec();
-    f.curves[1] = red.to_vec();
+    f.curves[0] = crate::doc::curve_pts(rgb);
+    f.curves[1] = crate::doc::curve_pts(red);
     f.v[0] = amount;
     f
 }
