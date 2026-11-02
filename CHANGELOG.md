@@ -22,6 +22,8 @@ The first public release.
   with it.
 - **Installer** for English, Korean and Japanese. It installs per user,
   without administrator rights, and can download FFmpeg with a checksum.
+- **The manual online** at
+  [seven-ash.github.io/DriftingVOID](https://seven-ash.github.io/DriftingVOID/).
 
 ### Changed
 - Drifting VOID is free software under the GPL-3.0-or-later, with
