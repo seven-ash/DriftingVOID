@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Visual system: tokens, egui visuals, UI fonts, hand-drawn tool icons.
 //! Direction: a dark "void" canvas with two faint fixed blooms, one warm amber
 //! accent used only for state (active tool, selection, focus), floating

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! The controls kit (UI overhaul phase 1, `docs/updates/ui-overhaul.md`): one
 //! control per job on the shared row grid (`theme::ROW_H`). Sections move onto
 //! it in phase 4; until then `DV_KIT=1` shows every piece in every state.

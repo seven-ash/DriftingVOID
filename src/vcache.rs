@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Decoded video frames kept per clip (Ash, 10-21): a background decoder fills
 //! the part of each video the timeline shows, at preview size (long side 1920),
 //! as NV12 (RGBA for transparent ones: GIFs), whatever is being filmed.

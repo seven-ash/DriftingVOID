@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 // Pen (vector) strokes filled on the GPU (src/gpu.rs, raster_strokes). A
 // stroke is a chain of tapered capsules; as the CPU fills their union, each
 // pixel takes the largest coverage of the stroke's capsules (vs_seg/fs_seg,

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drifting VOID: third-party notices</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 860px; margin: 32px auto; padding: 0 16px; color: #222; background: #fff; }
+  h1 { font-size: 22px; } h2 { font-size: 17px; margin-top: 32px; }
+  ul.crates { columns: 2; padding-left: 18px; }
+  pre { white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 6px; font-size: 12.5px; }
+  @media (prefers-color-scheme: dark) { body { color: #ddd; background: #18171f; } pre { background: #24232c; } }
+</style>
+</head>
+<body>
+<h1>Drifting VOID: third-party notices</h1>
+<p>Drifting VOID is free software under the GNU GPL version 3 or later, with
+additional terms (see LICENSE and NOTICE; original repository
+<a href="https://github.com/seven-ash/DriftingVOID">github.com/seven-ash/DriftingVOID</a>).
+It is built with the components below, each under its own licence.</p>
+
+<h2>Fonts</h2>
+<p><b>Pretendard JP</b> (Regular, SemiBold), copyright 2021 Kil Hyung-jin
+(<a href="https://github.com/orioncactus/pretendard">orioncactus/pretendard</a>), with Reserved Font
+Name Pretendard JP; SIL Open Font License 1.1. Shipped in the
+<code>fonts</code> folder with its licence, <code>OFL-PretendardJP.txt</code>.</p>
+<p>The fonts built into egui (<code>epaint_default_fonts</code>) are listed with
+their licences below.</p>
+
+<h2>FFmpeg</h2>
+<p>FFmpeg is not part of Drifting VOID. The setup can download a GPL build of it
+(<a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a>), which runs
+as a separate program; its licence and sources are in the <code>ffmpeg</code>
+folder of the installation.</p>
+
+<h2>Rust crates</h2>
+{{#each licenses}}
+<h3>{{name}}</h3>
+<ul class="crates">
+{{#each used_by}}<li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! 2D layers on the GPU (render overhaul, docs/updates/wgpu-renderer.md
 //! section 9, item 2): text and shapes become paths of line edges, filled on
 //! the GPU with the exact area coverage a CPU rasterizer accumulates

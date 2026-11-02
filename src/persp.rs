@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Perspective spaces: a camera matched to a photo from hand-drawn vanishing lines.
 //! Maths and references: docs/SPACES.md.
 //!

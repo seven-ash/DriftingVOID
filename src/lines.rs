@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Line suggestions for a space's vanishing lines (docs/updates/line-suggest.md).
 //!
 //! - Segments: LSD, R. Grompone von Gioi, J. Jakubowicz, J.-M. Morel,

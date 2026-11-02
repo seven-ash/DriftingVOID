@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 // Extrusion sides built on the GPU (src/gpu.rs, Node::Sides): one instance per
 // outline edge (extrude::Edge, content coordinates), six vertices making its
 // quad between the front face and the back one, as extrude::sides and

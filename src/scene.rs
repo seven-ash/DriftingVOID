@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! The frame description: what a document shows at its current time, as a flat
 //! list of draw items in drawing order. Built once per picture and read by the
 //! renderers (the CPU export now; the GPU renderer next), so every decision

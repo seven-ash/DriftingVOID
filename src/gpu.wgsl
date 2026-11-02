@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 // GPU export passes (src/gpu.rs). Every pass draws one rectangle of the target
 // (`rect`, target pixels) and works on whole pixels with textureLoad, so it
 // matches the CPU export's pixel-centre arithmetic. Colours are premultiplied

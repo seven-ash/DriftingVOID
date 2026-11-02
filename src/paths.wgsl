@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 // 2D layers drawn on the GPU (src/gpu_paths.rs): text glyphs and shape outlines
 // as line edges, filled with the exact area coverage a CPU rasterizer
 // accumulates (ab_glyph_rasterizer, font-rs): for pixel (X, Y), every edge adds

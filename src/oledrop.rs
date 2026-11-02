@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Drops from other programs, browsers included. winit's drop target takes
 //! only real files (CF_HDROP), so an image dragged out of Chrome or Edge (a
 //! virtual file: FileGroupDescriptorW + FileContents, plus its URL) was

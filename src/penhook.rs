@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! winit turns pen input into touch events and drops the pen's button and
 //! eraser state, so we peek at WM_POINTER* through a window subclass and keep
 //! the flags in globals the app reads each frame.

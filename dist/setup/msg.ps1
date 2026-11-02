@@ -1,4 +1,6 @@
-﻿# Setup and uninstall messages in Korean, English and Japanese, dot-sourced by
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+# Setup and uninstall messages in Korean, English and Japanese, dot-sourced by
 # both. The language: -Lang, else the one chosen in the app (prefs.json), else
 # Windows' display language as the app's first start reads it (English or
 # Japanese, else Korean).

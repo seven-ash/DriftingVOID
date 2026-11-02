@@ -24,6 +24,18 @@ ships a setup that fetches ffmpeg from GitHub, and the user manual
 
 Where development stands and what is open: `docs/STATE.md`.
 
+## Licence
+
+Copyright (C) 2026 Ash (seven-ash). Drifting VOID is free software under the
+[GNU GPL version 3 or later](LICENSE), with additional terms under its
+section 7 ([`NOTICE`](NOTICE)): keep the attribution "Based on Drifting VOID
+by Ash (seven-ash), https://github.com/seven-ash/DriftingVOID", mark modified
+versions as changed, and give them a name and icon of their own.
+Contributions come under the same terms with a DCO sign-off
+([`CONTRIBUTING.md`](CONTRIBUTING.md)). Third-party components:
+[`THIRD-PARTY-NOTICES.html`](THIRD-PARTY-NOTICES.html) (regenerate with
+`cargo about generate -c dist/legal/about.toml dist/legal/about.hbs -o THIRD-PARTY-NOTICES.html`).
+
 ## Using it
 
 | Input | Action |

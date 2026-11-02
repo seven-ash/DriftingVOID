@@ -32,6 +32,14 @@ ffmpeg
   공개 빌드를 받아 SHA-256을 확인한 뒤 설치 폴더의 ffmpeg 폴더에만 둡니다.
   라이선스 전문과 출처는 그 폴더의 LICENSE.txt, SOURCE.txt에 있습니다.
 
+라이선스
+  Drifting VOID는 GNU GPL 3.0 이상(GPL-3.0-or-later)으로 배포하는 자유
+  소프트웨어입니다. 고쳐서 다시 배포해도 되지만, 그 소스도 같은 라이선스로
+  공개해야 하고, NOTICE.txt의 추가 조건을 지켜야 합니다:
+  "Based on Drifting VOID by Ash (seven-ash), https://github.com/seven-ash/DriftingVOID"
+  표기를 유지하고, 수정본은 다른 이름과 아이콘을 씁니다.
+  전문: LICENSE.txt · 추가 조건: NOTICE.txt · 함께 쓴 구성요소: THIRD-PARTY-NOTICES.html
+
 ========================================================================
 English
 ========================================================================
@@ -64,6 +72,16 @@ ffmpeg
   install folder's ffmpeg folder, with the full licence and its source in
   LICENSE.txt and SOURCE.txt there.
 
+Licence
+  Drifting VOID is free software under the GNU GPL version 3 or later
+  (GPL-3.0-or-later). You may change and share it, provided its source is
+  shared under the same licence and the additional terms in NOTICE.txt are
+  kept: preserve "Based on Drifting VOID by Ash (seven-ash),
+  https://github.com/seven-ash/DriftingVOID", and give a modified version
+  its own name and icon.
+  Full text: LICENSE.txt · Additional terms: NOTICE.txt · Components:
+  THIRD-PARTY-NOTICES.html
+
 ========================================================================
 日本語
 ========================================================================
@@ -93,3 +111,11 @@ ffmpeg
   このパッケージには含まれず、セットアップ中に GitHub の BtbN/FFmpeg-Builds の
   公開ビルドを取得して SHA-256 を確かめ、インストール先の ffmpeg フォルダーにだけ
   置きます。ライセンス全文と入手元は、そのフォルダーの LICENSE.txt、SOURCE.txt にあります。
+
+ライセンス
+  Drifting VOID は GNU GPL バージョン 3 以降(GPL-3.0-or-later)の自由
+  ソフトウェアです。改変して再配布できますが、そのソースも同じライセンスで
+  公開し、NOTICE.txt の追加条件を守る必要があります:
+  「Based on Drifting VOID by Ash (seven-ash), https://github.com/seven-ash/DriftingVOID」
+  の表記を残し、改変版には別の名前とアイコンを使います。
+  全文: LICENSE.txt · 追加条件: NOTICE.txt · 使用コンポーネント: THIRD-PARTY-NOTICES.html

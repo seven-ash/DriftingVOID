@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 // Glass under wgpu (src/glass_gpu.rs): each card drawn from the canvas and,
 // when it overlaps earlier UI, a grab of the lower cards over it, blurred at
 // quarter size, with the GL version's look: tint, refraction and red/blue

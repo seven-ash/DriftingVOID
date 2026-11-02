@@ -1,4 +1,6 @@
-﻿# Builds a package: target\dist\DriftingVOID-<name>(.zip) with the release exe,
+﻿# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+# Builds a package: target\dist\DriftingVOID-<name>(.zip) with the release exe,
 # Setup.cmd, the setup scripts, the manual, the fonts and README.
 # ffmpeg is not included: the setup fetches it from GitHub on the user's PC.
 #
@@ -44,6 +46,10 @@ $man = Join-Path $out "manual\index.html"
 $fonts = Join-Path $root "assets\fonts"
 New-Item -ItemType Directory -Force (Join-Path $out "fonts") | Out-Null
 Copy-Item (Join-Path $fonts "PretendardJP-*.ttf"), (Join-Path $fonts "OFL-PretendardJP.txt") (Join-Path $out "fonts")
+# the licence, its additional terms and the third-party notices
+Copy-Item (Join-Path $root "LICENSE") (Join-Path $out "LICENSE.txt")
+Copy-Item (Join-Path $root "NOTICE") (Join-Path $out "NOTICE.txt")
+Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.html") $out
 $readme = [IO.File]::ReadAllText((Join-Path $root "dist\README.txt"), [Text.Encoding]::UTF8).Replace("{VERSION}", $label)
 [IO.File]::WriteAllText((Join-Path $out "README.txt"), $readme, (New-Object Text.UTF8Encoding $true))
 

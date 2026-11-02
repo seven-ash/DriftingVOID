@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Edge loupe processing: an automatic levels stretch and a Canny edge map of a
 //! small window of the picture, for placing vanishing lines and wall corners.
 //!

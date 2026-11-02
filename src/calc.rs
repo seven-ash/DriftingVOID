@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Tiny calculator for number fields: + - * / ^ (right-assoc), parentheses,
 //! unary minus. `40*1.5`, `2^3+1`, `(12-4)/2`.
 

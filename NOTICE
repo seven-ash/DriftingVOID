@@ -1,0 +1,55 @@
+Drifting VOID
+Copyright (C) 2026 Ash (seven-ash)
+Original repository: https://github.com/seven-ash/DriftingVOID
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version, with the additional terms below. It is distributed in
+the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License (the file LICENSE) for more details.
+
+------------------------------------------------------------------------
+Additional terms (GNU GPL version 3, section 7)
+------------------------------------------------------------------------
+
+These terms apply to this program and to every work based on it, as
+section 7 of the GNU GPL allows. They are part of the licence; removing
+them is not permitted.
+
+1. Attribution (section 7(b)). Any copy you convey, in source or object
+   form, modified or not, must preserve this notice:
+
+       Based on Drifting VOID by Ash (seven-ash),
+       https://github.com/seven-ash/DriftingVOID
+
+   in this NOTICE file, and in the Appropriate Legal Notices the program
+   displays, if it displays any (an About box or a licence screen).
+
+2. Marking of modified versions (section 7(c)). A modified version must
+   be marked as changed from the original, for example by a changed name
+   or version string and a line stating that it is modified, so that it
+   is not mistaken for the original program.
+
+3. Names and marks (section 7(e)). This licence grants no rights under
+   trademark law to the name "Drifting VOID", its logo or its icons,
+   beyond the attribution notice of term 1 and plain statements of
+   origin ("based on Drifting VOID"). A modified version you convey
+   therefore needs a name and an icon of its own.
+
+------------------------------------------------------------------------
+Contributions
+------------------------------------------------------------------------
+
+Contributions are accepted under the same licence and terms, signed off
+under the Developer Certificate of Origin; see CONTRIBUTING.md.
+
+------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------
+
+The program includes third-party code and fonts under their own licences
+(all compatible with the GNU GPL version 3); their notices are in
+THIRD-PARTY-NOTICES.html. FFmpeg is not part of this program: the setup
+downloads it separately as its own program under its own licence.

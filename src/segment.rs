@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! GrabCut (Rother, Kolmogorov, Blake 2004): two colour GMMs and an iterated
 //! graph cut (Dinic max-flow on an 8-connected grid).
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Installed system fonts (Windows Fonts folder + per-user fonts), scanned in
 //! the background, loaded on demand.
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Extrusion meshes: the outline of a layer's flattened picture (marching squares
 //! on alpha, simplified with Douglas–Peucker) becomes side quads between the
 //! front and back faces. Faces turned away from the eye are dropped, so a solid

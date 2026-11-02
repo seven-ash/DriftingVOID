@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Glass cards under wgpu (render overhaul phase 3). egui-wgpu draws a frame in
 //! one render pass, so nothing can copy the screen mid-frame as `glass.rs` did
 //! under GL. Instead, before egui paints:

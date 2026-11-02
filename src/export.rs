@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+
 //! Full-resolution CPU compositor (tiny-skia). Used for export, clipboard copy
 //! and the eyedropper, so all three agree with each other.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 fn main() {
     // Release version (dist/package.ps1 -Release): separate from the dev
     // version in Cargo.toml; empty for dev builds.
