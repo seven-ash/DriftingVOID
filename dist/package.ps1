@@ -1,7 +1,8 @@
 ﻿# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 # Builds a package: target\dist\DriftingVOID-<name>(.zip) with the release exe,
-# Setup.cmd, the setup scripts, the manual, the fonts and README.
+# Setup.cmd, the setup scripts, the manual, the fonts and README, and the
+# Inno Setup installer DriftingVOID-<name>-Setup.exe (dist\inno) when ISCC is found.
 # ffmpeg is not included: the setup fetches it from GitHub on the user's PC.
 #
 #   package.ps1 -Release 1.0.0.R   release package; the release version is
@@ -57,6 +58,19 @@ $zip = "$out.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $out -DestinationPath $zip -CompressionLevel Optimal
 "{0}  ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1MB)
+
+# the installer (Inno Setup 6.7+): DriftingVOID-<name>-Setup.exe beside the zip
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($iscc) {
+    # Windows file versions are four numbers: 1.0.1.R -> 1.0.1.0
+    $nums = @(([regex]::Matches($want, '\d+') | ForEach-Object { $_.Value }) + @("0", "0", "0", "0"))[0..3] -join "."
+    & $iscc /Q "/DAppVer=$label" "/DFileVer=$nums" "/DSrc=$out" "/DOut=$(Split-Path $out)" "dist\inno\DriftingVOID.iss"
+    if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+    $setup = Join-Path (Split-Path $out) "DriftingVOID-$label-Setup.exe"
+    "{0}  ({1:N1} MB)" -f $setup, ((Get-Item $setup).Length / 1MB)
+} else {
+    "Inno Setup not found: no installer (winget install JRSoftware.InnoSetup)"
+}
 
 if ($Release) {
     $commit = (git rev-parse --short HEAD).Trim()
