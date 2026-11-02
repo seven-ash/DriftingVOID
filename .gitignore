@@ -1,3 +1,4 @@
 /target
 *.void.tmp
 *.got.png
+/notes/

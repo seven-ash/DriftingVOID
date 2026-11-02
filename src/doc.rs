@@ -546,7 +546,7 @@ impl AudioLayer {
     }
 }
 
-/// A filter of an FX layer (`docs/updates/fx-layers.md`).
+/// A filter of an FX layer (`notes/updates/fx-layers.md`).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash, Debug, Serialize, Deserialize)]
 pub enum Filter {
     #[default]
@@ -1183,7 +1183,7 @@ pub struct Document {
     pub layers: Vec<Layer>,
     pub export_frame: Option<Rect>,
     pub next_id: LayerId,
-    /// Perspective-matched 3D spaces (docs/SPACES.md).
+    /// Perspective-matched 3D spaces (notes/SPACES.md).
     pub spaces: Vec<crate::persp::Space>,
     pub timeline: crate::anim::Timeline,
     /// Canvas cameras (regions over time).

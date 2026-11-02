@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Playback cache (render overhaul phase 4, docs/updates/wgpu-renderer.md).
+//! Playback cache (render overhaul phase 4, notes/updates/wgpu-renderer.md).
 //!
 //! Frames of the export region (a camera or the export frame, at its own pixels,
 //! the long side at most 3840), or of the canvas view when there is no region,

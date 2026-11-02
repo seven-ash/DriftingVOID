@@ -10,8 +10,8 @@
 
 <p align="center">
   <a href="https://github.com/seven-ash/DriftingVOID/releases/latest"><b>Download</b></a> ·
-  <a href="dist/manual/index.html">Manual</a> ·
-  <a href="docs/CHANGELOG.md">Changelog</a> ·
+  <a href="https://seven-ash.github.io/DriftingVOID/">Manual</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="LICENSE">GPL-3.0-or-later</a>
 </p>
 
@@ -75,8 +75,8 @@ first run: choose **More info → Run anyway**. Uninstall from
 A pen tablet is optional; the app is developed with a Super Display + S Pen
 setup.
 
-The user manual is in the Start menu after installing, and in
-[`dist/manual`](dist/manual/index.html) here.
+The user manual is in the Start menu after installing, and online at
+[seven-ash.github.io/DriftingVOID](https://seven-ash.github.io/DriftingVOID/).
 
 ## First steps
 
@@ -111,9 +111,9 @@ first argument. Video and sound need `ffmpeg` and `ffprobe` next to the exe
 [Inno Setup](https://jrsoftware.org/isinfo.php) 6.7 installed, the
 installer (`dist/inno`).
 
-Where development stands: [`docs/STATE.md`](docs/STATE.md). Build, test,
-release and debugging notes: [`docs/DEV_NOTES.md`](docs/DEV_NOTES.md).
-Design records: [`docs/DECISIONS.md`](docs/DECISIONS.md),
+More for developers: [`docs/BUILDING.md`](docs/BUILDING.md) (build, tests,
+translations, manual, packaging, releases),
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (how it fits together) and
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Contributing

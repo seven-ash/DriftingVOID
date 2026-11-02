@@ -1,0 +1,41 @@
+# Publishes the user manual (dist/manual) to GitHub Pages:
+# https://seven-ash.github.io/DriftingVOID/
+name: Manual
+
+on:
+  push:
+    branches: [main]
+    paths: ["dist/manual/**", ".github/workflows/manual.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Put the latest release on the cover
+        run: |
+          v=$(git tag --list 'release-*' --sort=-v:refname | head -n1 | sed 's/^release-//')
+          sed -i "s/{VERSION}/${v:-dev}/g" dist/manual/index.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/manual
+      - id: deploy
+        uses: actions/deploy-pages@v4

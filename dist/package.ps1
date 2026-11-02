@@ -7,7 +7,7 @@
 #
 #   package.ps1 -Release 1.0.0.R   release package; the release version is
 #                                  stamped into the exe and README and logged
-#                                  in docs\RELEASES.md with the dev version
+#                                  in notes\RELEASES.md with the dev version
 #   package.ps1                    dev package, named after Cargo.toml
 param([string]$Release = "", [switch]$NoBuild)
 
@@ -75,7 +75,7 @@ if ($iscc) {
 if ($Release) {
     $commit = (git rev-parse --short HEAD).Trim()
     if (git status --porcelain --untracked-files=no) { $commit += " (uncommitted changes)" }
-    $log = Join-Path $root "docs\RELEASES.md"
+    $log = Join-Path $root "notes\RELEASES.md"
     $row = "| $Release | $dev | $commit | $(Get-Date -Format yyyy-MM-dd) |"
     $lines = @([IO.File]::ReadAllLines($log, [Text.Encoding]::UTF8) | Where-Object { $_ -notmatch "^\| $([regex]::Escape($Release)) \|" })
     # into the table, after its last row (notes below it stay below)

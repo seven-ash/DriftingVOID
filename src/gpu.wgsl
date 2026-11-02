@@ -445,7 +445,7 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 
 // ---------------------------------------------------------------- FX layers
-// (docs/updates/fx-layers.md) p0.x is the pass:
+// (notes/updates/fx-layers.md) p0.x is the pass:
 //  1 Gaussian blur along h0.xy (one axis), sigma h0.z, taps h0.w apart, p0.y each side
 //  2 a point filter, p0.y its kind (Filter::point_code), h0 its values,
 //    h1/h2 the gradient map's colours (straight), tex1 the curves' table

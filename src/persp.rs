@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
 //! Perspective spaces: a camera matched to a photo from hand-drawn vanishing lines.
-//! Maths and references: docs/SPACES.md.
+//! Maths and references: notes/SPACES.md.
 //!
 //! World is Blender's (Z up, right-handed); camera axes are x right, y down, z forward,
 //! and `Xc = R (Xw - C)`. Image coordinates are canvas world pixels.
@@ -1469,7 +1469,7 @@ pub fn cameras(spaces: &[Space]) -> std::collections::HashMap<u64, Camera> {
     spaces.iter().filter_map(|s| solve(s).ok().map(|c| (s.id, c))).collect()
 }
 
-/// Depth grid (option C in docs/SPACES.md): slices across the world axis closest to
+/// Depth grid (option C in notes/SPACES.md): slices across the world axis closest to
 /// the view direction, at equal world steps, plus the four rails joining their
 /// corners and a cell grid on the depth-0 slice. Returns world segments with a weight
 /// (0 faint, 1 normal, 2 strong).

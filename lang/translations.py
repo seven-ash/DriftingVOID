@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 """The UI's translations, one row per Korean key: (English, Japanese).
 `python lang/translations.py` writes lang/en.json and lang/ja.json.
-Style (docs/updates/localisation.md): terse labels as in Korean; English in
+Style (notes/updates/localisation.md): terse labels as in Korean; English in
 sentence case; Japanese with the usual app words. `{}` marks a value, in
 the Korean order; a translation may reorder them as {0}, {1}, ….
 """

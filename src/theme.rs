@@ -53,7 +53,7 @@ token!(BLOOM_COOL, Color32::from_rgb(110, 80, 220), Color32::from_rgb(140, 120, 
 pub const ACCENT: Color32 = Color32::from_rgb(242, 165, 65);
 pub const ACCENT_INK: Color32 = Color32::from_rgb(26, 18, 6);
 
-// spacing on a 4 pt grid (UI overhaul, docs/updates/ui-overhaul.md); 2XS only
+// spacing on a 4 pt grid (UI overhaul, notes/updates/ui-overhaul.md); 2XS only
 // inside packed lists and icon groups (layer rows, the rail, font list)
 pub const SPACE_2XS: f32 = 2.0;
 pub const SPACE_XS: f32 = 4.0;

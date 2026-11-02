@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! 3D workspace of a space (docs/SPACES.md, phase 3): a Blender-like orbit view with
+//! 3D workspace of a space (notes/SPACES.md, phase 3): a Blender-like orbit view with
 //! view presets, the matched camera as a gizmo, picking, and the G/R/S modal
 //! transforms. The world is the space's (Z up); one unit is one canvas pixel at the
 //! origin.

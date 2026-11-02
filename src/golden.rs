@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Golden images of the CPU export: the render overhaul (docs/updates/
+//! Golden images of the CPU export: the render overhaul (notes/updates/
 //! wgpu-renderer.md) must not change what an export looks like. Each scene is
 //! rendered and compared with `tests/golden/<name>.png`; `DV_GOLDEN_WRITE=1`
 //! writes them instead (only on purpose, after checking the new pictures).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Audio (docs/VIDEO.md, V3): files and video soundtracks decoded to PCM through
+//! Audio (notes/VIDEO.md, V3): files and video soundtracks decoded to PCM through
 //! ffmpeg, and a small mixer on the default output device whose position is the
 //! timeline clock while it plays.
 

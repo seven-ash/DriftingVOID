@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Video through an external ffmpeg/ffprobe (docs/VIDEO.md): probing, single-frame
+//! Video through an external ffmpeg/ffprobe (notes/VIDEO.md): probing, single-frame
 //! decode for scrubbing, and a streaming decoder thread for playback.
 
 use std::io::Read;

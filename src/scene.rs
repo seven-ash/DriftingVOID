@@ -5,7 +5,7 @@
 //! list of draw items in drawing order. Built once per picture and read by the
 //! renderers (the CPU export now; the GPU renderer next), so every decision
 //! about how a layer is drawn (projected, grouped, masked, blended) is made in
-//! one place. See docs/RENDER.md.
+//! one place. See notes/RENDER.md.
 
 use crate::doc::{Blend, Document, FxLayer, Layer, LayerKind};
 use crate::export::MaskMap;
@@ -42,7 +42,7 @@ pub enum Draw {
     Projected(Box<Projected>),
     /// An FX layer: everything drawn so far, filtered and put back (복사 or a
     /// blend mode), mixed with the original by `opacity`, only where its mask
-    /// lets it (docs/updates/fx-layers.md).
+    /// lets it (notes/updates/fx-layers.md).
     /// `frame`: what vignette and colour fringes centre on, turned `turn`
     /// radians about its centre (the filmed region, else the export frame,
     /// else the content's bounds); `tick`: the frame number (moving grain).

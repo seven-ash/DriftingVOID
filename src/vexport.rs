@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Video export (docs/VIDEO.md, V4): renders the document over a time range and
+//! Video export (notes/VIDEO.md, V4): renders the document over a time range and
 //! pipes the frames into ffmpeg, on a worker thread with progress and cancel.
 
 use std::io::Write;

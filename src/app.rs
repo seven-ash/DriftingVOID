@@ -1033,7 +1033,7 @@ pub struct App {
     space_axis: u8,
     space_line: Option<usize>,
     space_new: bool,
-    /// 선 찾기: line candidates of a space (docs/updates/line-suggest.md).
+    /// 선 찾기: line candidates of a space (notes/updates/line-suggest.md).
     line_cands: Option<LineCands>,
     /// 3D workspace (phase 3): on/off, its view, a running G/R/S, a navigation drag,
     /// when Tab went down, and the hold-Tab peek at the other workspace.

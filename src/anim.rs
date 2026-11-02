@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! Timeline and keyframes (docs/VIDEO.md, V2).
+//! Timeline and keyframes (notes/VIDEO.md, V2).
 //!
 //! A key is an absolute snapshot of what can move: the layer's centre, an extent
 //! (photo scale, text size, shape size), rotation, opacity and, in a 3D space, the

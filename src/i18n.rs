@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! UI languages (docs/updates/localisation.md). The Korean text is the key
+//! UI languages (notes/updates/localisation.md). The Korean text is the key
 //! (Ash, 10-29): `tr("새로 만들기")` shows the chosen language's text, or the
 //! Korean when a table lacks it. A word that reads differently by context is
 //! keyed with its context (`tr_ctx("혼합", "복사")`, key "혼합|복사"). Text

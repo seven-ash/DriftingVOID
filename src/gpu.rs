@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! GPU export (render overhaul phase 2, docs/updates/wgpu-renderer.md).
+//! GPU export (render overhaul phase 2, notes/updates/wgpu-renderer.md).
 //!
 //! Draws a frame description (`scene.rs`) on a headless wgpu device. Each 2D
 //! layer is still rasterized by the CPU code (tiny-skia, `export::draw_layer`),
