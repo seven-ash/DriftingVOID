@@ -301,7 +301,7 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     };
     let fd: FileDoc = serde_json::from_slice(&read("doc.json")?).map_err(|e| e.to_string())?;
     let mut images: HashMap<String, ImageSource> = HashMap::new();
-    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras };
+    let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras, film: None };
     let old_audio = fd.audio;
     for fl in fd.layers {
         let kind = match fl.kind {
@@ -378,6 +378,19 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
     for l in &mut doc.layers {
         if let Some(a) = l.anim.as_mut() {
             a.split_channels();
+        }
+        // curves held three dials before 0.102.0: points now, and the keys
+        // of those dials are dropped (they would drive 양)
+        if let LayerKind::Fx(fx) = &mut l.kind {
+            if fx.upgrade() {
+                if let Some(a) = l.anim.as_mut() {
+                    let fx_bits = crate::anim::ch::FX.iter().fold(0, |a, b| a | b);
+                    for k in &mut a.keys {
+                        k.ch &= !fx_bits;
+                    }
+                    a.keys.retain(|k| k.ch != 0);
+                }
+            }
         }
     }
     for c in &mut doc.cameras {

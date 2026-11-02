@@ -40,9 +40,10 @@ pub enum Draw {
     /// An FX layer: everything drawn so far, filtered and put back (복사 or a
     /// blend mode), mixed with the original by `opacity`, only where its mask
     /// lets it (docs/updates/fx-layers.md).
-    /// `frame`: what vignette and colour fringes centre on (the export
-    /// frame, else the content's bounds).
-    Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, frame: Rect },
+    /// `frame`: what vignette and colour fringes centre on, turned `turn`
+    /// radians about its centre (the filmed region, else the export frame,
+    /// else the content's bounds); `tick`: the frame number (moving grain).
+    Fx { fx: FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, frame: Rect, turn: f32, tick: i64 },
 }
 
 #[derive(Clone)]
@@ -75,7 +76,8 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
         None => crate::persp::cameras(&doc.spaces),
     };
     let mut items = Vec::new();
-    let frame = doc.export_frame.or_else(|| doc.content_bounds()).unwrap_or(Rect::from_center_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0)));
+    let (frame, turn) = film_frame(doc);
+    let tick = (doc.timeline.time * doc.timeline.fps + 1e-6).floor() as i64;
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
         if layer.mask_of.is_some() {
             continue;
@@ -90,7 +92,7 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
                 continue;
             }
             let mask = crate::export::mask_for(doc, timed.id).map(|m| (m.clone(), crate::export::mask_map(doc, m)));
-            items.push(Item { bounds: Rect::EVERYTHING, draw: Draw::Fx { fx: fx.clone(), opacity: timed.opacity, mask, frame } });
+            items.push(Item { bounds: Rect::EVERYTHING, draw: Draw::Fx { fx: fx.clone(), opacity: timed.opacity, mask, frame, turn, tick } });
             continue;
         }
         let Some(bounds) = timed.shown_bounds(&cams) else { continue };
@@ -102,6 +104,16 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
         items.push(Item { bounds, draw });
     }
     Scene { items }
+}
+
+/// What vignette and colour fringes centre on, and its turn: the filmed
+/// region (a camera as it is now), else the export frame, else the content.
+pub fn film_frame(doc: &Document) -> (Rect, f32) {
+    match doc.film {
+        Some(crate::doc::Film::Camera(id)) if let Some(c) = doc.cameras.iter().find(|c| c.id == id) => (c.rect, c.rot),
+        Some(crate::doc::Film::Fixed(r)) => (r, 0.0),
+        _ => (doc.export_frame.or_else(|| doc.content_bounds()).unwrap_or(Rect::from_center_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0))), 0.0),
+    }
 }
 
 /// A mask on a layer. The layer is cut by the mask first and only then mixed

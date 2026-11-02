@@ -802,7 +802,12 @@ fn fx_colour_filters() {
         ("포스터화", fx(Filter::Posterize, [4.0, 0.0, 0.0, 0.0]), [170, 85, 85]),
         ("임계값", fx(Filter::Threshold, [0.3, 0.0, 0.0, 0.0]), [255, 255, 255]),
         ("그라디언트 맵", grad, [126, 128, 148]),
-        ("커브 (그대로)", fx(Filter::Curves, [0.25, 0.5, 0.75, 0.0]), [200, 100, 50]),
+        ("커브 (그대로)", FxLayer::new(Filter::Curves), [200, 100, 50]),
+        // red's own curve halves it, then the RGB curve inverts every channel
+        // (each channel's curve first, then RGB, as GIMP)
+        ("커브 (R, RGB)", curves(&[[0.0, 1.0], [1.0, 0.0]], &[[0.0, 0.0], [1.0, 0.5]], 1.0), [155, 155, 205]),
+        // 양 0.5: halfway between the original and that
+        ("커브 (양)", curves(&[[0.0, 1.0], [1.0, 0.0]], &[[0.0, 0.0], [1.0, 0.5]], 0.5), [178, 128, 128]),
     ];
     for (name, f, want) in cases {
         let Some(got) = px(c, f) else { return };
@@ -811,8 +816,18 @@ fn fx_colour_filters() {
         }
     }
     // a curve through its middle point: grey 128 (x 0.502) to about 0.7
-    let got = px(Color32::from_gray(128), fx(Filter::Curves, [0.4, 0.7, 0.9, 0.0])).unwrap();
+    let s = [[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [0.75, 0.9], [1.0, 1.0]];
+    let got = px(Color32::from_gray(128), curves(&s, &[[0.0, 0.0], [1.0, 1.0]], 1.0)).unwrap();
     assert!((got[0] as i32 - 179).abs() <= 3, "커브: {got:?}");
+}
+
+/// A 커브 layer with these RGB and red curves at this 양.
+fn curves(rgb: &[[f32; 2]], red: &[[f32; 2]], amount: f32) -> crate::doc::FxLayer {
+    let mut f = crate::doc::FxLayer::new(crate::doc::Filter::Curves);
+    f.curves[0] = rgb.to_vec();
+    f.curves[1] = red.to_vec();
+    f.v[0] = amount;
+    f
 }
 
 /// Motion blur and unsharp mask against their definitions, measured from the
@@ -989,4 +1004,43 @@ fn fx_look_filters() {
     }
     let (m, sd) = (s / 1e4, (s2 / 1e4 - (s / 1e4).powi(2)).sqrt());
     assert!((m - 200.0).abs() < 4.0 && sd > 10.0, "노이즈: mean {m:.1}, sd {sd:.1}");
+
+    // moving grain: the same within a frame, another pattern the next frame;
+    // still grain the same in both
+    let at = |moving: bool, t: f64| {
+        let mut d = with(grey.clone(), Filter::Grain, [0.2, 1.0, 0.0, 0.0]);
+        d.timeline.time = t;
+        if let Some(LayerKind::Fx(f)) = d.layers.last_mut().map(|l| &mut l.kind) {
+            f.moving = moving;
+        }
+        draw_at(&d, region.center()).unwrap()
+    };
+    let px = |pm: &Pixmap| (0..100).map(|i| pm.pixel(i, 37).unwrap().red()).collect::<Vec<_>>();
+    let f0 = px(&at(true, 0.0));
+    assert_eq!(f0, px(&at(true, 0.5 / 30.0)), "노이즈 (움직임): one pattern within a frame");
+    let f1 = px(&at(true, 1.0 / 30.0));
+    let same = f0.iter().zip(&f1).filter(|(a, b)| a == b).count();
+    assert!(same < 20, "노이즈 (움직임): {same} of 100 pixels kept the next frame");
+    assert_eq!(px(&at(false, 0.0)), px(&at(false, 1.0 / 30.0)), "노이즈: still without 프레임마다");
+
+    // vignette about a filmed camera, 100 × 40 turned 90°: along canvas x its
+    // short half (20) counts, so pixel 65 (15.5 right of the centre) is
+    // e = 0.775; about the export frame (half 50) the same pixel is e = 0.31
+    let vig = |e: f32| {
+        let t = ((e - 0.5) / 0.5).clamp(0.0, 1.0);
+        200.0 * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
+    };
+    let mut cd = with(grey.clone(), Filter::Vignette, [0.5, 0.5, 0.5, 0.0]);
+    cd.cameras.push(crate::anim::CanvasCam { id: 7, name: "cam".into(), rect: Rect::from_center_size(region.center(), vec2(100.0, 40.0)), anim: Default::default(), rot: std::f32::consts::FRAC_PI_2, follow: None });
+    let frame = red(&draw_at(&cd, region.center()).unwrap(), 65, 50);
+    cd.film = Some(crate::doc::Film::Camera(7));
+    let pm = draw_at(&cd, region.center()).unwrap();
+    let (cam, up) = (red(&pm, 65, 50), red(&pm, 50, 65));
+    assert!((frame - 200.0).abs() <= 3.0 && (cam - vig(15.5 / 20.0)).abs() <= 3.0, "비네트: about the frame {frame}, about the camera {cam} (want {})", vig(15.5 / 20.0));
+    // along canvas y the long half (50): e = 0.3
+    assert!((up - 200.0).abs() <= 3.0, "비네트 (camera, y): {up}");
+    // a fixed filmed region 30 wide: e = 15.5 / 15, the vignette's full 양
+    cd.film = Some(crate::doc::Film::Fixed(Rect::from_center_size(region.center(), vec2(30.0, 100.0))));
+    let fixed = red(&draw_at(&cd, region.center()).unwrap(), 65, 50);
+    assert!((fixed - 100.0).abs() <= 3.0, "비네트 (fixed 30 wide): {fixed}");
 }

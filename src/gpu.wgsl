@@ -445,12 +445,13 @@ fn fs_mip(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 // (docs/updates/fx-layers.md) p0.x is the pass:
 //  1 Gaussian blur along h0.xy (one axis), sigma h0.z, taps h0.w apart, p0.y each side
 //  2 a point filter, p0.y its kind (Filter::point_code), h0 its values,
-//    h1/h2 the gradient map's colours (straight)
+//    h1/h2 the gradient map's colours (straight), tex1 the curves' table
 //  3 resample to the target (bilinear)
 //  4 motion blur: along h0.xy (unit), h0.z px long, p0.y taps, centred
 //  5 unsharp mask: tex0 the original, tex1 its blur; amount h0.x, threshold h0.y
 // 6–9, 11–12 the look filters: rot = below pixel origin (canvas) and scale,
-//    rot2 = the frame's centre and half size (canvas); h0 the values
+//    rot2 = the frame's centre and half size (canvas), h1.xy its turn (cos,
+//    sin), h1.zw grain's shift (moving grain); h0 the values
 //  6 grain, 7 vignette, 8 colour fringes, 9 halftone, 11 glow's bright
 //    part, 12 glow added (tex1 the blurred bright part)
 // 10 write-back: tex0 filtered, tex1 the original, tex2 the mask coverage
@@ -489,30 +490,13 @@ fn hsl2rgb(h: vec3f) -> vec3f {
     return h.z - a * max(min(min(k - 3.0, 9.0 - k), vec3f(1.0)), vec3f(-1.0));
 }
 
-// a monotone cubic through (0,0), (.25,y0), (.5,y1), (.75,y2), (1,1)
-// (Fritsch-Carlson tangents)
-fn curve(x: f32, y0: f32, y1: f32, y2: f32) -> f32 {
-    var ys = array<f32, 5>(0.0, y0, y1, y2, 1.0);
-    var dk = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-    for (var i = 0; i < 4; i++) {
-        dk[i] = (ys[i + 1] - ys[i]) * 4.0;
-    }
-    var m = array<f32, 5>(dk[0], 0.0, 0.0, 0.0, dk[3]);
-    for (var i = 1; i < 4; i++) {
-        if dk[i - 1] * dk[i] <= 0.0 {
-            m[i] = 0.0;
-        } else {
-            m[i] = 2.0 / (1.0 / dk[i - 1] + 1.0 / dk[i]);
-        }
-    }
-    let t = clamp(x, 0.0, 1.0) * 4.0;
-    let i = min(i32(floor(t)), 3);
-    let s = t - f32(i);
-    let s2 = s * s;
-    let s3 = s2 * s;
-    let h = 0.25;
-    let y = (2.0 * s3 - 3.0 * s2 + 1.0) * ys[i] + (s3 - 2.0 * s2 + s) * h * m[i] + (-2.0 * s3 + 3.0 * s2) * ys[i + 1] + (s3 - s2) * h * m[i + 1];
-    return clamp(y, 0.0, 1.0);
+// the curves' table (tex1, 256 entries: FxLayer::curve_table), read between
+// entries; channel k of the result
+fn curve(x: f32, k: i32) -> f32 {
+    let t = clamp(x, 0.0, 1.0) * 255.0;
+    let i = min(i32(floor(t)), 254);
+    let f = t - f32(i);
+    return mix(textureLoad(tex1, vec2i(i, 0), 0)[k], textureLoad(tex1, vec2i(i + 1, 0), 0)[k], f);
 }
 
 // The point filters on straight sRGB values (as GIMP and Krita by default).
@@ -547,7 +531,8 @@ fn point(kind: i32, c: vec3f) -> vec3f {
             return p.w + pow(v, vec3f(1.0 / max(p.y, 0.01))) * (1.0 - p.w);
         }
         case 3: {
-            return vec3f(curve(c.r, p.x, p.y, p.z), curve(c.g, p.x, p.y, p.z), curve(c.b, p.x, p.y, p.z));
+            // 양 mixes the original and the curves
+            return mix(c, vec3f(curve(c.r, 0), curve(c.g, 1), curve(c.b, 2)), p.x);
         }
         case 4: {
             return mix(c, vec3f(luma709(c)), p.x);
@@ -596,6 +581,14 @@ fn bilin_at(t: texture_2d<f32>, p: vec2f) -> vec4f {
     return mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y);
 }
 
+// a canvas offset in the frame's own axes (turned by h1.xy = cos, sin; the
+// frame turns clockwise on screen with its angle, as CanvasCam::rot)
+fn frame_axes(d: vec2f) -> vec2f {
+    let cs = u.h1.x;
+    let sn = u.h1.y;
+    return vec2f(cs * d.x + sn * d.y, -sn * d.x + cs * d.y);
+}
+
 fn look(op: i32, q: vec2i) -> vec4f {
     let s = u.rot.z;
     // this pixel's centre on the canvas
@@ -605,19 +598,21 @@ fn look(op: i32, q: vec2i) -> vec4f {
     switch op {
         case 6: {
             let c = straight(o);
-            let h = hash2(floor(cp / max(p.y, 0.01))) - 0.5;
+            let h = hash2(floor(cp / max(p.y, 0.01)) + u.h1.zw) - 0.5;
             let n = mix(vec3f(h.x), h, p.z);
             let v = clamp(c.rgb + n * p.x * 2.0, vec3f(0.0), vec3f(1.0));
             return vec4f(v * c.a, c.a);
         }
         case 7: {
             // distance from the frame's centre, 1 at the middle of its sides
-            let e = length((cp - u.rot2.xy) / max(u.rot2.zw, vec2f(1e-3)));
+            // (in the frame's own axes: a turned camera turns it)
+            let e = length(frame_axes(cp - u.rot2.xy) / max(u.rot2.zw, vec2f(1e-3)));
             let k = 1.0 - p.x * smoothstep(p.y, p.y + p.z, e);
             return vec4f(o.rgb * k, o.a);
         }
         case 8: {
-            // red outwards, blue inwards, by 양 at the frame's edge
+            // red outwards, blue inwards, by 양 at the frame's edge (along
+            // the centre's rays, which a turned frame leaves as they are)
             let dir = (cp - u.rot2.xy) / max(max(u.rot2.z, u.rot2.w), 1e-3);
             let off = dir * p.x * s;
             let px = vec2f(q) + 0.5;

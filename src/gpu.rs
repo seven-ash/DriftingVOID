@@ -113,7 +113,7 @@ enum Node {
     /// target (`map`: target pixel to below pixel), put over the background
     /// (`top`: the frame's own list, which has one) and written back by its
     /// blend, opacity and mask.
-    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool, frame: Rect },
+    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool, frame: Rect, turn: f32, tick: i64 },
 }
 
 /// Where a mask lets a layer show: from the mask's tile atlas (as
@@ -1096,8 +1096,8 @@ impl Gpu {
     fn prepare_with_fx(&mut self, items: &[crate::scene::Item], v: &View, cull: Rect, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>, top: bool) {
         for (i, item) in items.iter().enumerate() {
             match &item.draw {
-                Draw::Fx { fx, opacity, mask, frame } => {
-                    let n = self.prepare_fx(fx.clone(), *opacity, mask.clone(), *frame, &items[..i], v, jobs, top);
+                Draw::Fx { fx, opacity, mask, frame, turn, tick } => {
+                    let n = self.prepare_fx(fx.clone(), *opacity, mask.clone(), (*frame, *turn, *tick), &items[..i], v, jobs, top);
                     out.push(n);
                 }
                 d if item.bounds.intersects(cull) => self.prepare(d.clone(), item.bounds, v, jobs, out),
@@ -1111,7 +1111,7 @@ impl Gpu {
     /// a Gaussian blur at a scale where sigma is at most 8 px, so the edge of
     /// the frame or screen never shows and zooming changes nothing (Ash, 10-28).
     #[allow(clippy::too_many_arguments)]
-    fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, frame: Rect, below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
+    fn prepare_fx(&mut self, fx: crate::doc::FxLayer, opacity: f32, mask: Option<(Layer, Option<MaskMap>)>, (frame, turn, tick): (Rect, f32, i64), below: &[crate::scene::Item], v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, top: bool) -> Node {
         let reach = fx.reach();
         let v2 = if reach > 0.0 {
             let want = v.full.expand(reach);
@@ -1136,7 +1136,7 @@ impl Gpu {
         self.prepare_with_fx(below, &v2, v2.full.expand(2.0 / v2.s), jobs, &mut nodes, false);
         let mask = mask.map(|(m, map)| self.mask_spec(m, map, [0, 0, v.tw as i32, v.th as i32], v, jobs));
         let map = [v2.s / v.s, (v.full.min.x - v2.full.min.x) * v2.s, (v.full.min.y - v2.full.min.y) * v2.s];
-        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top, frame }
+        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top, frame, turn, tick }
     }
 
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
@@ -2205,7 +2205,7 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
         use crate::doc::Filter;
-        let Node::Fx { fx, opacity, mask, below, view: v2, map, top, frame } = nd else { return };
+        let Node::Fx { fx, opacity, mask, below, view: v2, map, top, frame, turn, tick } = nd else { return };
         let full = [0.0, 0.0, tw as f32, th as f32];
         let (bw, bh) = (v2.tw, v2.th);
         let bfull = [0.0, 0.0, bw as f32, bh as f32];
@@ -2219,10 +2219,19 @@ impl Gpu {
         // canvas units of a below pixel: its origin and scale; the frame's centre and half size
         let canvas = [v2.full.min.x, v2.full.min.y, v2.s, 0.0];
         let fr = [frame.center().x, frame.center().y, frame.width() * 0.5, frame.height() * 0.5];
+        // moving grain: the cells' hash shifted by a point of the R2 sequence
+        // a frame (kept under 1000 canvas units, where the hash stays fine)
+        let seed = if fx.moving {
+            let n = tick.rem_euclid(1 << 20) as f64;
+            [((n * 0.754_877_666_2).fract() * 997.0) as f32, ((n * 0.569_840_291).fract() * 991.0) as f32]
+        } else {
+            [0.0, 0.0]
+        };
         let look = |op: f32| {
             let mut u = Uniform::new(bfull, bw, bh);
             u.p0 = [op, 0.0, 0.0, 0.0];
             u.h0 = fx.v;
+            u.h1 = [turn.cos(), turn.sin(), seed[0], seed[1]];
             u.rot = canvas;
             u.rot2 = fr;
             u
@@ -2268,7 +2277,9 @@ impl Gpu {
                 let col = |c: [u8; 4]| c.map(|x| x as f32 / 255.0);
                 u.h1 = col(fx.colors[0]);
                 u.h2 = col(fx.colors[1]);
-                self.fx_pass(enc, &f2, &u, &src, &self.dummy, &self.dummy);
+                // the curves as a table the shader reads between entries
+                let table = (point == Filter::Curves).then(|| self.curve_texture(fx));
+                self.fx_pass(enc, &f2, &u, &src, table.as_ref().unwrap_or(&self.dummy), &self.dummy);
             }
         }
         // to the target's pixels (as they are when the views match)
@@ -2367,6 +2378,18 @@ impl Gpu {
         rp.set_pipeline(&self.fx);
         rp.set_bind_group(0, &bg, &[]);
         rp.draw(0..6, 0..1);
+    }
+
+    /// An FX layer's curves as a 256×1 table (`FxLayer::curve_table`).
+    fn curve_texture(&self, fx: &crate::doc::FxLayer) -> wgpu::Texture {
+        let t = self.texture(256, 1, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &fx.curve_table(256),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        );
+        t
     }
 
     /// A copy of `target` as it is now (blend modes read what is below).

@@ -670,12 +670,9 @@ impl Filter {
                 FxParam { name: crate::i18n::k!("흰점"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" },
                 FxParam { name: crate::i18n::k!("출력 검정"), lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
-            // three points of a monotone curve through (0, 0) and (1, 1)
-            Filter::Curves => &[
-                FxParam { name: crate::i18n::k!("어두운 곳"), lo: 0.0, hi: 1.0, default: 0.25, step: 0.01, suffix: "" },
-                FxParam { name: crate::i18n::k!("중간"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
-                FxParam { name: crate::i18n::k!("밝은 곳"), lo: 0.0, hi: 1.0, default: 0.75, step: 0.01, suffix: "" },
-            ],
+            // the curves are points on a graph (`FxLayer::curves`); 양 mixes
+            // the original and the result (keyable, the points are not)
+            Filter::Curves => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
             Filter::Desaturate => &[FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 1.0, step: 0.01, suffix: "" }],
             Filter::Invert | Filter::GradientMap => &[],
             Filter::Posterize => &[FxParam { name: crate::i18n::k!("단계"), lo: 2.0, hi: 32.0, default: 4.0, step: 1.0, suffix: "" }],
@@ -683,14 +680,15 @@ impl Filter {
                 FxParam { name: crate::i18n::k!("기준"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
                 FxParam { name: crate::i18n::k!("부드러움"), lo: 0.0, hi: 0.5, default: 0.0, step: 0.01, suffix: "" },
             ],
-            // grain fixed to the canvas (cells of 크기 canvas px), mono to colour
+            // grain fixed to the canvas (cells of 크기 canvas px), mono to colour;
+            // a new pattern each frame when `FxLayer::moving`
             Filter::Grain => &[
                 FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 0.15, step: 0.01, suffix: "" },
                 FxParam { name: crate::i18n::k!("크기"), lo: 0.5, hi: 20.0, default: 1.0, step: 0.5, suffix: " px" },
                 FxParam { name: crate::i18n::k!("색"), lo: 0.0, hi: 1.0, default: 0.0, step: 0.01, suffix: "" },
             ],
-            // about the frame (export frame, else the content): 크기 1 reaches
-            // the middle of its sides
+            // about the filmed frame (`Document::film`, else the export frame,
+            // else the content): 크기 1 reaches the middle of its sides
             Filter::Vignette => &[
                 FxParam { name: crate::i18n::k!("양"), lo: 0.0, hi: 1.0, default: 0.5, step: 0.01, suffix: "" },
                 FxParam { name: crate::i18n::k!("크기"), lo: 0.0, hi: 1.5, default: 0.8, step: 0.01, suffix: "" },
@@ -734,15 +732,110 @@ pub struct FxLayer {
     /// 그라디언트 맵: the dark and the light end (straight sRGBA).
     #[serde(default = "fx_colors")]
     pub colors: [[u8; 4]; 2],
+    /// 커브: the points (x, y in 0..1, sorted by x) of the RGB curve and of
+    /// the red, green and blue ones (each channel's own, then RGB, as GIMP).
+    /// Empty in files before 0.102.0 (`upgrade`).
+    #[serde(default)]
+    pub curves: [Vec<[f32; 2]>; 4],
+    /// 노이즈: a new pattern each frame (at the timeline's fps).
+    #[serde(default)]
+    pub moving: bool,
 }
 
 fn fx_colors() -> [[u8; 4]; 2] {
     [[0, 0, 0, 255], [255, 255, 255, 255]]
 }
 
+/// A straight curve: (0, 0) to (1, 1).
+pub fn curve_identity() -> Vec<[f32; 2]> {
+    vec![[0.0, 0.0], [1.0, 1.0]]
+}
+
+/// The curve through `pts` (sorted by x) at `x`: a monotone cubic between
+/// the points (Fritsch-Carlson tangents, no overshoot), level past the first
+/// and last point. Fewer than two points: straight.
+pub fn curve_at(pts: &[[f32; 2]], x: f32) -> f32 {
+    let n = pts.len();
+    if n < 2 {
+        return x.clamp(0.0, 1.0);
+    }
+    if x <= pts[0][0] {
+        return pts[0][1];
+    }
+    if x >= pts[n - 1][0] {
+        return pts[n - 1][1];
+    }
+    let d: Vec<f32> = pts.windows(2).map(|w| (w[1][1] - w[0][1]) / (w[1][0] - w[0][0]).max(1e-6)).collect();
+    let m = |i: usize| -> f32 {
+        if i == 0 {
+            d[0]
+        } else if i == n - 1 {
+            d[n - 2]
+        } else if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            2.0 / (1.0 / d[i - 1] + 1.0 / d[i])
+        }
+    };
+    let i = pts.windows(2).position(|w| x < w[1][0]).unwrap_or(n - 2);
+    let (a, b) = (pts[i], pts[i + 1]);
+    let h = (b[0] - a[0]).max(1e-6);
+    let s = (x - a[0]) / h;
+    let (s2, s3) = (s * s, s * s * s);
+    let y = (2.0 * s3 - 3.0 * s2 + 1.0) * a[1] + (s3 - 2.0 * s2 + s) * h * m(i) + (-2.0 * s3 + 3.0 * s2) * b[1] + (s3 - s2) * h * m(i + 1);
+    y.clamp(0.0, 1.0)
+}
+
+/// What vignette and colour fringes centre on: the region being filmed. Set
+/// by whoever films the document (the canvas: the playback cache's camera;
+/// a video or picture export: its region); not saved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Film {
+    Camera(u64),
+    Fixed(Rect),
+}
+
 impl FxLayer {
     pub fn new(filter: Filter) -> Self {
-        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors() }
+        let curves = std::array::from_fn(|_| curve_identity());
+        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false }
+    }
+
+    /// Files before 0.102.0: a curve held three dials (y at x = 1/4, 1/2,
+    /// 3/4); they become points and 양 is full. True when the dials were
+    /// turned into points (their keys no longer mean anything).
+    pub fn upgrade(&mut self) -> bool {
+        let mut was = false;
+        if self.curves[0].is_empty() && self.filter == Filter::Curves {
+            let v = self.v;
+            self.curves[0] = vec![[0.0, 0.0], [0.25, v[0]], [0.5, v[1]], [0.75, v[2]], [1.0, 1.0]];
+            if v[..3] == [0.25, 0.5, 0.75] {
+                self.curves[0] = curve_identity();
+            }
+            self.v = self.filter.defaults();
+            was = true;
+        }
+        for c in &mut self.curves {
+            if c.len() < 2 {
+                *c = curve_identity();
+            }
+        }
+        was
+    }
+
+    /// The curves as one table: entry i is the RGB curve of each channel's
+    /// curve at i / (n - 1), as RGBA8 (the shader reads between entries).
+    pub fn curve_table(&self, n: usize) -> Vec<u8> {
+        let mut t = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            let x = i as f32 / (n - 1) as f32;
+            for c in 1..4 {
+                let y = curve_at(&self.curves[0], curve_at(&self.curves[c], x));
+                t.push((y * 255.0).round() as u8);
+            }
+            t.push(255);
+        }
+        t
     }
 
     /// How far the filter reads around a pixel, in canvas units (0: the pixel
@@ -780,7 +873,7 @@ impl FxLayer {
             Filter::BrightContrast => self.v[0] == 0.0 && self.v[1] == 0.0,
             Filter::Hsl => self.v[..3] == [0.0; 3],
             Filter::Levels => self.v == [0.0, 1.0, 1.0, 0.0],
-            Filter::Curves => self.v[..3] == [0.25, 0.5, 0.75],
+            Filter::Curves => self.v[0] <= 0.0 || self.curves.iter().all(|c| c.len() < 2 || *c == curve_identity()),
             Filter::Desaturate => self.v[0] <= 0.0,
             Filter::Invert | Filter::Posterize | Filter::Threshold | Filter::GradientMap | Filter::Pixelate | Filter::Halftone => false,
             Filter::Grain | Filter::Vignette | Filter::Aberration => self.v[0] <= 0.0,
@@ -957,6 +1050,9 @@ pub struct Document {
     pub timeline: crate::anim::Timeline,
     /// Canvas cameras (regions over time).
     pub cameras: Vec<crate::anim::CanvasCam>,
+    /// The region being filmed (vignette and colour fringes centre on it);
+    /// not saved, set by whoever draws the document.
+    pub film: Option<Film>,
 }
 
 impl Document {
@@ -1124,6 +1220,42 @@ mod tests {
         t.text = "a".into();
         t.keep_corner(s0);
         assert!((right(&t) - r0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn curves_through_their_points() {
+        let pts = [[0.0, 0.1], [0.3, 0.5], [0.6, 0.4], [1.0, 0.9]];
+        for p in pts {
+            assert!((curve_at(&pts, p[0]) - p[1]).abs() < 1e-6, "{p:?}");
+        }
+        // between the 0.3 peak and the 0.6 dip: no overshoot
+        for k in 0..=30 {
+            let y = curve_at(&pts, 0.3 + k as f32 * 0.01);
+            assert!((0.4 - 1e-6..=0.5 + 1e-6).contains(&y), "{y}");
+        }
+        // level past the first and last point
+        let short = [[0.2, 0.3], [0.8, 0.6]];
+        assert_eq!(curve_at(&short, 0.0), 0.3);
+        assert_eq!(curve_at(&short, 1.0), 0.6);
+        // a straight table is the identity
+        let t = FxLayer::new(Filter::Curves).curve_table(256);
+        assert!((0..256).all(|i| t[i * 4] as usize == i && t[i * 4 + 2] as usize == i));
+    }
+
+    #[test]
+    fn old_curves_become_points() {
+        let mut f: FxLayer = serde_json::from_str(r#"{"filter":"Curves","v":[0.4,0.7,0.9,0.0]}"#).unwrap();
+        assert!(f.upgrade());
+        assert_eq!(f.curves[0], vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [0.75, 0.9], [1.0, 1.0]]);
+        assert_eq!(f.v[0], 1.0);
+        assert!(f.curves[1..].iter().all(|c| *c == curve_identity()));
+        // untouched dials: a straight curve; other filters only get straight curves
+        let mut g: FxLayer = serde_json::from_str(r#"{"filter":"Curves","v":[0.25,0.5,0.75,0.0]}"#).unwrap();
+        assert!(g.upgrade() && g.is_noop());
+        let mut b: FxLayer = serde_json::from_str(r#"{"filter":"Blur","v":[8.0,0.0,0.0,0.0]}"#).unwrap();
+        assert!(!b.upgrade() && b.v[0] == 8.0 && b.curves[0] == curve_identity());
+        // a file from now: nothing to do
+        assert!(!FxLayer::new(Filter::Curves).upgrade());
     }
 
     #[test]

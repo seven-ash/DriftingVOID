@@ -481,7 +481,7 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         }
         let t = job.t0 + i as f64 / job.fps;
         // video frames at full resolution
-        let d = pose_at(&job.doc, t, &mut feeds);
+        let mut d = pose_at(&job.doc, t, &mut feeds);
         let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
                 Some(c) => (c.rect, c.rot),
@@ -489,6 +489,11 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
             },
             Region::Fixed(r) => (r, 0.0),
         };
+        // vignette and colour fringes centre on what is filmed
+        d.film = Some(match job.region {
+            Region::Camera(id) => crate::doc::Film::Camera(id),
+            Region::Fixed(r) => crate::doc::Film::Fixed(r),
+        });
         let r = fit_aspect(region, w as f32 / h as f32);
         let scale = w as f32 / r.width();
         let size = vec2(w as f32 / scale, h as f32 / scale);

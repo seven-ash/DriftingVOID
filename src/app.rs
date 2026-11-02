@@ -1865,6 +1865,12 @@ impl App {
                 for (i, x) in n.iter().skip(1).take(2).enumerate() {
                     fx.v[i] = *x;
                 }
+                if f == crate::doc::Filter::Curves {
+                    // an S on RGB and red lifted (captures of the editor)
+                    fx.v[0] = 1.0;
+                    fx.curves[0] = vec![[0.0, 0.0], [0.25, 0.15], [0.75, 0.88], [1.0, 1.0]];
+                    fx.curves[1] = vec![[0.0, 0.08], [0.5, 0.62], [1.0, 1.0]];
+                }
                 fx.blend = n.get(3).filter(|b| **b >= 0.0).and_then(|b| Blend::ALL.get(*b as usize).copied());
             }
         }
@@ -8363,7 +8369,9 @@ impl App {
     }
 
     fn copy_region(&mut self, r: Rect, scale: f32, bg: Option<Color32>) {
-        let doc = self.export_doc();
+        let mut doc = self.export_doc();
+        // vignette and colour fringes centre on what is copied
+        doc.film = Some(crate::doc::Film::Fixed(r));
         match render_region(&mut self.cgpu, &doc, r, scale, bg) {
             Ok(pm) => {
                 let img = crate::export::to_rgba(&pm);
@@ -8492,7 +8500,11 @@ impl App {
                         _ => 0.0,
                     };
                     // on a worker thread: big supersampled renders take a while
-                    let doc = self.export_doc();
+                    let mut doc = self.export_doc();
+                    doc.film = Some(match d.region {
+                        ExportRegion::Camera(id) => crate::doc::Film::Camera(id),
+                        _ => crate::doc::Film::Fixed(r),
+                    });
                     let (scale, ss, q) = (d.scale, d.ss, d.jpeg_quality);
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
@@ -9004,12 +9016,18 @@ impl App {
                     if fx.filter == crate::doc::Filter::GradientMap {
                         gradient_bar(ui, fx.colors, id, &mut pal_req);
                     }
+                    if fx.filter == crate::doc::Filter::Curves {
+                        changed |= curve_editor(ui, fx, id);
+                    }
                     for (i, p) in fx.filter.params().iter().enumerate() {
                         let c = ch::FX[i];
                         let b = 10 + i;
                         changed |= ui
                             .add(crate::dial::Dial::new(&mut fx.v[i], p.lo..=p.hi).step(p.step).suffix(p.suffix).text(crate::i18n::tr(p.name)).default(p.default).key(km(c), &mut kh[b]).nav(kn(c), &mut kv[b]).mixed(mxc(c)))
                             .changed();
+                    }
+                    if fx.filter == crate::doc::Filter::Grain {
+                        changed |= crate::kit::switch(ui, &mut fx.moving, crate::i18n::tr("프레임마다 변화")).changed();
                     }
                 }
                 LayerKind::Audio(a) => {
@@ -10668,6 +10686,12 @@ impl App {
         let ppp = ctx.pixels_per_point();
         let view = crate::playcache::View { center: xf.s2w(rect.center()), size: rect.size() / self.zoom, scale: self.zoom * ppp };
         let target = self.cache_target(view);
+        // vignette and colour fringes centre on the camera the cache films
+        // (else the export frame or the content, as an export does)
+        self.doc.film = match target {
+            crate::playcache::Target::Camera(id) => Some(crate::doc::Film::Camera(id)),
+            _ => None,
+        };
         let editing = self.changed || self.drag.is_some();
         if self.doc.timeline.on && !editing {
             self.pcache.sync(self.doc_rev, &self.doc, target);
@@ -13189,6 +13213,124 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
             }
         }
     });
+    changed
+}
+
+/// A 커브 FX layer's curves as points on a graph (11-02): the channel picked
+/// above it (RGB, red, green, blue). A click adds a point, a drag moves one
+/// (between its neighbours), dragging one off the graph or double-clicking
+/// it removes it (two always stay).
+fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) -> bool {
+    use crate::doc::curve_identity;
+    let mut changed = false;
+    let ch_id = egui::Id::new(("fx_curve_ch", id));
+    let drag_id = egui::Id::new(("fx_curve_drag", id));
+    let mut ch: usize = ui.data(|d| d.get_temp(ch_id)).unwrap_or(0);
+    crate::kit::row(ui, crate::i18n::tr("채널"), |ui| {
+        // the channels fill the row up to the reset button (segmented takes
+        // all the room it is given)
+        let label = crate::i18n::tr("초기화");
+        let bw = ui.painter().layout_no_wrap(label.to_owned(), egui::TextStyle::Button.resolve(ui.style()), INK()).size().x + ui.spacing().button_padding.x * 2.0;
+        let seg_w = (ui.available_width() - bw - SPACE_XS).max(80.0);
+        ui.allocate_ui_with_layout(vec2(seg_w, theme::ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            crate::kit::segmented(ui, &mut ch, &[(0, "RGB"), (1, "R"), (2, "G"), (3, "B")]);
+        });
+        if ui.add_enabled(fx.curves[ch] != curve_identity(), egui::Button::new(crate::i18n::tr("초기화"))).clicked() {
+            fx.curves[ch] = curve_identity();
+            changed = true;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(ch_id, ch));
+    let tint = |c: usize| match c {
+        1 => Color32::from_rgb(235, 85, 80),
+        2 => Color32::from_rgb(90, 200, 110),
+        3 => Color32::from_rgb(90, 140, 245),
+        _ => INK(),
+    };
+    let w = ui.available_width();
+    let (g, resp) = ui.allocate_exact_size(vec2(w, (w * 0.75).round()), Sense::click_and_drag());
+    let g = g.shrink(4.0);
+    let to_s = |p: [f32; 2]| pos2(g.left() + p[0] * g.width(), g.bottom() - p[1] * g.height());
+    let to_c = |s: Pos2| [((s.x - g.left()) / g.width()).clamp(0.0, 1.0), ((g.bottom() - s.y) / g.height()).clamp(0.0, 1.0)];
+    let near = |pts: &[[f32; 2]], s: Pos2| pts.iter().enumerate().map(|(i, p)| (i, to_s(*p).distance(s))).filter(|(_, d)| *d <= 9.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i);
+    let pts = &mut fx.curves[ch];
+    let mut drag: Option<usize> = ui.data(|d| d.get_temp(drag_id)).flatten();
+    if resp.drag_started() {
+        let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(g.center());
+        drag = near(pts, at).or_else(|| {
+            // a new point where the press was
+            let p = to_c(at);
+            let i = pts.iter().position(|q| q[0] > p[0]).unwrap_or(pts.len());
+            let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
+            let hi = if i < pts.len() { pts[i][0] - 0.01 } else { 1.0 };
+            (lo <= hi).then(|| {
+                pts.insert(i, [p[0].clamp(lo, hi), p[1]]);
+                changed = true;
+                i
+            })
+        });
+    }
+    if let (true, Some(i), Some(s)) = (resp.dragged(), drag, resp.interact_pointer_pos()) {
+        if i < pts.len() {
+            if !g.expand(24.0).contains(s) && pts.len() > 2 {
+                // dragged off the graph: gone
+                pts.remove(i);
+                drag = None;
+            } else {
+                let p = to_c(s);
+                let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
+                let hi = if i + 1 < pts.len() { pts[i + 1][0] - 0.01 } else { 1.0 };
+                pts[i] = [p[0].clamp(lo, hi.max(lo)), p[1]];
+            }
+            changed = true;
+        }
+    }
+    if resp.drag_stopped() {
+        drag = None;
+    }
+    if resp.double_clicked() && pts.len() > 2 {
+        if let Some(i) = resp.interact_pointer_pos().and_then(|s| near(pts, s)) {
+            pts.remove(i);
+            changed = true;
+        }
+    } else if resp.clicked() {
+        // a click on the curve's graph away from the points: a point there
+        if let Some(s) = resp.interact_pointer_pos().filter(|s| near(pts, *s).is_none()) {
+            let p = to_c(s);
+            let i = pts.iter().position(|q| q[0] > p[0]).unwrap_or(pts.len());
+            let lo = if i > 0 { pts[i - 1][0] + 0.01 } else { 0.0 };
+            let hi = if i < pts.len() { pts[i][0] - 0.01 } else { 1.0 };
+            if lo <= hi {
+                pts.insert(i, [p[0].clamp(lo, hi), p[1]]);
+                changed = true;
+            }
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(drag_id, drag));
+    let hover = drag.or_else(|| resp.hover_pos().and_then(|s| near(pts, s)));
+    // the graph: quarters, the straight line, the other channels' curves
+    // faintly, then this channel's curve and its points
+    let p = ui.painter();
+    p.rect_filled(g.expand(4.0), 6.0, FILL_1());
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        p.line_segment([pos2(g.left() + t * g.width(), g.top()), pos2(g.left() + t * g.width(), g.bottom())], Stroke::new(1.0, FILL_2()));
+        p.line_segment([pos2(g.left(), g.top() + t * g.height()), pos2(g.right(), g.top() + t * g.height())], Stroke::new(1.0, FILL_2()));
+    }
+    p.line_segment([g.left_bottom(), g.right_top()], Stroke::new(1.0, FILL_3()));
+    let line = |c: &[[f32; 2]]| (0..=96).map(|k| k as f32 / 96.0).map(|x| to_s([x, crate::doc::curve_at(c, x)])).collect::<Vec<_>>();
+    for c in 0..4 {
+        if c != ch && fx.curves[c] != curve_identity() {
+            p.add(Shape::line(line(&fx.curves[c]), Stroke::new(1.0, tint(c).gamma_multiply(0.45))));
+        }
+    }
+    let pts = &fx.curves[ch];
+    p.add(Shape::line(line(pts), Stroke::new(1.5, tint(ch))));
+    for (i, q) in pts.iter().enumerate() {
+        let on = hover == Some(i);
+        p.circle(to_s(*q), if on { 5.0 } else { 4.0 }, FILL_1(), Stroke::new(1.5, if on { ACCENT } else { tint(ch) }));
+    }
+    resp.glass_tip(crate::i18n::tr("클릭: 점 추가 · 밖으로 끌기: 삭제"));
     changed
 }
 
