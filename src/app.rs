@@ -143,6 +143,13 @@ pub struct Settings {
     /// UI language ("ko", "en", "ja"); None: the system's on first start (Ash, 10-29).
     #[serde(default)]
     pub lang: Option<String>,
+    /// Ask GitHub for a newer release at start (`update.rs`; Ash, 11-02).
+    #[serde(default = "yes")]
+    pub update_check: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -184,6 +191,7 @@ impl Default for Settings {
             corner_radius: theme::RADIUS_DEFAULT,
             corner_smooth: theme::SMOOTH_DEFAULT,
             lang: None,
+            update_check: true,
         }
     }
 }
@@ -981,6 +989,9 @@ pub struct App {
     vexport_last: Option<VideoExportDlg>,
     vjob: Option<Arc<crate::vexport::Progress>>,
     pending: Option<Pending>,
+    /// Newer releases (`update.rs`); `update_go`: install once this quits.
+    upd: crate::update::Updater,
+    update_go: Option<PathBuf>,
     status: String,
     recent: Vec<Color32>,
     view_init: bool,
@@ -1371,6 +1382,8 @@ impl App {
             ui_hidden: false,
             fonts_applied: false,
             frames: 0,
+            upd: crate::update::Updater::new(),
+            update_go: None,
             rail_active: None,
             rail_hover: None,
             rail_hint: None,
@@ -5108,6 +5121,10 @@ impl App {
                 self.save_prefs();
                 self.modified = false;
                 self.pending = None;
+                // an update waiting: its installer runs once this has quit
+                if let Some(p) = self.update_go.take() {
+                    crate::update::Updater::launch(&p);
+                }
                 std::process::exit(0);
             }
         }
@@ -9993,6 +10010,15 @@ impl App {
                         ui.label(egui::RichText::new("Drifting VOID").font(FontId::new(14.0, theme::ui_bold())).color(INK()));
                         ui.add_space(SPACE_SM);
                         self.menus(ui);
+                        // a newer release: a quiet line, no pop-up (Ash, 11-02)
+                        if let (Some(t), tip) = self.update_text() {
+                            ui.add_space(SPACE_XS);
+                            let r = ui.add(egui::Label::new(egui::RichText::new(t).size(theme::TEXT_SMALL).color(ACCENT)).sense(Sense::click()));
+                            let r = if tip.is_empty() { r } else { r.glass_tip(&tip) };
+                            if r.clicked() {
+                                self.update_click(ui.ctx());
+                            }
+                        }
                     });
                 });
             });
@@ -10122,6 +10148,32 @@ impl App {
                     .changed()
                 {
                     self.save_prefs();
+                }
+                ui.separator();
+                // updates: the switch, then the row that acts (Ash, 11-02)
+                if crate::kit::switch(ui, &mut self.s.update_check, crate::i18n::tr("업데이트 확인")).glass_tip(crate::i18n::tr("시작할 때 GitHub에서 새 릴리즈 확인")).changed() {
+                    self.save_prefs();
+                    if self.s.update_check {
+                        self.upd.check(ui.ctx());
+                    }
+                }
+                use crate::update::State;
+                let cur = crate::update::current();
+                let (key, can) = match self.upd.state() {
+                    _ if cur.is_empty() => (crate::i18n::tr("개발 빌드").to_string(), false),
+                    State::Checking => (crate::i18n::tr("확인 중…").to_string(), false),
+                    State::Latest => (crate::i18n::trf("최신 {}", &[cur.clone()]), true),
+                    State::Available(r) => (format!("→ {}", r.version), true),
+                    State::Downloading(_, f) => (format!("{:.0}%", f * 100.0), false),
+                    State::Ready(r, _) => (crate::i18n::trf("{} 설치", &[r.version]), true),
+                    State::Failed(_) => (crate::i18n::tr("다시 시도").to_string(), true),
+                    State::Idle => (crate::i18n::tr("지금 확인").to_string(), true),
+                };
+                let tip = self.update_text().1;
+                let r = ui.add_enabled_ui(can, |ui| crate::kit::menu_row(ui, crate::i18n::tr("업데이트"), &key)).inner;
+                let r = if tip.is_empty() { r } else { r.glass_tip(&tip) };
+                if r.clicked() {
+                    self.update_click(ui.ctx());
                 }
             }).response.rect.height();
             ui.separator();
@@ -11997,8 +12049,45 @@ impl App {
                 self.modified = false;
                 self.run_pending(p);
             }
-            Some(2) => self.pending = None,
+            Some(2) => {
+                // cancelled: an update waits for the next click
+                self.pending = None;
+                self.update_go = None;
+            }
             _ => {}
+        }
+    }
+
+    /// The update notice, its click: download an available release, install
+    /// a downloaded one (quitting through the unsaved-changes question), try
+    /// again after a failure.
+    fn update_click(&mut self, ctx: &egui::Context) {
+        match self.upd.state() {
+            crate::update::State::Available(_) => self.upd.download(ctx),
+            crate::update::State::Ready(_, p) => {
+                self.update_go = Some(p);
+                if self.modified {
+                    self.pending = Some(Pending::Quit);
+                } else {
+                    self.run_pending(Pending::Quit);
+                }
+            }
+            crate::update::State::Failed(_) | crate::update::State::Latest | crate::update::State::Idle => self.upd.check(ctx),
+            _ => {}
+        }
+    }
+
+    /// The notice's words for this state (None: nothing to show beside the
+    /// menus) and its tip.
+    fn update_text(&self) -> (Option<String>, String) {
+        use crate::update::State;
+        let cur = crate::update::current();
+        match self.upd.state() {
+            State::Available(r) => (Some(crate::i18n::trf("업데이트 {} → {}", &[cur, r.version])), crate::i18n::tr("클릭: 내려받아 설치").into()),
+            State::Downloading(_, f) => (Some(crate::i18n::trf("업데이트 받는 중 {}%", &[format!("{:.0}", f * 100.0)])), String::new()),
+            State::Ready(r, _) => (Some(crate::i18n::trf("{} 설치", &[r.version])), crate::i18n::tr("클릭: 앱을 닫고 설치 · 끝나면 다시 열림").into()),
+            State::Failed(e) => (None, e),
+            _ => (None, String::new()),
         }
     }
 }
@@ -13126,6 +13215,15 @@ impl eframe::App for App {
             self.title = title;
         }
         self.frames += 1;
+        // a release build asks for a newer release once, after the first frames
+        if self.frames == 30 && self.s.update_check {
+            self.upd.check(&ctx);
+        }
+        // DV_UPDATE_AUTO=1: an available release downloads by itself (the
+        // download and checksum tested without input; with DV_UPDATE_NOLAUNCH)
+        if std::env::var_os("DV_UPDATE_AUTO").is_some() && matches!(self.upd.state(), crate::update::State::Available(_)) {
+            self.upd.download(&ctx);
+        }
         if self.frames % 90 == 0 {
             self.save_prefs();
         }

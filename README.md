@@ -62,6 +62,10 @@ and Japanese.
    SHA-256. FFmpeg is a separate program and is not part of this
    repository or the installer.
 
+Later releases are announced inside the app, right of the menus; a click
+downloads the new installer, checks it, and updates (switch it off in
+*Settings → Check for updates*). Nothing else is sent anywhere.
+
 The installer is not code-signed yet, so Windows SmartScreen may warn on
 first run: choose **More info → Run anyway**. Uninstall from
 *Settings → Apps*; your projects and settings

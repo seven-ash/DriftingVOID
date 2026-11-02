@@ -130,6 +130,8 @@ Root: HKA; Subkey: "Software\Classes\DriftingVOID.Project\shell\open\command"; V
 
 [Run]
 Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; an update from inside the app (/SILENT /relaunch=1): start it again
+Filename: "{app}\{#ExeName}"; Flags: nowait; Check: Relaunch
 
 [UninstallDelete]
 ; FFmpeg was fetched by this setup into the app's folder; the user's
@@ -140,6 +142,11 @@ Type: filesandordirs; Name: "{app}\ffmpeg"
 var
   DownloadPage: TDownloadWizardPage;
   FfZip, FfName, FfSum, FfError: String;
+
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
 
 function FfmpegFound: Boolean;
 var

@@ -34,6 +34,7 @@ mod scene;
 mod segment;
 mod selftest;
 mod text;
+mod update;
 mod vcache;
 mod vector;
 mod video;

@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.103.2"
+version = "0.104.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/seven-ash/DriftingVOID"
@@ -23,6 +23,7 @@ raw-window-handle = "0.6"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sha2 = "0.10"
 tiny-skia = "0.12.0"
 ttf-parser = "0.25"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_Globalization"] }
