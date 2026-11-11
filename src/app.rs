@@ -2331,6 +2331,44 @@ impl App {
     fn reset_doc(&mut self, doc: Document, path: Option<PathBuf>) {
         self.cancel_drag();
         self.editing = None;
+        // nothing that points into the document being left stays: layer ids
+        // start again from 1 in the next one and would name other layers
+        if self.tl_play.is_some() {
+            self.tl_toggle_play();
+        }
+        if let Some(o) = &self.audio_out {
+            o.stop();
+        }
+        self.playing.clear();
+        self.warm.clear();
+        self.scrub_want.clear();
+        self.scrub_gen.clear();
+        self.scrub_shown.clear();
+        self.tl_arm = None;
+        self.tl_drag = None;
+        self.tl_key = None;
+        self.tl_sel.clear();
+        self.grs2d = None;
+        self.modal3d = None;
+        self.nav3d = None;
+        self.light_drag = None;
+        self.layer_drag = None;
+        self.renaming = None;
+        self.palette = None;
+        self.wand = None;
+        self.scissor = None;
+        self.mask_rect = None;
+        self.mask_cut = false;
+        self.line_cands = None;
+        self.space_sel = None;
+        self.space_line = None;
+        self.space_place = None;
+        self.wall_sel = None;
+        self.cam_sel = None;
+        self.view3d = None;
+        self.ws3d = false;
+        self.extra_sel.clear();
+        self.sub = SubSel::default();
         self.doc = doc;
         self.committed = self.doc.clone();
         self.doc_rev += 1;
@@ -4465,10 +4503,11 @@ impl App {
                             if let Some([s0, e0]) = an.span {
                                 if matches!(d, TlDrag::AudioIn(_)) {
                                     // trim the head: the picture/sound stays where it is in time
-                                    let ns = match video_speed {
-                                        Some(_) => t.clamp(0.0, e0 - fl),
-                                        None => t.clamp(s0 - an.video_start, e0 - fl),
-                                    };
+                                    // a clip shorter than a frame (a sound not decoded
+                                    // yet is [t, t]) has no room: the start stays
+                                    let lo = if video_speed.is_some() { 0.0 } else { s0 - an.video_start };
+                                    let hi = e0 - fl;
+                                    let ns = if hi < lo { s0 } else { t.clamp(lo, hi) };
                                     an.video_start += (ns - s0) * video_speed.unwrap_or(1.0);
                                     an.span = Some([ns, e0]);
                                 } else {
@@ -5748,8 +5787,25 @@ impl App {
                     self.doc.layers[i] = orig;
                 }
             }
+            // a shape being drawn goes; one drawn for a mask (its rectangle, a
+            // GrabCut box) leaves the mask selected and nothing waiting to be
+            // written into it
+            Some(Drag::NewShape { id, .. }) => {
+                if let Some(i) = self.doc.index_of(id) {
+                    self.doc.layers.remove(i);
+                }
+                let mask = self.mask_rect.take().map(|m| m.0);
+                self.mask_cut = false;
+                if self.sel == Some(id) || mask.is_some() {
+                    self.sel = mask.filter(|m| self.doc.get(*m).is_some());
+                }
+                self.mark();
+            }
             _ => {}
         }
+        // whatever was cancelled, no "write into this mask on release" survives it
+        self.mask_rect = None;
+        self.mask_cut = false;
     }
 
     fn pointer_down(&mut self, sp: Pos2, pressure: f32, mods: Modifiers, space: bool) {

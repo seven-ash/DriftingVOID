@@ -67,7 +67,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            // by bytes: the two after a % may be half of a multi-byte character
+            // (a slice of the str there would panic)
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
@@ -544,6 +546,17 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A % followed by non-ASCII text stays as it is (before 0.104.2 the
+    /// slice between the bytes of a character panicked).
+    #[test]
+    fn percent_decoding_keeps_text_after_a_percent() {
+        assert_eq!(percent_decode("100%한글.png"), "100%한글.png");
+        assert_eq!(percent_decode("a%20b%ED%95%9C"), "a b한");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("50%é"), "50%é");
+    }
 
     #[test]
     fn data_urls_and_names() {
