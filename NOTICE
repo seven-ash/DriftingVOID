@@ -74,7 +74,7 @@ Some source files follow code published by others and keep its licence:
 
 - src/strokes.wgsl: the distance to a capsule with two radii follows
   Inigo Quilez's "Uneven Capsule - distance 2D"
-  (https://www.shadertoy.com/view/4lcBWn), Copyright (c) Inigo Quilez,
+  (https://www.shadertoy.com/view/4lcBWn), Copyright (c) 2018 Inigo Quilez,
   under the MIT licence; the notice is in that file and in
   THIRD-PARTY-NOTICES.html.
 

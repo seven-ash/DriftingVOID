@@ -56,7 +56,7 @@ fn vs_seg(i: SegIn, @builtin(vertex_index) vi: u32) -> SegOut {
 // contained-circle case added; his distance functions are under:
 //
 // The MIT License
-// Copyright © Inigo Quilez
+// Copyright © 2018 Inigo Quilez
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
 // to deal in the Software without restriction, including without limitation
