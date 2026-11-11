@@ -210,6 +210,37 @@ impl Updater {
         });
     }
 
+    /// Checks the downloaded installer once more (it has sat in the temp
+    /// folder since the download) and starts it; false, with the state set
+    /// to what went wrong, when it is gone, changed or would not start. The
+    /// caller quits only on true.
+    pub fn install(&self, path: &std::path::Path) -> bool {
+        let want = match self.state() {
+            State::Ready(r, p) if p == path => r.sha256,
+            _ => String::new(),
+        };
+        // a pretend release (DV_UPDATE_FAKE) has no checksum
+        if !want.is_empty() {
+            match sha256_file(path) {
+                Ok(h) if h == want => {}
+                Ok(_) => {
+                    let _ = std::fs::remove_file(path);
+                    self.set(State::Failed("the installer changed after the download".into()));
+                    return false;
+                }
+                Err(e) => {
+                    self.set(State::Failed(format!("the installer is gone ({e})")));
+                    return false;
+                }
+            }
+        }
+        if !Self::launch(path) {
+            self.set(State::Failed("the installer did not start".into()));
+            return false;
+        }
+        true
+    }
+
     /// Starts the checked installer, silent, to start the app again when
     /// done; the caller quits right after.
     pub fn launch(path: &std::path::Path) -> bool {

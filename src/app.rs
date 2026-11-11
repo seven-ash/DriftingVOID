@@ -1138,6 +1138,8 @@ pub struct App {
     audio_out: Option<crate::audio::Output>,
     audio_failed: bool,
     audio_cache: std::collections::HashMap<String, Option<Arc<crate::audio::AudioData>>>,
+    /// Sounds still being decoded (in `audio_cache` as None, like ones that failed).
+    audio_busy: std::collections::HashSet<String>,
     audio_tx: std::sync::mpsc::Sender<(String, Result<crate::audio::AudioData, String>)>,
     audio_rx: std::sync::mpsc::Receiver<(String, Result<crate::audio::AudioData, String>)>,
     voice_sig: u64,
@@ -1477,6 +1479,7 @@ impl App {
             audio_out: None,
             audio_failed: false,
             audio_cache: Default::default(),
+            audio_busy: Default::default(),
             audio_tx: audio_ch.0,
             audio_rx: audio_ch.1,
             voice_sig: 0,
@@ -4633,6 +4636,11 @@ impl App {
 
     /// The sound card, opened on first use (a failure is reported once).
     fn audio_output(&mut self) -> Option<&crate::audio::Output> {
+        // a device that went away (unplugged, the default changed): opened anew
+        if self.audio_out.as_ref().is_some_and(|o| o.broken()) {
+            self.audio_out = None;
+            self.audio_failed = false;
+        }
         if self.audio_out.is_none() && !self.audio_failed {
             match crate::audio::Output::open() {
                 Ok(o) => self.audio_out = Some(o),
@@ -4655,6 +4663,7 @@ impl App {
             return;
         }
         self.audio_cache.insert(path.to_string(), None);
+        self.audio_busy.insert(path.to_string());
         let rate = self.audio_rate();
         let tx = self.audio_tx.clone();
         let p = path.to_string();
@@ -4738,6 +4747,7 @@ impl App {
             }
         }
         while let Ok((path, res)) = self.audio_rx.try_recv() {
+            self.audio_busy.remove(&path);
             match res {
                 Ok(d) => {
                     let dur = d.duration();
@@ -5065,6 +5075,18 @@ impl App {
             self.status = crate::i18n::tr("빈 구간").into();
             return;
         }
+        // a sound still being decoded would be left out of the video
+        if d.audio && d.codec.audio() {
+            let waiting = self.doc.layers.iter().filter(|l| l.visible).any(|l| match &l.kind {
+                LayerKind::Audio(a) => !a.mute && self.audio_busy.contains(&a.path),
+                LayerKind::Image(im) => im.video.as_ref().is_some_and(|v| v.info.audio && !v.mute && self.audio_busy.contains(&v.path)),
+                _ => false,
+            });
+            if waiting {
+                self.status = crate::i18n::tr("소리 읽는 중 · 끝난 뒤 다시 내보내기").into();
+                return;
+            }
+        }
         let base = self.path.as_ref().and_then(|p| p.file_stem()).and_then(|s| s.to_str()).unwrap_or("video").to_string();
         let Some(mut out) = rfd::FileDialog::new()
             .add_filter(d.codec.label(), &[d.codec.ext()])
@@ -5197,12 +5219,16 @@ impl App {
             }
             Pending::Quit => {
                 self.save_prefs();
-                self.modified = false;
                 self.pending = None;
-                // an update waiting: its installer runs once this has quit
+                // an update waiting: its installer runs once this has quit. If
+                // it cannot start, the app stays (the notice says why).
                 if let Some(p) = self.update_go.take() {
-                    crate::update::Updater::launch(&p);
+                    if !self.upd.install(&p) {
+                        self.status = crate::i18n::tr("업데이트 설치 실패").into();
+                        return;
+                    }
                 }
+                self.modified = false;
                 std::process::exit(0);
             }
         }
@@ -12170,11 +12196,16 @@ impl App {
                 self.pending = None;
                 if self.save(false) {
                     self.run_pending(p);
+                } else {
+                    // not saved (the file dialog cancelled, an error): nothing
+                    // follows, and an update waits for the next click
+                    self.update_go = None;
                 }
             }
             Some(1) => {
+                // the changes count as unsaved until what was asked for has
+                // happened (a cancelled Open, an update that would not start)
                 self.pending = None;
-                self.modified = false;
                 self.run_pending(p);
             }
             Some(2) => {

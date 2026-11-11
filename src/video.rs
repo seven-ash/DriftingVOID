@@ -230,6 +230,17 @@ fn decode_args_fmt(path: &Path, t: f64, size: (u32, u32), nv12: bool, hwaccel: &
 
 /// One frame at `t` seconds, `size` pixels.
 pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImage, String> {
+    // a file that is not there has no last frame to step back to (before
+    // 0.104.5 this ran ffmpeg twice for every quarter second of `t`)
+    if !path.is_file() {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string());
+        return Err(crate::i18n::trf("영상 파일을 읽을 수 없음: {}", &[name]));
+    }
+    frame_at_tries(path, t, size, 2)
+}
+
+/// `frame_at`, stepping back at most `back` times when nothing comes at `t`.
+fn frame_at_tries(path: &Path, t: f64, size: (u32, u32), back: u8) -> Result<image::RgbaImage, String> {
     let tl = tools().ok_or_else(missing)?;
     let mut args = decode_args(path, t, size, None);
     // a single frame: insert "-frames:v 1" before the output options
@@ -244,11 +255,11 @@ pub fn frame_at(path: &Path, t: f64, size: (u32, u32)) -> Result<image::RgbaImag
         // at or past the last frame (a seek there finds nothing): the last frame
         // itself, from decoding the final second (stepping back a fixed time
         // would land several frames early)
-        if t > 0.05 && out.stdout.is_empty() {
+        if t > 0.05 && out.stdout.is_empty() && back > 0 {
             if let Some(img) = last_frame(path, size) {
                 return Ok(img);
             }
-            return frame_at(path, (t - 0.25).max(0.0), size);
+            return frame_at_tries(path, (t - 0.25).max(0.0), size, back - 1);
         }
         return Err(String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or(crate::i18n::tr("프레임 읽기 실패")).to_string());
     }
@@ -369,6 +380,15 @@ pub fn timecode(t: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame of a file that is not there fails at once, however late the
+    /// time (before 0.104.5: two ffmpeg runs for every quarter second of it).
+    #[test]
+    fn a_missing_file_fails_at_once() {
+        let t = std::time::Instant::now();
+        assert!(frame_at(Path::new("Z:/no/such/clip.mp4"), 600.0, (64, 48)).is_err());
+        assert!(t.elapsed().as_secs_f64() < 0.5, "{:?}", t.elapsed());
+    }
 
     #[test]
     fn probe_json_with_rotation() {

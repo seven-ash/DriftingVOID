@@ -285,12 +285,29 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert, mask_res: l.mask_res });
         }
-        let fd = FileDoc { version: 1, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
+        let fd = FileDoc { version: FILE_VERSION, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         zip.finish().map_err(|e| e.to_string())?;
     }
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// The project format's number, written into every file. It goes up
+/// whenever a file may hold something an earlier reader cannot read (a new
+/// layer kind, filter or enum value: anything serde would refuse), so that
+/// reader can say the file is newer instead of failing on a field name.
+/// Releases up to 1.0.1.R wrote 1 and did not check it.
+pub const FILE_VERSION: u32 = 1;
+
+/// The version a project's `doc.json` states (0 when it states none).
+fn stated_version(json: &[u8]) -> u32 {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        #[serde(default)]
+        version: u32,
+    }
+    serde_json::from_slice::<Head>(json).map_or(0, |h| h.version)
 }
 
 pub fn load_project(path: &Path) -> Result<Document, String> {
@@ -302,7 +319,12 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
         e.read_to_end(&mut v).map_err(|e| e.to_string())?;
         Ok(v)
     };
-    let fd: FileDoc = serde_json::from_slice(&read("doc.json")?).map_err(|e| e.to_string())?;
+    let json = read("doc.json")?;
+    // a file from a later version: said so, before its unknown parts fail
+    if stated_version(&json) > FILE_VERSION {
+        return Err(crate::i18n::tr("더 새 버전에서 만든 파일 · 앱 업데이트 필요").into());
+    }
+    let fd: FileDoc = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
     let mut images: HashMap<String, ImageSource> = HashMap::new();
     let mut doc = Document { layers: Vec::new(), export_frame: fd.export_frame.map(a2r), next_id: fd.next_id, spaces: fd.spaces, timeline: fd.timeline, cameras: fd.cameras, film: None };
     let old_audio = fd.audio;
@@ -513,5 +535,20 @@ mod video_tests {
         assert_eq!(an.keys.len(), 1);
         assert!(matches!(&l.kind, LayerKind::Audio(a) if a.volume == 0.5 && a.path == "bgm.wav"));
         assert_eq!(l.name, "bgm");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The version a file states is read whatever else it holds, so a newer
+    /// file can be told apart before its unknown parts fail to parse.
+    #[test]
+    fn the_stated_version_is_read_from_any_file() {
+        assert_eq!(stated_version(br#"{"version":3,"layers":[{"kind":{"SomethingNew":{}}}]}"#), 3);
+        assert_eq!(stated_version(br#"{"layers":[]}"#), 0);
+        assert_eq!(stated_version(b"not json"), 0);
+        assert!(stated_version(format!(r#"{{"version":{FILE_VERSION}}}"#).as_bytes()) <= FILE_VERSION);
     }
 }

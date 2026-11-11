@@ -767,7 +767,37 @@ const HUBER: f64 = 0.0087; // ≈ 0.5°
 /// Tukey cut-off: lines further off than this stop counting.
 const TUKEY: f64 = 0.035; // ≈ 2°
 
+/// The camera of a space, remembered: the canvas asks for it several times a
+/// frame (the scene, wall sync, bounds, hit tests, constraints, the panels),
+/// and the fit took about 0.6 ms each time. The last few spaces solved are
+/// kept with their answers; a space equal to one of them gets its answer back.
 pub fn solve(space: &Space) -> Result<Camera, String> {
+    use std::sync::{Mutex, OnceLock};
+    type Memo = Vec<(Space, Result<Camera, String>)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    const KEPT: usize = 24;
+    let memo = MEMO.get_or_init(Default::default);
+    if let Ok(mut m) = memo.lock() {
+        if let Some(i) = m.iter().position(|(s, _)| s.id == space.id && s == space) {
+            // the newest at the end
+            let hit = m.remove(i);
+            let out = hit.1.clone();
+            m.push(hit);
+            return out;
+        }
+    }
+    let out = solve_now(space);
+    if let Ok(mut m) = memo.lock() {
+        if m.len() >= KEPT {
+            drop(m.remove(0));
+        }
+        m.push((space.clone(), out.clone()));
+    }
+    out
+}
+
+/// `solve` without the memory.
+fn solve_now(space: &Space) -> Result<Camera, String> {
     let fr = space.frame;
     if fr.width() < 4.0 || fr.height() < 4.0 {
         return Err(crate::i18n::tr("공간 영역이 너무 작음").into());

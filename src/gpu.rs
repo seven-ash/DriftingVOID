@@ -116,7 +116,10 @@ enum Node {
     /// target (`map`: target pixel to below pixel), put over the background
     /// (`top`: the frame's own list, which has one) and written back by its
     /// blend, opacity and mask.
-    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, view: View, map: [f32; 3], top: bool, frame: Rect, turn: f32, tick: i64 },
+    /// `shared`: the filter reads only the pixel it writes (no reach), so
+    /// instead of drawing `below` again (it is empty) it takes the picture
+    /// the list it is in has drawn so far on its own (`run_list`).
+    Fx { fx: crate::doc::FxLayer, opacity: f32, mask: Option<MaskSpec>, below: Vec<Node>, shared: bool, view: View, map: [f32; 3], top: bool, frame: Rect, turn: f32, tick: i64 },
 }
 
 /// Where a mask lets a layer show: from the mask's tile atlas (as
@@ -861,9 +864,7 @@ impl Gpu {
             let [r, gg, b, a] = c.to_srgba_unmultiplied().map(|v| v as f32 / 255.0);
             [r * a, gg * a, b * a, a]
         });
-        for nd in &nodes {
-            self.run(&mut enc, nd, &target, 0, &ready, &view, bgp);
-        }
+        self.run_list(&mut enc, &nodes, &target, 0, &ready, &view, bgp);
         self.under = None;
         // 4. down to the output size (and turned), then read back
         let out = self.texture(fw, fh, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
@@ -996,9 +997,7 @@ impl Gpu {
             }
             None => self.clear_to(&mut enc, out, wgpu::Color::TRANSPARENT),
         }
-        for nd in &nodes {
-            self.run(&mut enc, nd, out, 0, &ready, &view, None);
-        }
+        self.run_list(&mut enc, &nodes, out, 0, &ready, &view, None);
         self.under = None;
         self.queue.submit([enc.finish()]);
         if TIMING.with(|c| c.get()) {
@@ -1143,11 +1142,19 @@ impl Gpu {
         } else {
             *v
         };
+        // A filter without reach works on the same pixels as the list it is
+        // in: it takes that list's picture so far (`run_list`). The others
+        // need a wider or coarser view of what is below, drawn again for
+        // them. (Before 0.104.5 every FX drew everything below again, each
+        // FX in there too: a layer under m of them was drawn 2^m times.)
+        let shared = reach <= 0.0;
         let mut nodes = Vec::new();
-        self.prepare_with_fx(below, &v2, v2.full.expand(2.0 / v2.s), jobs, &mut nodes, false);
+        if !shared {
+            self.prepare_with_fx(below, &v2, v2.full.expand(2.0 / v2.s), jobs, &mut nodes, false);
+        }
         let mask = mask.map(|(m, map)| self.mask_spec(m, map, [0, 0, v.tw as i32, v.th as i32], v, jobs));
         let map = [v2.s / v.s, (v.full.min.x - v2.full.min.x) * v2.s, (v.full.min.y - v2.full.min.y) * v2.s];
-        Node::Fx { fx, opacity, mask, below: nodes, view: v2, map, top, frame, turn, tick }
+        Node::Fx { fx, opacity, mask, below: nodes, shared, view: v2, map, top, frame, turn, tick }
     }
 
     /// Turns one draw item into nodes; rasterizing is queued in `jobs`.
@@ -2195,7 +2202,7 @@ impl Gpu {
                 let u = Uniform::new(rect.map(|x| x as f32), tw, th);
                 self.pass(enc, &self.cut, target, &u, &g, &o);
             }
-            Node::Fx { .. } => self.run_fx(enc, nd, target, depth, ready, tw, th),
+            Node::Fx { .. } => self.run_fx(enc, nd, &[(target, true)], None, depth, ready, tw, th),
             Node::Masked { inner, keep, off, rect, outside } => {
                 let g = self.pooled(tw, th, 2 + depth * 2);
                 self.clear_to(enc, &g, wgpu::Color::TRANSPARENT);
@@ -2210,21 +2217,66 @@ impl Gpu {
         }
     }
 
-    /// An FX node (see `Node::Fx`): its layers drawn on their own, filtered,
-    /// resampled to the target, over the background for 복사, then written
-    /// back against the target as it is (`back`).
+    /// A list of nodes drawn in order onto `target`. When it holds an FX node
+    /// that takes the list's own picture (`shared`), the nodes up to the last
+    /// such one are drawn a second time onto a texture without the
+    /// background (`alone`): that is what those FX nodes filter, and each
+    /// FX's result goes onto it as well, for the next one. So every node is
+    /// drawn at most twice, however many FX layers are stacked.
     #[allow(clippy::too_many_arguments)]
-    fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
+    fn run_list(&mut self, enc: &mut wgpu::CommandEncoder, nodes: &[Node], target: &wgpu::Texture, depth: usize, ready: &[Arc<wgpu::Texture>], v: &View, bgp: Option<[f32; 4]>) {
+        let Some(last) = nodes.iter().rposition(|n| matches!(n, Node::Fx { shared: true, .. })) else {
+            for nd in nodes {
+                self.run(enc, nd, target, depth, ready, v, bgp);
+            }
+            return;
+        };
+        let (tw, th) = (v.tw, v.th);
+        let alone = self.pooled(tw, th, 8000 + depth);
+        self.clear_to(enc, &alone, wgpu::Color::TRANSPARENT);
+        for (i, nd) in nodes.iter().enumerate() {
+            // (the picture so far is not needed after the last FX that takes it)
+            let more = i < last;
+            match nd {
+                Node::Fx { shared, .. } => {
+                    let outs: &[(&wgpu::Texture, bool)] = if more { &[(target, true), (&alone, false)] } else { &[(target, true)] };
+                    self.run_fx(enc, nd, outs, shared.then_some(&alone), depth, ready, tw, th);
+                }
+                _ => {
+                    self.run(enc, nd, target, depth, ready, v, bgp);
+                    if more {
+                        self.run(enc, nd, &alone, depth, ready, v, None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An FX node (see `Node::Fx`): the layers below it on their own (drawn
+    /// here, or `so_far` for a node that shares its list's picture), filtered,
+    /// resampled to the target, then written onto each of `outs` against what
+    /// that has (`back`). An out marked as the frame gets the background under
+    /// a 복사 layer of the top list; the other is the list's own picture.
+    #[allow(clippy::too_many_arguments)]
+    fn run_fx(&mut self, enc: &mut wgpu::CommandEncoder, nd: &Node, outs: &[(&wgpu::Texture, bool)], so_far: Option<&wgpu::Texture>, depth: usize, ready: &[Arc<wgpu::Texture>], tw: u32, th: u32) {
         use crate::doc::Filter;
-        let Node::Fx { fx, opacity, mask, below, view: v2, map, top, frame, turn, tick } = nd else { return };
+        let Node::Fx { fx, opacity, mask, below, view: v2, map, top, frame, turn, tick, .. } = nd else { return };
         let full = [0.0, 0.0, tw as f32, th as f32];
         let (bw, bh) = (v2.tw, v2.th);
         let bfull = [0.0, 0.0, bw as f32, bh as f32];
         // the layers below, alone (no background: that goes under at the end)
         let src = self.pooled(bw, bh, 7000 + depth);
-        self.clear_to(enc, &src, wgpu::Color::TRANSPARENT);
-        for n in below {
-            self.run(enc, n, &src, depth + 1, ready, v2, None);
+        match so_far {
+            // a copy: the result is written back onto that picture
+            Some(t) if (t.width(), t.height()) == (bw, bh) => enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &src, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width: bw, height: bh, depth_or_array_layers: 1 },
+            ),
+            _ => {
+                self.clear_to(enc, &src, wgpu::Color::TRANSPARENT);
+                self.run_list(enc, below, &src, depth + 1, ready, v2, None);
+            }
         }
         let mut f2 = self.pooled(bw, bh, 5000 + depth);
         // canvas units of a below pixel: its origin and scale; the frame's centre and half size
@@ -2306,7 +2358,9 @@ impl Gpu {
             f = t;
         }
         // 복사 replaces the layers below; the frame's background stays under them
-        if *top && fx.blend.is_none() {
+        // (on the frame only: the list's own picture has no background)
+        let plain = f.clone();
+        if *top && fx.blend.is_none() && outs.iter().any(|o| o.1) {
             if let Some(under) = self.under.clone() {
                 let t = self.pooled(tw, th, 5500 + depth);
                 enc.copy_texture_to_texture(
@@ -2319,7 +2373,6 @@ impl Gpu {
                 f = t;
             }
         }
-        let back = self.backdrop(enc, target, depth, tw, th);
         // where the mask lets it: a white sheet cut by the mask
         let cov = mask.as_ref().map(|m| {
             let c = self.pooled(tw, th, 5200 + depth);
@@ -2346,7 +2399,10 @@ impl Gpu {
         u.tsize[2] = *opacity;
         u.p0 = [10.0, 0.0, fx.blend.map_or(-1.0, mode_code), 0.0];
         u.p1 = [0.0, cov.is_some() as u8 as f32, 0.0, 0.0];
-        self.fx_pass(enc, target, &u, &f, &back, cov.as_ref().unwrap_or(&self.dummy));
+        for (target, is_frame) in outs {
+            let back = self.backdrop(enc, target, depth, tw, th);
+            self.fx_pass(enc, target, &u, if *is_frame { &f } else { &plain }, &back, cov.as_ref().unwrap_or(&self.dummy));
+        }
     }
 
     /// A Gaussian blur of `from` into `to` (sigma in their pixels), two passes

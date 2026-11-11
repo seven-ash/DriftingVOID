@@ -199,6 +199,9 @@ pub(crate) struct Feed {
     last: f64,
     cur: Option<(f64, FeedFrame)>,
     pending: Option<(f64, FeedFrame)>,
+    /// Asked for a frame; ever got one (`unread`).
+    asked: bool,
+    got: bool,
 }
 
 #[derive(Clone)]
@@ -218,7 +221,7 @@ pub(crate) fn feeds_for(doc: &Document, gpu: bool) -> std::collections::HashMap<
             if let Some(v) = &im.video {
                 // (transparent ones stay RGBA: NV12 has no alpha)
                 let use_nv12 = gpu && !v.info.alpha && v.info.width % 2 == 0 && v.info.height % 2 == 0;
-                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None });
+                feeds.insert(l.id, Feed { path: PathBuf::from(&v.path), fps: v.info.fps, size: (v.info.width, v.info.height), player: None, nv12: None, use_nv12, hwaccel, last: f64::MIN, cur: None, pending: None, asked: false, got: false });
             }
         }
     }
@@ -279,7 +282,21 @@ pub(crate) fn fill_videos(d: &mut Document, t: f64, feeds: &mut std::collections
 }
 
 impl Feed {
+    /// The video's path when it was asked for frames and never gave one (the
+    /// file is gone or cannot be decoded): an export stops on it instead of
+    /// filming the layer's low-resolution preview still.
+    pub(crate) fn unread(&self) -> Option<&Path> {
+        (self.asked && !self.got).then_some(self.path.as_path())
+    }
+
     fn frame(&mut self, vt: f64) -> Option<FeedFrame> {
+        self.asked = true;
+        let f = self.frame_inner(vt);
+        self.got |= f.is_some();
+        f
+    }
+
+    fn frame_inner(&mut self, vt: f64) -> Option<FeedFrame> {
         let ahead = self.cur.as_ref().is_some_and(|c| vt > c.0 + 2.0);
         let none = if self.use_nv12 { self.nv12.is_none() } else { self.player.is_none() };
         if none || vt < self.last - 1e-6 || ahead {
@@ -387,6 +404,38 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         cmd.arg(&job.out).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
         child = Some(no_window(&mut cmd).spawn().map_err(|e| e.to_string())?);
     }
+    // The encoder's messages are read as they come (its last lines are kept):
+    // left in the pipe they fill it, the encoder blocks writing the next one,
+    // stops reading frames, and the export hangs.
+    let enc_log: Arc<std::sync::Mutex<String>> = Default::default();
+    let mut enc_reader = child.as_mut().and_then(|c| c.stderr.take()).map(|e| {
+        let log = enc_log.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut r = std::io::BufReader::new(e);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match r.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Ok(mut g) = log.lock() {
+                            if g.len() > 16_000 {
+                                let cut = g.len() - 8_000;
+                                let cut = (cut..g.len()).find(|i| g.is_char_boundary(*i)).unwrap_or(0);
+                                g.drain(..cut);
+                            }
+                            g.push_str(&String::from_utf8_lossy(&line));
+                        }
+                    }
+                }
+            }
+        })
+    });
+    let enc_last = {
+        let log = enc_log.clone();
+        move || log.lock().map(|g| g.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string()).unwrap_or_default()
+    };
     let gpu_render = crate::gpu::with_gpu(|_| ()).is_some();
     // video layers: one sequential decoder each
     let mut feeds = feeds_for(&job.doc, gpu_render);
@@ -451,14 +500,21 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         drop(stdin);
         Ok(spent)
     });
-    let encoder_err = |child: &mut Option<std::process::Child>| {
-        let mut err = String::new();
-        if let Some(e) = child.as_mut().and_then(|c| c.stderr.take()) {
-            use std::io::Read;
-            let mut e = e;
-            let _ = e.read_to_string(&mut err);
+    let encoder_err = {
+        let enc_last = enc_last.clone();
+        move |child: &mut Option<std::process::Child>| {
+            // it has quit (its input broke): its last words arrive in a moment
+            if let Some(c) = child.as_mut() {
+                for _ in 0..40 {
+                    if !matches!(c.try_wait(), Ok(None)) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            crate::i18n::trf("인코더 중단: {}", &[enc_last()])
         }
-        crate::i18n::trf("인코더 중단: {}", &[format!("{}", err.lines().last().unwrap_or("").trim())])
     };
     // DV_TIMING=1: time spent per stage, printed at the end (prepare, render; the
     // writer thread's convert + write overlap the rendering)
@@ -487,6 +543,12 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         let t = job.t0 + i as f64 / job.fps;
         // video frames at full resolution
         let mut d = pose_at(&job.doc, t, &mut feeds);
+        if let Some(p) = feeds.values().find_map(|f| f.unread()) {
+            let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_string());
+            drop(tx);
+            let _ = writer.join();
+            return fail(&mut child, crate::i18n::trf("영상 파일을 읽을 수 없음: {}", &[name]));
+        }
         let (region, rot) = match job.region {
             Region::Camera(id) => match d.cameras.iter().find(|c| c.id == id) {
                 Some(c) => (c.rect, c.rot),
@@ -591,10 +653,13 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
     }
     if let Some(mut c) = child {
         drop(c.stdin.take());
-        let out = c.wait_with_output().map_err(|e| e.to_string())?;
+        let status = c.wait().map_err(|e| e.to_string())?;
+        if let Some(h) = enc_reader.take() {
+            let _ = h.join();
+        }
         cleanup();
-        if !out.status.success() {
-            return Err(crate::i18n::trf("인코딩 실패: {}", &[format!("{}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim())]));
+        if !status.success() {
+            return Err(crate::i18n::trf("인코딩 실패: {}", &[enc_last()]));
         }
     } else {
         cleanup();
@@ -625,6 +690,16 @@ mod tests {
         }
         let d = pose_keys(&doc, 0.0);
         assert!((d.spaces[0].frame.center().x - 400.0).abs() < 0.5, "space at {:?}", d.spaces[0].frame);
+    }
+
+    /// A video whose file is gone gives no frame, and the feed says so (the
+    /// export stops on it; before 0.104.5 it filmed the preview still).
+    #[test]
+    fn a_feed_without_its_file_is_unread() {
+        let mut f = Feed { path: PathBuf::from("Z:/no/such/clip.mp4"), fps: 30.0, size: (64, 48), player: None, nv12: None, use_nv12: false, hwaccel: "auto", last: f64::MIN, cur: None, pending: None, asked: false, got: false };
+        assert!(f.unread().is_none(), "not asked yet");
+        assert!(f.frame(1.0).is_none());
+        assert_eq!(f.unread(), Some(Path::new("Z:/no/such/clip.mp4")));
     }
 
     #[test]

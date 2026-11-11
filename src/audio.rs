@@ -130,7 +130,15 @@ struct Mix {
     voices: Vec<Voice>,
     playing: bool,
     pos: f64,
+    /// When the device last asked for samples (or play began): a device that
+    /// has gone stops asking, and its position stops with it.
+    fed: std::time::Instant,
+    /// The device reported an error (unplugged, the default changed).
+    broken: bool,
 }
+
+/// Without samples asked for this long while playing, the device counts as gone.
+const STALL: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// The default output device, playing a set of voices from a position.
 pub struct Output {
@@ -146,7 +154,7 @@ impl Output {
         let sup = dev.default_output_config().map_err(|e| e.to_string())?;
         let rate = sup.sample_rate();
         let ch = sup.channels() as usize;
-        let mix = Arc::new(Mutex::new(Mix { voices: Vec::new(), playing: false, pos: 0.0 }));
+        let mix = Arc::new(Mutex::new(Mix { voices: Vec::new(), playing: false, pos: 0.0, fed: std::time::Instant::now(), broken: false }));
         let config = sup.config();
         let stream = match sup.sample_format() {
             cpal::SampleFormat::F32 => build::<f32>(&dev, config, ch, rate, mix.clone()),
@@ -164,7 +172,14 @@ impl Output {
             m.voices = voices;
             m.pos = pos;
             m.playing = true;
+            m.fed = std::time::Instant::now();
         }
+    }
+
+    /// The device is gone (it reported an error, or stopped asking for
+    /// samples while playing): this output is to be dropped and opened again.
+    pub fn broken(&self) -> bool {
+        self.mix.lock().map_or(true, |m| m.broken || (m.playing && !m.voices.is_empty() && m.fed.elapsed() > STALL))
     }
 
     pub fn stop(&self) {
@@ -174,9 +189,10 @@ impl Output {
         }
     }
 
-    /// Timeline position while playing.
+    /// Timeline position while playing (None once the device is gone: the
+    /// caller's own clock carries on).
     pub fn pos(&self) -> Option<f64> {
-        self.mix.lock().ok().filter(|m| m.playing && !m.voices.is_empty()).map(|m| m.pos)
+        self.mix.lock().ok().filter(|m| m.playing && !m.voices.is_empty() && !m.broken && m.fed.elapsed() <= STALL).map(|m| m.pos)
     }
 }
 
@@ -185,6 +201,7 @@ where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
     let dt = 1.0 / rate as f64;
+    let on_err = mix.clone();
     dev.build_output_stream(
         config,
         move |out: &mut [T], _| {
@@ -192,6 +209,7 @@ where
                 out.iter_mut().for_each(|s| *s = T::from_sample(0.0));
                 return;
             };
+            m.fed = std::time::Instant::now();
             for frame in out.chunks_mut(ch.max(1)) {
                 let (l, r) = if m.playing {
                     let t = m.pos;
@@ -212,7 +230,12 @@ where
                 }
             }
         },
-        |e| eprintln!("audio: {e}"),
+        move |e| {
+            eprintln!("audio: {e}");
+            if let Ok(mut m) = on_err.lock() {
+                m.broken = true;
+            }
+        },
         None,
     )
     .map_err(|e| e.to_string())

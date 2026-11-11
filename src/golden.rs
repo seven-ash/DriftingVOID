@@ -1076,3 +1076,42 @@ fn fx_look_filters() {
     let fixed = red(&draw_at(&cd, region.center()).unwrap(), 65, 50);
     assert!((fixed - 100.0).abs() <= 3.0, "비네트 (fixed 30 wide): {fixed}");
 }
+
+/// Stacked FX layers that only read their own pixel take the picture drawn
+/// so far instead of drawing everything below again (0.104.5). Two inversions
+/// are the picture itself, with a layer between them and a background under
+/// them, on a clear and on a white frame; six pairs too. Skipped without a GPU.
+#[test]
+fn stacked_point_fx_take_the_picture_so_far() {
+    use crate::doc::{Filter, FxLayer};
+    if crate::gpu::with_gpu(|_| ()).is_none() {
+        return;
+    }
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 80.0));
+    let draw = |doc: &Document, bg: Option<Color32>| crate::gpu::with_gpu(|g| g.render_ss(doc, region.center(), region.size(), 0.0, 1.0, bg, 1)).unwrap().unwrap();
+    let base = || {
+        let mut d = Document::default();
+        d.export_frame = Some(region);
+        d.insert("a".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(10.0, 10.0), pos2(70.0, 60.0), Color32::from_rgb(200, 60, 40), Some(Color32::from_rgb(240, 200, 60)), 0.0)), None);
+        d.insert("b".into(), LayerKind::Shape(shape(ShapeKind::Ellipse, pos2(50.0, 20.0), pos2(110.0, 70.0), Color32::from_rgb(30, 90, 200), Some(Color32::from_rgb(40, 180, 120)), 0.0)), None);
+        d
+    };
+    let inv = |d: &mut Document| {
+        d.insert("fx".into(), LayerKind::Fx(FxLayer::new(Filter::Invert)), None);
+    };
+    for bg in [None, Some(Color32::WHITE)] {
+        let plain = draw(&base(), bg);
+        for pairs in [1, 6] {
+            let mut d = base();
+            for _ in 0..pairs * 2 {
+                inv(&mut d);
+            }
+            let (off, mean, worst) = diff(&plain, &draw(&d, bg));
+            assert!(worst <= 3, "{pairs} pairs, bg {bg:?}: {off} {mean} {worst}");
+        }
+        // one inversion is not the picture (the test would pass on a no-op)
+        let mut d = base();
+        inv(&mut d);
+        assert!(diff(&plain, &draw(&d, bg)).2 > 100);
+    }
+}

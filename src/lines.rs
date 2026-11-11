@@ -17,7 +17,9 @@
 //! the long side, so its thresholds don't depend on the picture size.
 
 use crate::persp::{V3, cross, dot, normalize};
-use egui::{Pos2, pos2};
+use egui::Pos2;
+#[cfg(test)]
+use egui::pos2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Seg {

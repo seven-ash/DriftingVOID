@@ -120,6 +120,8 @@ pub fn want(list: Vec<Want>) {
         return;
     }
     s.clips.retain(|p, c| list.iter().any(|w| &w.path == p && w.size == c.size && w.fps == c.fps));
+    // a clip no longer wanted may come back as another file under its path
+    s.dead.retain(|p, _| list.iter().any(|w| &w.path == p));
     s.bytes = s.clips.values().flat_map(|c| c.frames.values()).map(|f| f.bytes()).sum();
     s.wants = list;
     s.epoch += 1;
@@ -218,9 +220,12 @@ fn filler() {
         };
         let mut idx = first;
         let mut got = 0;
+        // stopped by us (the wants changed, memory is full), not by the file
+        let mut cut = false;
         while let Ok((_, data)) = player.rx.recv_timeout(std::time::Duration::from_secs(5)) {
             let mut s = state().lock().unwrap();
             if s.epoch != epoch || s.bytes >= cap() {
+                cut = true;
                 break;
             }
             let n = data.len();
@@ -243,7 +248,10 @@ fn filler() {
                 break;
             }
         }
-        if got == 0 {
+        // no frame from there on: the file ends there. Not when we stopped
+        // before taking one (memory short for a moment): that left the clip
+        // uncached from this frame on until the app closed.
+        if got == 0 && !cut {
             let mut s = state().lock().unwrap();
             if s.epoch == epoch {
                 let d = s.dead.entry(w.path.clone()).or_insert(u64::MAX);
