@@ -112,7 +112,7 @@ the glass panels, playback and every export.
 | `src/export.rs` | CPU reference renderer |
 | `src/raster.rs`, `src/vector.rs` | Brush layers and pen strokes |
 | `src/text.rs`, `src/fontdb.rs` | Text layout and installed fonts |
-| `src/persp.rs`, `src/lines.rs`, `src/view3d.rs` | 3D spaces and the 3D workspace |
+| `src/persp.rs`, `src/lines.rs`, `src/lsd.rs`, `src/view3d.rs` | 3D spaces and the 3D workspace (`lsd.rs`: the line segment detector, under the GNU AGPL) |
 | `src/extrude.rs` | Thickness: side meshes from a layer's outline |
 | `src/edges.rs` | Edge loupe for placing lines on a photo |
 | `src/segment.rs` | GrabCut and intelligent scissors |

@@ -15,9 +15,41 @@
 <body>
 <h1>Drifting VOID: third-party notices</h1>
 <p>Drifting VOID is free software under the GNU GPL version 3 or later, with
-additional terms (see LICENSE and NOTICE; original repository
+additional terms and one file under the GNU AGPL (see LICENSE, LICENSE-AGPL
+and NOTICE; original repository
 <a href="https://github.com/seven-ash/DriftingVOID">github.com/seven-ash/DriftingVOID</a>).
 It is built with the components below, each under its own licence.</p>
+
+<h2>Code this program's own source follows</h2>
+<p><b>LSD, the line segment detector</b> (<code>src/lsd.rs</code>) is a port of
+parts of LSD 1.6, the reference implementation of
+<a href="https://doi.org/10.5201/ipol.2012.gjmr-lsd">"LSD: a Line Segment Detector"</a>
+(Image Processing On Line, 2012), copyright 2007-2011 rafael grompone von gioi.
+That file is under the GNU Affero General Public License, version 3 or later
+(the file <code>LICENSE-AGPL</code>), combined with the rest of the program as
+section 13 of the GNU GPL allows.</p>
+<p><b>Oklab and Okhsv colour conversions</b> (<code>src/okhsv.rs</code>) follow
+<a href="https://bottosson.github.io/posts/colorpicker/">Björn Ottosson's reference code</a>,
+under the MIT licence:</p>
+<pre>Copyright (c) 2021 Björn Ottosson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the &quot;Software&quot;), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</pre>
 
 <h2>Fonts</h2>
 <p><b>Pretendard JP</b> (Regular, SemiBold), copyright 2021 Kil Hyung-jin

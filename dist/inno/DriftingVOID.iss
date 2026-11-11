@@ -112,6 +112,7 @@ Source: "{#Src}\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\fonts\*"; DestDir: "{app}\fonts"; Flags: ignoreversion
 Source: "{#Src}\manual\*"; DestDir: "{app}\manual"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Src}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Src}\LICENSE-AGPL.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\THIRD-PARTY-NOTICES.html"; DestDir: "{app}"; Flags: ignoreversion
 Source: "ffmpeg.ps1"; Flags: dontcopy

@@ -53,3 +53,21 @@ The program includes third-party code and fonts under their own licences
 (all compatible with the GNU GPL version 3); their notices are in
 THIRD-PARTY-NOTICES.html. FFmpeg is not part of this program: the setup
 downloads it separately as its own program under its own licence.
+
+Two source files follow code published by others and keep its licence:
+
+- src/lsd.rs (the line segment detector behind line suggestions) is a
+  port of parts of LSD 1.6, the reference implementation of "LSD: a Line
+  Segment Detector" (Image Processing On Line, 2012), Copyright (c)
+  2007-2011 rafael grompone von gioi <grompone@gmail.com>. That file,
+  with the changes made here, is under the GNU Affero General Public
+  License, version 3 or (at your option) any later version; its text is
+  in the file LICENSE-AGPL. Section 13 of both licences allows that file
+  to be combined with the rest of the program, which stays under the GNU
+  GPL as above, and the Affero licence's terms keep applying to that
+  file. The additional terms above apply to the changes made to it here.
+
+- src/okhsv.rs (colour conversions for the palette) follows Björn
+  Ottosson's reference code for Oklab and Okhsv, Copyright (c) 2021
+  Björn Ottosson, under the MIT licence; the notice is in that file and
+  in THIRD-PARTY-NOTICES.html.

@@ -136,6 +136,12 @@ terms under its section 7 ([`NOTICE`](NOTICE)):
 - give a modified version a name and icon of its own (the licence grants no
   rights to the name "Drifting VOID" or its icons).
 
+One source file, `src/lsd.rs` (the line segment detector), is a port of the
+LSD reference code and stays under the
+[GNU Affero General Public License, version 3 or later](LICENSE-AGPL);
+`src/okhsv.rs` follows MIT-licensed reference code. Both are described in
+[`NOTICE`](NOTICE).
+
 Third-party components and their licences:
 [`THIRD-PARTY-NOTICES.html`](THIRD-PARTY-NOTICES.html) (regenerate with
 `cargo about generate -c dist/legal/about.toml dist/legal/about.hbs -o THIRD-PARTY-NOTICES.html`).

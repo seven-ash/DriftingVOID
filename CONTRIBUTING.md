@@ -11,6 +11,10 @@ attribution, marking of modified versions and the program's name (see
 under the same licence and the same additional terms. You keep the
 copyright to your contribution.
 
+One file is different: `src/lsd.rs` is a port of AGPL-licensed reference
+code, so a contribution to that file is licensed under the GNU Affero
+General Public License, version 3 or later (`LICENSE-AGPL`).
+
 ## Sign-off (Developer Certificate of Origin)
 
 Every commit in a pull request must be signed off: a line at the end of
