@@ -79,7 +79,8 @@ pub fn build_view(doc: &Document, view: Option<&ViewCam>) -> Scene {
         None => crate::persp::cameras(&doc.spaces),
     };
     let mut items = Vec::new();
-    let (frame, turn) = film_frame(doc);
+    // only FX layers use it (without an export frame it measures every layer)
+    let (frame, turn) = if doc.has_fx() { film_frame(doc) } else { (Rect::ZERO, 0.0) };
     let tick = (doc.timeline.time * doc.timeline.fps + 1e-6).floor() as i64;
     for layer in doc.draw_order(&cams).into_iter().filter(|l| l.visible && l.opacity > 0.0) {
         if layer.mask_of.is_some() {

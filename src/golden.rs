@@ -413,6 +413,7 @@ fn photo_mask_follows_its_photo_pixel_for_pixel() {
 
 /// A pen layer of `n` random strokes of 150 points over 1600×1000 (`seed`),
 /// some translucent.
+#[allow(clippy::approx_constant)] // (the number is part of the test scene)
 fn pen_doc(n: usize, seed: u32) -> Document {
     let mut strokes = Vec::new();
     let mut seed = seed.wrapping_mul(2654435761).wrapping_add(7);

@@ -380,7 +380,9 @@ impl Timeline {
 
     /// Nearest frame time.
     pub fn snap(&self, t: f64) -> f64 {
-        ((t * self.fps).round() / self.fps).clamp(0.0, self.duration)
+        // (a file may state fps 0: as `frame_len`)
+        let fps = self.fps.max(1.0);
+        ((t * fps).round() / fps).clamp(0.0, self.duration.max(0.0))
     }
 }
 
@@ -722,6 +724,14 @@ pub fn clip_time(anim: Option<&Anim>, v: &crate::doc::VideoRef, t: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::doc::{ShapeKind, ShapeLayer};
+
+    /// A file that states fps 0 still snaps to a time (before 0.105.1: NaN).
+    #[test]
+    fn snapping_survives_a_zero_frame_rate() {
+        let tl = Timeline { fps: 0.0, ..Default::default() };
+        assert_eq!(tl.snap(2.4), 2.0);
+        assert_eq!(Timeline::default().snap(1.02), 1.0 + 1.0 / 30.0);
+    }
     use egui::Color32;
 
     #[test]

@@ -86,7 +86,13 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 }
 
 fn curl() -> Command {
-    let mut c = Command::new("curl.exe");
+    // Windows' own, by its full path: a bare name is looked for in the app's
+    // folder first, which the user can write to
+    let sys = std::env::var_os("SystemRoot").map(|r| std::path::Path::new(&r).join("System32").join("curl.exe")).filter(|p| p.is_file());
+    let mut c = match sys {
+        Some(p) => Command::new(p),
+        None => Command::new("curl.exe"),
+    };
     no_window(&mut c);
     c.args(["-sSfL", "--max-time", "600", "-H", &format!("User-Agent: DriftingVOID/{}", current())]);
     c
@@ -143,7 +149,8 @@ impl Updater {
             return;
         }
         let cur = current();
-        if cur.is_empty() || matches!(self.state(), State::Checking | State::Downloading(..)) {
+        // (a downloaded installer stays ready: asking again would drop it)
+        if cur.is_empty() || matches!(self.state(), State::Checking | State::Downloading(..) | State::Ready(..)) {
             return;
         }
         self.set(State::Checking);
@@ -153,7 +160,11 @@ impl Updater {
             let s = match out {
                 Ok(o) if o.status.success() => match parse_latest(&String::from_utf8_lossy(&o.stdout)) {
                     Ok(r) if newer(&r.version, &cur) => State::Available(r),
-                    Ok(_) => State::Latest,
+                    Ok(_) => {
+                        // up to date: an installer downloaded for this version has done its work
+                        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("DriftingVOID-update"));
+                        State::Latest
+                    }
                     Err(e) => State::Failed(e),
                 },
                 Ok(o) => State::Failed(format!("GitHub: curl {}", o.status.code().unwrap_or(-1))),

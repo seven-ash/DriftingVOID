@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.105.0"
+version = "0.105.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/seven-ash/DriftingVOID"

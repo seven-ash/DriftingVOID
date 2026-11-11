@@ -178,6 +178,8 @@ pub struct Gpu {
     /// The frame's background (canvas ground, export colour) on its own while
     /// a frame with FX layers is drawn: 복사 puts the filtered layers over it.
     under: Option<wgpu::Texture>,
+    /// Curve tables already uploaded, by the hash of their bytes (`curve_texture`).
+    curve_cache: HashMap<u64, wgpu::Texture>,
     prep: wgpu::RenderPipeline,
     mip: wgpu::RenderPipeline,
     dummy: wgpu::Texture,
@@ -654,6 +656,7 @@ impl Gpu {
             fx_layout,
             fx,
             under: None,
+            curve_cache: HashMap::new(),
             prep,
             mip,
             dummy,
@@ -2448,11 +2451,27 @@ impl Gpu {
     }
 
     /// An FX layer's curves as a 256×1 table (`FxLayer::curve_table`).
-    fn curve_texture(&self, fx: &crate::doc::FxLayer) -> wgpu::Texture {
+    fn curve_texture(&mut self, fx: &crate::doc::FxLayer) -> wgpu::Texture {
+        // the same curves give the same table: its texture is kept (it was
+        // made anew for every FX layer on every frame)
+        let table = fx.curve_table(256);
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            table.hash(&mut h);
+            h.finish()
+        };
+        if let Some(t) = self.curve_cache.get(&key) {
+            return t.clone();
+        }
+        if self.curve_cache.len() >= 64 {
+            self.curve_cache.clear();
+        }
         let t = self.texture(256, 1, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        self.curve_cache.insert(key, t.clone());
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &fx.curve_table(256),
+            &table,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: Some(1) },
             wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
         );

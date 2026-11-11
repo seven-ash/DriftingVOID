@@ -1507,7 +1507,14 @@ impl App {
         crate::penhook::install(cc);
         crate::oledrop::install(cc, &cc.egui_ctx);
         if let Some(text) = prefs_path().and_then(|p| std::fs::read_to_string(p).ok()) {
-            if let Ok(pr) = serde_json::from_str::<PrefsIn>(&text) {
+            // each part on its own: one that cannot be read (another version's
+            // export dialog, a damaged value) does not take the settings with it
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                let pr = PrefsIn {
+                    settings: v.get("settings").cloned().and_then(|x| serde_json::from_value(x).ok()),
+                    recent: v.get("recent").cloned().and_then(|x| serde_json::from_value(x).ok()).unwrap_or_default(),
+                    export: v.get("export").cloned().and_then(|x| serde_json::from_value(x).ok()),
+                };
                 if let Some(st) = pr.settings {
                     app.s = st;
                 }
@@ -2847,7 +2854,7 @@ impl App {
                         o.stop();
                     }
                 }
-                if v.looping {
+                if v.looping && std::path::Path::new(&v.path).is_file() {
                     if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
                         if let Some(vv) = im.video.as_mut() {
                             vv.time = 0.0;
@@ -5385,11 +5392,38 @@ impl App {
         let mut new_ids = Vec::new();
         for id in ids {
             let Some(idx) = self.doc.index_of(id) else { continue };
+            // a mask is copied with its layer, not by itself (two masks on one
+            // layer: only the first would count)
+            if self.doc.layers[idx].mask_of.is_some() {
+                continue;
+            }
+            let d = vec2(30.0, 30.0) / self.zoom.max(0.1);
             let mut copy = self.doc.layers[idx].clone();
             copy.id = self.doc.new_id();
-            copy.translate(vec2(30.0, 30.0) / self.zoom.max(0.1));
+            copy.translate(d);
+            // its position keys move with it (else it plays back where the original is)
+            if let Some(an) = copy.anim.as_mut() {
+                for k in an.keys.iter_mut().filter(|k| k.ch & crate::anim::ch::POS != 0) {
+                    k.center[0] += d.x;
+                    k.center[1] += d.y;
+                }
+            }
+            let mut masks: Vec<Layer> = self.doc.layers.iter().filter(|m| m.mask_of == Some(id)).cloned().collect();
+            for m in &mut masks {
+                m.id = self.doc.new_id();
+                m.mask_of = Some(copy.id);
+                m.translate(d);
+                if let Some((a, last)) = m.mask_anchor {
+                    m.mask_anchor = Some(if a == id { (copy.id, [last[0] + d.x, last[1] + d.y]) } else { (a, last) });
+                }
+            }
             new_ids.push(copy.id);
-            self.doc.layers.insert(idx + 1, copy);
+            // masks sit just under their layer
+            let n = masks.len();
+            for (k, m) in masks.into_iter().enumerate() {
+                self.doc.layers.insert(idx + 1 + k, m);
+            }
+            self.doc.layers.insert(idx + 1 + n, copy);
         }
         if let Some((first, rest)) = new_ids.split_first() {
             self.sel = Some(*first);
@@ -5606,8 +5640,12 @@ impl App {
                 if let Some(dir) = p.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
-                if std::fs::write(p, &text).is_ok() {
+                // beside it, then renamed: a write cut short never leaves half a file
+                let tmp = p.with_extension("json.tmp");
+                if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, &p).is_ok() {
                     self.prefs_saved = text;
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
                 }
             }
         }
@@ -5866,6 +5904,47 @@ impl App {
                     self.doc.layers[i] = orig;
                 }
             }
+            Some(Drag::ScaleImage { id, orig, .. } | Drag::Rotate { id, orig } | Drag::Crop { id, orig, .. }) => {
+                if let Some(LayerKind::Image(im)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                    *im = orig;
+                }
+            }
+            Some(Drag::MoveMany { origs, .. } | Drag::Group { origs, .. }) => {
+                for (o, _) in origs {
+                    if let Some(i) = self.doc.index_of(o.id) {
+                        self.doc.layers[i] = o;
+                    }
+                }
+            }
+            Some(Drag::Cam { id, orig, .. }) => {
+                if let Some(c) = self.doc.cameras.iter_mut().find(|c| c.id == id) {
+                    c.rect = orig;
+                }
+            }
+            // (a zero-size original: it was being drawn new)
+            Some(Drag::Frame { orig, .. }) => self.doc.export_frame = (orig.width() > 0.0 || orig.height() > 0.0).then_some(orig),
+            Some(Drag::SpaceFrame { id, orig, .. }) => {
+                if orig.width() > 0.0 || orig.height() > 0.0 {
+                    if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                        s.frame = orig;
+                    }
+                } else {
+                    self.doc.spaces.retain(|s| s.id != id);
+                    self.space_sel = self.doc.spaces.last().map(|s| s.id);
+                }
+            }
+            Some(Drag::SpaceLine { id, idx, orig, .. }) => {
+                if let Some(s) = self.doc.spaces.iter_mut().find(|s| s.id == id) {
+                    if orig.a == orig.b {
+                        if idx < s.lines.len() {
+                            s.lines.remove(idx);
+                        }
+                        self.space_line = None;
+                    } else if let Some(l) = s.lines.get_mut(idx) {
+                        *l = orig;
+                    }
+                }
+            }
             // a shape being drawn goes; one drawn for a mask (its rectangle, a
             // GrabCut box) leaves the mask selected and nothing waiting to be
             // written into it
@@ -5924,7 +6003,8 @@ impl App {
             self.drag = Some(Drag::Pan);
             return;
         }
-        if mods.alt {
+        let mask_rect_tool = self.tool == Tool::Rect && self.sel_layer().is_some_and(|l| l.mask_of.is_some());
+        if mods.alt && !mask_rect_tool {
             self.open_palette(sp);
             return;
         }
@@ -6176,7 +6256,7 @@ impl App {
                         return;
                     }
                 }
-                if let Some(LayerKind::Image(im)) = self.sel_layer().map(|l| &l.kind) {
+                if let Some(LayerKind::Image(im)) = self.sel_layer().filter(|l| !l.locked && l.place.is_none()).map(|l| &l.kind) {
                     let full = Rect::from_min_size(Pos2::ZERO, im.src.size());
                     if im.crop.contains(im.world_to_src(w)) || full.contains(im.world_to_src(w)) {
                         let start_src = im.world_to_src(w);
@@ -6618,6 +6698,7 @@ impl App {
             } else {
                 let target = self
                     .sel_layer()
+                    .filter(|l| !l.locked)
                     .and_then(|l| l.place.clone().filter(|p| Some(p.space) == sid).map(|p| (l.id, p)));
                 for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
                     if k(Modifiers::ALT, key) {
@@ -7347,7 +7428,12 @@ impl App {
             Drag::TextWrap { id } => {
                 let id = *id;
                 if let Some(LayerKind::Text(t)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
-                    t.wrap = (w.x - t.pos.x).max(t.size * 1.5);
+                    // along the box's own direction; its corner stays where it is
+                    let s0 = t.frame();
+                    let r = crate::text::layout(t).rect(t.pos);
+                    let wl = crate::doc::rot_about(w, r.center(), -t.rotation);
+                    t.wrap = (wl.x - r.left()).max(t.size * 1.5);
+                    t.keep_corner(s0);
                 }
                 self.changed = true;
                 self.modified = true;
@@ -8210,6 +8296,12 @@ impl App {
             }
             return;
         }
+        // G/R/S in progress: it has the keys (no paste, no workspace switch)
+        if self.modal3d.is_some() || self.grs2d.is_some() {
+            self.tab_raw.clear();
+            self.tab_t0 = None;
+            return;
+        }
         if paste {
             self.paste();
         }
@@ -8339,7 +8431,7 @@ impl App {
         // G/R/S on a layer in a space, right on the canvas (before R picks the
         // rectangle tool)
         if self.tool == Tool::Select && self.drag.is_none() && self.grs2d.is_none() {
-            let placed = self.sel_layer().filter(|_| self.extra_sel.is_empty()).and_then(|l| l.place.clone().map(|p| (l.id, p)));
+            let placed = self.sel_layer().filter(|l| self.extra_sel.is_empty() && !l.locked).and_then(|l| l.place.clone().map(|p| (l.id, p)));
             if placed.is_none() {
                 use crate::view3d::Op;
                 for (key, op) in [(Key::G, Op::Grab), (Key::R, Op::Rotate), (Key::S, Op::Scale)] {
@@ -8554,10 +8646,17 @@ impl App {
     }
 
     fn copy_region(&mut self, r: Rect, scale: f32, bg: Option<Color32>) {
+        self.copy_shot(r, 0.0, scale, bg, 1, crate::doc::Film::Fixed(r));
+    }
+
+    /// A region to the clipboard, as an export of it to a file would look
+    /// (`rot`: a camera's turn; `ss`: supersampling; `film`: what vignette
+    /// and colour fringes centre on).
+    fn copy_shot(&mut self, r: Rect, rot: f32, scale: f32, bg: Option<Color32>, ss: u8, film: crate::doc::Film) {
         let mut doc = self.export_doc();
-        // vignette and colour fringes centre on what is copied
-        doc.film = Some(crate::doc::Film::Fixed(r));
-        match render_region_for(&mut self.cgpu, &doc, r, scale, bg, true) {
+        doc.film = Some(film);
+        let shot = if rot == 0.0 && ss <= 1 { render_region_for(&mut self.cgpu, &doc, r, scale, bg, true) } else { crate::gpu::render_ss(&doc, r.center(), r.size(), rot, scale, bg, ss, false) };
+        match shot {
             Ok(pm) => {
                 let img = crate::export::to_rgba(&pm);
                 let res = arboard::Clipboard::new().and_then(|mut cb| {
@@ -8703,7 +8802,11 @@ impl App {
                     self.status = crate::i18n::tr("이미지 내보내는 중…").into();
                 }
             } else {
-                self.copy_region(r, d.scale, bg);
+                let (rot, film) = match d.region {
+                    ExportRegion::Camera(id) => (self.doc.cameras.iter().find(|c| c.id == id).map_or(0.0, |c| c.rot), crate::doc::Film::Camera(id)),
+                    _ => (0.0, crate::doc::Film::Fixed(r)),
+                };
+                self.copy_shot(r, rot, d.scale, bg, d.ss, film);
             }
         }
         self.last_export = Some(d.clone());
@@ -10820,7 +10923,9 @@ impl App {
             p.h = h;
             p.s = s;
             p.v = v;
-            new_color = Some(crate::okhsv::to_rgb(h, s, v));
+            // (the palette picks the colour; the alpha typed in the hex box stays)
+            let [r, g, b, _] = crate::okhsv::to_rgb(h, s, v).to_array();
+            new_color = Some(Color32::from_rgba_unmultiplied(r, g, b, p.orig.to_srgba_unmultiplied()[3]));
         }
         if restore {
             let (h, s, v) = crate::okhsv::from_rgb(p.orig, p.h);
@@ -10905,7 +11010,7 @@ impl App {
 
         self.tex.begin_frame();
         // Crop mode: ghost of the full photo underneath.
-        if self.tool == Tool::Crop {
+        if self.tool == Tool::Crop && self.cgpu.is_none() {
             if let Some(LayerKind::Image(im)) = self.sel_layer().map(|l| &l.kind).cloned() {
                 let im = &im;
                 let full = Rect::from_min_size(Pos2::ZERO, im.src.size());
@@ -13382,9 +13487,17 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_prefs();
         }
+        // a video being exported would be cut off: it is cancelled first
+        if ctx.input(|i| i.viewport().close_requested()) && self.vjob.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.status = crate::i18n::tr("영상 내보내는 중 · 취소 후 닫기").into();
+            if self.vexport.is_none() {
+                self.open_video_export();
+            }
+        }
         // every close request while there are unsaved changes is held back and
         // asks (a second one too: the question is still up, or one for New / Open)
-        if ctx.input(|i| i.viewport().close_requested()) && self.modified {
+        if ctx.input(|i| i.viewport().close_requested()) && self.modified && self.vjob.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending = Some(Pending::Quit);
         }

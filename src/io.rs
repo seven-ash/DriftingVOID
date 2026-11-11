@@ -186,8 +186,18 @@ fn a2r(a: [f32; 4]) -> Rect {
 
 pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
     let tmp = path.with_extension("void.tmp");
+    // written whole and flushed to the disk before it takes the file's name;
+    // a save that fails leaves no temp file behind
+    let r = write_project(doc, &tmp).and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+fn write_project(doc: &Document, tmp: &Path) -> Result<(), String> {
     {
-        let f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        let f = std::fs::File::create(tmp).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(f));
         let deflate = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -288,9 +298,11 @@ pub fn save_project(doc: &Document, path: &Path) -> Result<(), String> {
         let fd = FileDoc { version: FILE_VERSION, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        zip.finish().map_err(|e| e.to_string())?;
+        let w = zip.finish().map_err(|e| e.to_string())?;
+        let f = w.into_inner().map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
     }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// The project format's number, written into every file. It goes up
@@ -541,6 +553,23 @@ mod video_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save that cannot finish leaves no temp file, and a good one none either.
+    #[test]
+    fn a_save_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("dv_save_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.void");
+        save_project(&Document::default(), &p).unwrap();
+        assert!(p.is_file() && !p.with_extension("void.tmp").exists());
+        // the target is a folder: the rename fails
+        let bad = dir.join("b.void");
+        std::fs::create_dir_all(bad.join("x")).unwrap();
+        assert!(save_project(&Document::default(), &bad).is_err());
+        assert!(!bad.with_extension("void.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The version a file states is read whatever else it holds, so a newer
     /// file can be told apart before its unknown parts fail to parse.

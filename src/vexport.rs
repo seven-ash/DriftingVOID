@@ -444,6 +444,8 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         if let Some(c) = child.as_mut() {
             let _ = c.kill();
             let _ = c.wait();
+            // cancelled or failed: no half-made video is left
+            let _ = std::fs::remove_file(&job.out);
         }
         cleanup();
         Err(msg)

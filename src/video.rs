@@ -92,7 +92,7 @@ pub fn decode_heif(bytes: &[u8]) -> Result<image::RgbaImage, String> {
 
 /// What to say when ffmpeg is not found.
 pub fn missing() -> &'static str {
-    crate::i18n::tr("ffmpeg 없음 · Setup.cmd 다시 실행 또는 winget install Gyan.FFmpeg")
+    crate::i18n::tr("ffmpeg 없음 · 설치 프로그램 다시 실행 또는 winget install Gyan.FFmpeg")
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
