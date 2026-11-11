@@ -1226,14 +1226,27 @@ impl LineCands {
 /// `export::render` on the canvas's GPU renderer when there is one (its
 /// photos, masks and 3D layers are already there), else on the CPU.
 fn render_region(cg: &mut Option<CanvasGpu>, doc: &Document, region: Rect, scale: f32, bg: Option<Color32>) -> Result<tiny_skia::Pixmap, String> {
+    render_region_for(cg, doc, region, scale, bg, false)
+}
+
+/// As `render_region`; `output`: the picture leaves the app (the clipboard),
+/// so one with FX layers fails rather than come from the CPU without them
+/// (the tools that only look at the picture take it either way).
+fn render_region_for(cg: &mut Option<CanvasGpu>, doc: &Document, region: Rect, scale: f32, bg: Option<Color32>, output: bool) -> Result<tiny_skia::Pixmap, String> {
+    let mut why = crate::i18n::tr("GPU 사용 불가").to_string();
     if let Some(cg) = cg.as_mut() {
         if std::env::var_os("DV_CPU_EXPORT").is_none() {
             let g = &mut cg.gpu;
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| g.render_aside(doc, region, scale, bg)));
-            if let Ok(Ok(pm)) = r {
-                return Ok(pm);
+            match r {
+                Ok(Ok(pm)) => return Ok(pm),
+                Ok(Err(e)) => why = e,
+                Err(_) => {}
             }
         }
+    }
+    if output && doc.has_fx() {
+        return Err(crate::gpu::fx_needs_gpu(&why));
     }
     crate::export::render(doc, region, scale, bg)
 }
@@ -3759,9 +3772,10 @@ impl App {
             });
             ui.label(crate::i18n::trf("키 {}개", &[format!("{}", c.anim.keys.len())]));
             ch |= rect_fields(ui, &mut c.rect, "cam", cm(ch::POS | ch::SIZE), &mut ck[0]);
-            let mut deg = c.rot.to_degrees();
+            let deg0 = wrap_deg(c.rot.to_degrees());
+            let mut deg = deg0;
             if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).step(1.0).text(crate::i18n::tr("회전 °")).default(0.0).key(cm(ch::ROT), &mut ck[1])).changed() {
-                c.rot = deg.to_radians();
+                c.rot += (deg - deg0).to_radians();
                 ch = true;
             }
             ui.horizontal_wrapped(|ui| {
@@ -8401,7 +8415,7 @@ impl App {
         let mut doc = self.export_doc();
         // vignette and colour fringes centre on what is copied
         doc.film = Some(crate::doc::Film::Fixed(r));
-        match render_region(&mut self.cgpu, &doc, r, scale, bg) {
+        match render_region_for(&mut self.cgpu, &doc, r, scale, bg, true) {
             Ok(pm) => {
                 let img = crate::export::to_rgba(&pm);
                 let res = arboard::Clipboard::new().and_then(|mut cb| {
@@ -9130,9 +9144,10 @@ impl App {
                         im.scale = pct / 100.0;
                         changed = true;
                     }
-                    let mut deg = im.rotation.to_degrees();
+                    let deg0 = wrap_deg(im.rotation.to_degrees());
+                    let mut deg = deg0;
                     if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text(crate::i18n::tr("회전 °")).default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
-                        im.rotation = deg.to_radians();
+                        im.rotation += (deg - deg0).to_radians();
                         changed = true;
                     }
                     ui.horizontal(|ui| {
@@ -9254,9 +9269,10 @@ impl App {
                             force.push(Force::TextBlend(t.blend));
                         }
                     }
-                    let mut deg = t.rotation.to_degrees();
+                    let deg0 = wrap_deg(t.rotation.to_degrees());
+                    let mut deg = deg0;
                     if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text(crate::i18n::tr("회전 °")).default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
-                        t.rotation = deg.to_radians();
+                        t.rotation += (deg - deg0).to_radians();
                         changed = true;
                     }
                     ui.horizontal(|ui| {
@@ -9289,9 +9305,10 @@ impl App {
                         }
                     });
                     if matches!(s.kind, ShapeKind::Rect | ShapeKind::Ellipse) {
-                        let mut deg = s.rotation.to_degrees();
+                        let deg0 = wrap_deg(s.rotation.to_degrees());
+                        let mut deg = deg0;
                         if ui.add(crate::dial::Dial::new(&mut deg, -180.0..=180.0).text(crate::i18n::tr("회전 °")).default(0.0).key(km(ch::ROT), &mut kh[2]).nav(kn(ch::ROT), &mut kv[2]).mixed(mxc(ch::ROT))).changed() {
-                            s.rotation = deg.to_radians();
+                            s.rotation += (deg - deg0).to_radians();
                             changed = true;
                         }
                     }
@@ -12336,6 +12353,15 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
     l
 }
 
+/// Degrees folded into -180..=180 for a rotation dial (a handle or a turn of
+/// several layers leaves any angle; the dial shows the same turn, and its
+/// edits go to the stored angle as a difference, so whole turns are kept).
+fn wrap_deg(d: f32) -> f32 {
+    let w = (d + 180.0).rem_euclid(360.0) - 180.0;
+    // a half turn reads 180 from either side
+    if w == -180.0 && d > 0.0 { 180.0 } else { w }
+}
+
 /// Rotation snapping in 15° steps: Shift/Ctrl relative to where the drag started
 /// (`start`), Alt relative to 0°.
 fn snap_angle(a: f32, start: f32, mods: Modifiers) -> f32 {
@@ -13095,7 +13121,9 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_prefs();
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.modified && self.pending.is_none() {
+        // every close request while there are unsaved changes is held back and
+        // asks (a second one too: the question is still up, or one for New / Open)
+        if ctx.input(|i| i.viewport().close_requested()) && self.modified {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending = Some(Pending::Quit);
         }

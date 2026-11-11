@@ -335,8 +335,16 @@ pub fn render_ss(doc: &Document, center: Pos2, size: egui::Vec2, rot: f32, scale
     });
     match r {
         Some(Ok(pm)) => Ok(pm),
+        // the CPU renderer draws no FX layers: say so instead of leaving them out
+        Some(Err(e)) if doc.has_fx() => Err(fx_needs_gpu(&e)),
+        None if doc.has_fx() => Err(fx_needs_gpu(crate::i18n::tr("GPU 사용 불가"))),
         _ => crate::export::render_ss(doc, center, size, rot, scale, bg, k),
     }
+}
+
+/// Why a picture with FX layers could not be made (`why`: the GPU's reason).
+pub fn fx_needs_gpu(why: &str) -> String {
+    crate::i18n::trf("FX 레이어는 GPU로만 그림 · {}", &[why.to_string()])
 }
 
 /// Drops what the GPU keeps between frames (start and end of a video export).

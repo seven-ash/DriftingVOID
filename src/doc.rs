@@ -1268,6 +1268,12 @@ impl Document {
 
     /// Shown at the playhead (layers with a span only exist inside it while the
     /// timeline is on).
+    /// Is there an FX layer that shows? Only the GPU renderer draws them, so
+    /// a picture made on the CPU would lack them (exports refuse instead).
+    pub fn has_fx(&self) -> bool {
+        self.layers.iter().any(|l| l.visible && l.opacity > 0.0 && matches!(l.kind, LayerKind::Fx(_)))
+    }
+
     pub fn alive(&self, l: &Layer) -> bool {
         !self.timeline.on || l.anim.as_ref().is_none_or(|a| a.alive(self.timeline.time))
     }

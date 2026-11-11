@@ -239,6 +239,8 @@ pub(crate) fn pose_keys(doc: &Document, t: f64) -> Document {
     d.timeline.on = true;
     d.timeline.time = t;
     crate::anim::evaluate(&mut d);
+    // as the canvas does every frame: a space following a photo goes with it
+    crate::persp::follow_photos(&mut d);
     crate::persp::sync_walls(&mut d);
     d
 }
@@ -505,7 +507,16 @@ fn run(job: &Job, pr: &Progress, total: u64) -> Result<String, String> {
         flat.sweep();
         // on the GPU (layers kept across frames, up to two frames in flight: this
         // one is prepared while the GPU draws the one before), else on the CPU
-        let queued = if gpu_render { crate::gpu::with_gpu(|g| g.submit(&d, r.center(), size, rot, scale, bg, job.ss, nv12)).and_then(|r| r.ok()) } else { None };
+        let submitted = if gpu_render { crate::gpu::with_gpu(|g| g.submit(&d, r.center(), size, rot, scale, bg, job.ss, nv12)) } else { None };
+        // the CPU renderer draws no FX layers: the export stops with the reason
+        if d.has_fx() && !matches!(submitted, Some(Ok(_))) {
+            let why = match &submitted {
+                Some(Err(e)) => e.clone(),
+                _ => crate::i18n::tr("GPU 사용 불가").to_string(),
+            };
+            return fail(&mut child, crate::gpu::fx_needs_gpu(&why));
+        }
+        let queued = submitted.and_then(|r| r.ok());
         let mut ready = Vec::new();
         match queued {
             Some(p) => {
@@ -596,6 +607,25 @@ mod tests {
     use super::*;
     use crate::doc::{ShapeKind, ShapeLayer};
     use egui::pos2;
+
+    /// A space following a photo goes with it in an export pose, as on the
+    /// canvas (before 0.104.1: `pose_keys` left it where it was).
+    #[test]
+    fn export_pose_moves_a_space_with_its_photo() {
+        use crate::doc::{ImageLayer, ImageSource, LayerKind, next_rev};
+        let mut doc = Document::default();
+        let src = ImageSource { id: next_rev(), rgba: Arc::new(image::RgbaImage::new(200, 100)), encoded: Arc::new(Vec::new()), ext: "png".into(), logical: None, nv12: None };
+        let pid = doc.insert("p".into(), LayerKind::Image(ImageLayer::new(src, pos2(100.0, 50.0))), None);
+        let mut sp = crate::persp::Space::new(1, "s".into(), Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 100.0)));
+        sp.follow = Some(crate::persp::SpaceFollow { layer: pid, last: [100.0, 50.0, 1.0, 0.0] });
+        doc.spaces.push(sp);
+        // the photo has moved since the space last followed it
+        if let Some(LayerKind::Image(im)) = doc.get_mut(pid).map(|l| &mut l.kind) {
+            im.center = pos2(400.0, 50.0);
+        }
+        let d = pose_keys(&doc, 0.0);
+        assert!((d.spaces[0].frame.center().x - 400.0).abs() < 0.5, "space at {:?}", d.spaces[0].frame);
+    }
 
     #[test]
     fn sizes_and_aspect() {

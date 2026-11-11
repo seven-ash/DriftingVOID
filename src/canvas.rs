@@ -257,11 +257,11 @@ pub fn content_key(l: &Layer) -> u64 {
             (2u8, v.strokes.len()).hash(&mut h);
             f(&mut h, v.offset.x);
             f(&mut h, v.offset.y);
+            // each stroke's own hash of its points and colour (made once, when
+            // the stroke is): a recorded stroke growing inside its bounds, or
+            // points moved within them, is another picture
             for s in &v.strokes {
-                s.color.hash(&mut h);
-                for x in [s.bounds.min.x, s.bounds.min.y, s.bounds.max.x, s.bounds.max.y] {
-                    f(&mut h, x);
-                }
+                s.key.hash(&mut h);
             }
         }
         LayerKind::Text(t) => {
@@ -282,9 +282,18 @@ pub fn content_key(l: &Layer) -> u64 {
             f(&mut h, a.pos.y);
         }
         LayerKind::Fx(fx) => {
-            (6u8, fx.filter, fx.blend, fx.colors).hash(&mut h);
+            (6u8, fx.filter, fx.blend, fx.colors, fx.moving, fx.source).hash(&mut h);
             for v in fx.v {
                 f(&mut h, v);
+            }
+            for c in &fx.curves {
+                c.len().hash(&mut h);
+                for p in c {
+                    (p.l as u8, p.r as u8).hash(&mut h);
+                    for v in [p.x, p.y, p.ls, p.rs] {
+                        f(&mut h, v);
+                    }
+                }
             }
         }
     }
@@ -672,5 +681,56 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
             }
             LayerKind::Shape(s) => draw_shape(painter, s, xf, op),
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::content_key;
+    use crate::doc::{Document, Filter, FxLayer, LayerKind};
+    use egui::Color32;
+    use std::sync::Arc;
+
+    /// The picture caches go by `content_key`: whatever changes a layer's
+    /// picture must change it (before 0.104.1: an FX layer's curves, noise switch
+    /// and alpha channel, and a pen stroke's points, did not).
+    #[test]
+    fn content_key_sees_fx_curves_and_stroke_points() {
+        let mut doc = Document::default();
+        let id = doc.insert("fx".into(), LayerKind::Fx(FxLayer::new(Filter::Curves)), None);
+        let key = |doc: &Document| content_key(doc.get(id).unwrap());
+        let fx = |doc: &mut Document, f: &dyn Fn(&mut FxLayer)| {
+            if let Some(LayerKind::Fx(fx)) = doc.get_mut(id).map(|l| &mut l.kind) {
+                f(fx);
+            }
+        };
+        let k0 = key(&doc);
+        fx(&mut doc, &|fx| fx.curves[0] = crate::doc::curve_pts(&[[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]));
+        let k1 = key(&doc);
+        assert_ne!(k0, k1, "a curve point");
+        fx(&mut doc, &|fx| fx.curves[0][1].r = crate::doc::Tan::Constant);
+        let k2 = key(&doc);
+        assert_ne!(k1, k2, "a tangent mode");
+        fx(&mut doc, &|fx| fx.moving = !fx.moving);
+        let k3 = key(&doc);
+        assert_ne!(k2, k3, "the noise switch");
+        fx(&mut doc, &|fx| fx.source = (fx.source + 1) % 4);
+        assert_ne!(k3, key(&doc), "the alpha channel");
+
+        // a stroke carried on inside the bounds its first half already has
+        let pts: Vec<[f32; 3]> = (0..=40).map(|i| {
+            let a = i as f32 / 40.0 * std::f32::consts::TAU * 2.0;
+            [100.0 + 50.0 * a.cos(), 100.0 + 50.0 * a.sin(), 3.0]
+        }).collect();
+        let layer = |n: usize| {
+            let mut d = Document::default();
+            let v = crate::doc::VectorLayer { strokes: vec![Arc::new(crate::vector::VStroke::new(pts[..n].to_vec(), Color32::RED))], ..Default::default() };
+            let id = d.insert("pen".into(), LayerKind::Vector(v), None);
+            (content_key(d.get(id).unwrap()), d.get(id).unwrap().bounds())
+        };
+        let (ka, ba) = layer(21);
+        let (kb, bb) = layer(41);
+        assert_eq!(ba, bb, "the test needs equal bounds");
+        assert_ne!(ka, kb, "more points of a stroke");
     }
 }

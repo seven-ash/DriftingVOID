@@ -31,6 +31,9 @@ pub struct VStroke {
     pub bounds: Rect,
     /// Timing when the stroke was recorded on the timeline.
     pub rec: Option<Rec>,
+    /// Hash of the points and the colour, for the picture caches
+    /// (`canvas::content_key`).
+    pub key: u64,
 }
 
 fn p(a: &[f32; 3]) -> Pos2 {
@@ -127,7 +130,18 @@ impl VStroke {
                 }
             }
         }
-        Self { pts, color, tris, bounds, rec: None }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            color.hash(&mut h);
+            for q in &pts {
+                for v in q {
+                    v.to_bits().hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        Self { pts, color, tris, bounds, rec: None, key }
     }
 
     pub fn hit(&self, q: Pos2, tol: f32) -> bool {

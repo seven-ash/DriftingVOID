@@ -411,6 +411,9 @@ impl Widget for Dial<'_> {
                 // ---- number (typing and maths)
                 let mut dv = egui::DragValue::new(value)
                     .range(lo..=hi)
+                    // a value outside the range (a handle or G/R/S made it) is
+                    // shown as it is: only typing or dragging applies the range
+                    .clamp_existing_to_range(false)
                     .speed(dt as f64 * 0.5)
                     .min_decimals(if integer { 0 } else { decimals })
                     .max_decimals(if integer { 0 } else { 2 })
@@ -574,7 +577,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             }
             // number and label
-            let mut dv = egui::DragValue::new(value).range(lo..=hi).speed(dt as f64 * 0.5).min_decimals(if integer { 0 } else { decimals }).max_decimals(if integer { 0 } else { 2 }).custom_parser(crate::calc::parse);
+            let mut dv = egui::DragValue::new(value).range(lo..=hi).clamp_existing_to_range(false).speed(dt as f64 * 0.5).min_decimals(if integer { 0 } else { decimals }).max_decimals(if integer { 0 } else { 2 }).custom_parser(crate::calc::parse);
             if !suffix.is_empty() {
                 dv = dv.suffix(suffix.clone());
             }
@@ -588,4 +591,38 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
         out.mark_changed();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(ctx: &egui::Context, t: f64, v: &mut f32, lo: f32, hi: f32, vertical: bool) -> bool {
+        let input = egui::RawInput { time: Some(t), screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+        let mut changed = false;
+        let c = &mut changed;
+        let full = ctx.run_ui(input, |ui| {
+            let d = Dial::new(v, lo..=hi).step(1.0);
+            *c = ui.add(if vertical { d.vertical() } else { d }).changed();
+        });
+        full.drop_without_applying_deltas();
+        changed
+    }
+
+    /// A dial only shows a value outside its range (a handle or G/R/S made
+    /// it): drawing it must not cut the value or report a change (before 0.104.1:
+    /// the number box did, and the panel wrote it back into the layer).
+    #[test]
+    fn a_dial_shown_with_a_value_outside_its_range_leaves_it() {
+        for vertical in [false, true] {
+            let ctx = egui::Context::default();
+            for (start, lo, hi) in [(250.0f32, -180.0f32, 180.0f32), (800.0, 1.0, 400.0), (0.5, 1.0, 400.0)] {
+                let mut v = start;
+                for k in 0..3 {
+                    let ch = frame(&ctx, k as f64 * 0.016, &mut v, lo, hi, vertical);
+                    assert!(!ch && v == start, "{start} in {lo}..{hi} became {v} (changed {ch}, vertical {vertical})");
+                }
+            }
+        }
+    }
 }

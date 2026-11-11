@@ -26,6 +26,8 @@
  "FX 레이어 · 아래 레이어에 필터": "FX layer · filters the layers below",
  "FX 레이어 추가": "Add FX layer",
  "FX 레이어 추가 · 아래 레이어에 필터": "Add FX layer · filters the layers below",
+ "FX 레이어는 GPU로만 그림 · {}": "FX layers need the GPU · {}",
+ "GPU 사용 불가": "no GPU available",
  "GPU 오류": "GPU error",
  "GPU 인코딩 (NVIDIA NVENC)": "GPU encoding (NVIDIA NVENC)",
  "GPU 한도 초과: {}×{}px": "Beyond the GPU's limit: {}×{} px",
