@@ -31,6 +31,7 @@ mod lines;
 mod lsd;
 mod oledrop;
 mod raster;
+mod recovery;
 mod scene;
 mod segment;
 mod selftest;

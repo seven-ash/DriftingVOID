@@ -118,6 +118,7 @@ the glass panels, playback and every export.
 | `src/segment.rs` | GrabCut and intelligent scissors |
 | `src/video.rs`, `src/audio.rs`, `src/vexport.rs` | Video, sound, video export |
 | `src/io.rs` | Import and `.void` files |
+| `src/recovery.rs` | Recovery copies of unsaved changes, offered at the next start |
 | `src/update.rs` | Release updates |
 | `src/i18n.rs`, `lang/` | Translations |
 | `src/kit.rs`, `src/dial.rs`, `src/theme.rs` | Widgets and design tokens |

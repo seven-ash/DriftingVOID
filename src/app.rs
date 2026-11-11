@@ -1020,6 +1020,13 @@ pub struct App {
     rename_focus: bool,
     last_export: Option<ExportDlg>,
     prefs_saved: String,
+    /// This run's recovery copy (`recovery.rs`; None: off, as in debug runs).
+    rec: Option<crate::recovery::Session>,
+    /// The document revision the copy holds, and when it was last written.
+    rec_rev: u64,
+    rec_at: f64,
+    /// Copies left by sessions that ended without saving, offered at start.
+    rec_found: Vec<crate::recovery::Found>,
     now: f64,
     ime_guard_until: f64,
     /// Tool indicator glide: (from y, to y, start time).
@@ -1410,6 +1417,10 @@ impl App {
             rename_focus: false,
             last_export: None,
             prefs_saved: String::new(),
+            rec: None,
+            rec_rev: 0,
+            rec_at: f64::MIN,
+            rec_found: Vec::new(),
             now: 0.0,
             ime_guard_until: 0.0,
             ind_anim: (f32::NAN, f32::NAN, 0.0),
@@ -1503,6 +1514,15 @@ impl App {
                 app.recent = pr.recent;
                 app.last_export = pr.export;
                 app.prefs_saved = text;
+            }
+        }
+        // recovery copies: off in debug runs (DV_* flags), unless they name a
+        // folder for them (DV_RECOVERY_DIR)
+        let debug_run = std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("DV_"));
+        if !debug_run || std::env::var_os("DV_RECOVERY_DIR").is_some() {
+            if let Some(dir) = crate::recovery::dir() {
+                app.rec_found = crate::recovery::found_in(&dir);
+                app.rec = crate::recovery::Session::start(&dir);
             }
         }
         // the UI language: as chosen, else the system's (DV_LANG=en|ja|ko for captures)
@@ -5220,6 +5240,12 @@ impl App {
             Pending::Quit => {
                 self.save_prefs();
                 self.pending = None;
+                // (after an update that would not start, the next change is copied again)
+                let end_recovery = |me: &mut Self| {
+                    if let Some(r) = me.rec.as_mut() {
+                        r.end();
+                    }
+                };
                 // an update waiting: its installer runs once this has quit. If
                 // it cannot start, the app stays (the notice says why).
                 if let Some(p) = self.update_go.take() {
@@ -5229,6 +5255,8 @@ impl App {
                     }
                 }
                 self.modified = false;
+                // closing in order: the changes were saved or given up
+                end_recovery(self);
                 std::process::exit(0);
             }
         }
@@ -11199,7 +11227,8 @@ impl App {
             }
         }
 
-        if self.doc.layers.is_empty() {
+        // (not under the recovery question, which sits there)
+        if self.doc.layers.is_empty() && self.rec_found.is_empty() {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -12170,6 +12199,93 @@ impl App {
         FontFamily::Name(if t.style.to_lowercase().contains("bold") { "doc_bold".into() } else { "doc".into() })
     }
 
+    /// Keeps the recovery copy in step: written soon after the first unsaved
+    /// change and then at most every `RECOVERY_EVERY` seconds while there are
+    /// newer ones (never mid-drag), removed once nothing is unsaved.
+    fn tick_recovery(&mut self, ctx: &egui::Context) {
+        let Some(r) = self.rec.as_mut() else { return };
+        if !self.modified {
+            r.clear();
+            self.rec_rev = self.doc_rev;
+            return;
+        }
+        if self.doc_rev == self.rec_rev || self.drag.is_some() || self.changed {
+            return;
+        }
+        let every = std::env::var("DV_AUTOSAVE").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(RECOVERY_EVERY);
+        let wait = every - (self.now - self.rec_at);
+        if wait > 0.0 || r.busy() {
+            // a frame when it is due, also with no input coming
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.clamp(0.25, every.max(0.25))));
+            return;
+        }
+        if r.save(self.doc.clone(), self.path.clone()) {
+            self.rec_rev = self.doc_rev;
+            self.rec_at = self.now;
+        }
+    }
+
+    /// At start: a copy left by a session that ended without saving. Recover
+    /// it (it opens as unsaved changes of its project), keep it for later,
+    /// or give it up.
+    fn recovery_modal(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(f) = self.rec_found.first().cloned() else { return };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("recovery")).frame(egui::Frame::NONE).backdrop_color(Color32::from_black_alpha(45)).show(ctx, |ui| theme::glass(ui, egui::Margin::same(SPACE_LG as i8), theme::radius_card(), |ui| {
+            ui.set_width(300.0);
+            ui.label(crate::kit::dialog_title(crate::i18n::tr("저장 안 된 작업")));
+            ui.add_space(SPACE_SM);
+            let name = f.name().unwrap_or_else(|| crate::i18n::tr("새 작업").to_string());
+            ui.label(elide(ui, format!("{name} · {}", crate::recovery::ago(f.age)), 300.0));
+            ui.add_space(SPACE_SM);
+            ui.horizontal(|ui| {
+                if crate::kit::primary_button(ui, crate::i18n::tr("복구")).clicked() {
+                    choice = Some(0);
+                }
+                if ui.button(crate::i18n::tr("나중에")).clicked() {
+                    choice = Some(1);
+                }
+                if ui.button(crate::i18n::tr("버리기")).clicked() {
+                    choice = Some(2);
+                }
+            });
+        }));
+        // DV_RECOVER=1: 복구 chosen at once (checks without input)
+        if std::env::var_os("DV_RECOVER").is_some() {
+            choice = Some(0);
+        }
+        match choice {
+            Some(0) => {
+                self.rec_found.remove(0);
+                match crate::io::load_project(&f.file) {
+                    Ok(d) => {
+                        self.reset_doc(d, f.origin.clone());
+                        // unsaved changes of that project; the copy is this session's now
+                        self.modified = true;
+                        if let Some(r) = self.rec.as_mut() {
+                            r.adopt(&f);
+                        }
+                        self.rec_rev = self.doc_rev;
+                        self.rec_at = self.now;
+                        self.status = crate::i18n::tr("복구됨 · 저장 필요").into();
+                    }
+                    // the copy stays where it is
+                    Err(e) => self.status = crate::i18n::trf("복구 실패: {}", &[format!("{e}")]),
+                }
+            }
+            // kept: offered again at the next start
+            Some(1) => self.rec_found.clear(),
+            Some(2) => {
+                self.rec_found.remove(0);
+                f.remove();
+            }
+            _ => {}
+        }
+    }
+
     fn unsaved_modal(&mut self, ctx: &egui::Context) {
         let Some(p) = self.pending.clone() else { return };
         let mut choice = None;
@@ -12494,6 +12610,9 @@ pub(crate) fn transform_layer(o: &Layer, c: Pos2, s: f32, th: f32) -> Layer {
     }
     l
 }
+
+/// Seconds between recovery copies while there are unsaved changes.
+const RECOVERY_EVERY: f64 = 30.0;
 
 /// Degrees folded into -180..=180 for a rotation dial (a handle or a turn of
 /// several layers leaves any angle; the dial shows the same turn, and its
@@ -13362,6 +13481,8 @@ impl eframe::App for App {
         self.export_ui(&ctx);
         self.video_export_ui(&ctx);
         self.unsaved_modal(&ctx);
+        self.recovery_modal(&ctx);
+        self.tick_recovery(&ctx);
         self.peek_ui(&ctx);
 
         // a dial drag or a scroll burst is one undo step: commit once the
