@@ -2370,6 +2370,13 @@ impl App {
         self.extra_sel.clear();
         self.sub = SubSel::default();
         self.doc = doc;
+        // a file from before 0.104.3 may hold layers of a deleted space
+        let spaces: Vec<u64> = self.doc.spaces.iter().map(|s| s.id).collect();
+        for l in &mut self.doc.layers {
+            if l.place.as_ref().is_some_and(|p| !spaces.contains(&p.space)) {
+                l.place = None;
+            }
+        }
         self.committed = self.doc.clone();
         self.doc_rev += 1;
         self.undo.clear();
@@ -4412,23 +4419,41 @@ impl App {
                     ui.painter().rect(mr, 2.0, ACCENT.gamma_multiply(0.12), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
                 }
                 TlDrag::Keys { last } => {
-                    let dlt = t - last;
-                    if dlt.abs() > 1e-9 {
-                        let sel = self.tl_sel.clone();
-                        let mut moved = Vec::new();
-                        for (row, kt) in sel {
+                    let sel = self.tl_sel.clone();
+                    // the keys move as one: the earliest stops at 0 and the rest
+                    // keep their distances from it
+                    let first = sel.iter().map(|x| x.1).fold(f64::MAX, f64::min);
+                    let dlt = (t - last).max(-first);
+                    if dlt.abs() > 1e-9 && !sel.is_empty() {
+                        // every key is found before any moves (one moved onto
+                        // another's time would be taken for it), and a key shown
+                        // on two rows moves once
+                        let mut hits: Vec<(TlRow, usize, f64)> = Vec::new();
+                        for (row, kt) in &sel {
                             let c = row.ch();
-                            if let Some(a) = self.row_anim_mut(row) {
-                                if let Some(k) = a.keys.iter_mut().find(|k| k.ch & c != 0 && (k.t - kt).abs() < 1e-6) {
-                                    k.t = (kt + dlt).max(0.0);
-                                    moved.push((row, k.t));
+                            if let Some(i) = self.row_anim(*row).and_then(|a| a.keys.iter().position(|k| k.ch & c != 0 && (k.t - kt).abs() < 1e-6)) {
+                                hits.push((*row, i, *kt));
+                            }
+                        }
+                        let mut done: Vec<(TlRow, usize)> = Vec::new();
+                        let mut moved = Vec::new();
+                        for (row, i, kt) in &hits {
+                            if !done.contains(&(row.head(), *i)) {
+                                done.push((row.head(), *i));
+                                if let Some(k) = self.row_anim_mut(*row).and_then(|a| a.keys.get_mut(*i)) {
+                                    k.t = kt + dlt;
                                 }
+                            }
+                            moved.push((*row, kt + dlt));
+                        }
+                        for (head, _) in &done {
+                            if let Some(a) = self.row_anim_mut(*head) {
                                 a.sort();
                             }
                         }
                         self.tl_sel = moved;
                         self.tl_key = self.tl_sel.first().copied();
-                        self.tl_drag = Some(TlDrag::Keys { last: t });
+                        self.tl_drag = Some(TlDrag::Keys { last: last + dlt });
                         changed = true;
                     }
                 }
@@ -5934,6 +5959,13 @@ impl App {
                 let erase = self.tool == Tool::Eraser;
                 let id = if erase {
                     match self.sel_layer() {
+                        // in a 3D space the layer shows projected: the pointer's
+                        // canvas point is not where its pixels are (as the brush
+                        // and the pen, which never take a placed layer)
+                        Some(l) if is_paint_layer(&l.kind) && l.place.is_some() => {
+                            self.status = crate::i18n::tr("3D 공간 안 레이어는 지우개 불가 · 공간에서 뺀 뒤 지우기").into();
+                            return;
+                        }
                         Some(l) if is_paint_layer(&l.kind) && !l.locked && l.visible => l.id,
                         _ => {
                             self.status = crate::i18n::tr("지울 그림 레이어를 먼저 선택").into();
@@ -9508,6 +9540,19 @@ impl App {
                 }
             }
         }
+        // another filter: its values are other things, so keys of the old
+        // filter's values go (they would drive the new one's dials)
+        if let (LayerKind::Fx(b), Some(l)) = (&before.kind, self.doc.get_mut(id)) {
+            if matches!(&l.kind, LayerKind::Fx(a) if a.filter != b.filter) {
+                if let Some(an) = l.anim.as_mut() {
+                    let fx_bits = ch::FX.iter().fold(0u16, |m, c| m | c);
+                    for k in &mut an.keys {
+                        k.ch &= !fx_bits;
+                    }
+                    an.keys.retain(|k| k.ch != 0);
+                }
+            }
+        }
         if changed {
             self.spread_edit(&before);
             for lid in self.extra_sel.clone() {
@@ -11526,7 +11571,17 @@ impl App {
             ch = true;
         }
         if del {
-            self.doc.spaces.remove(i);
+            let gone = self.doc.spaces.remove(i).id;
+            // its layers come out (flat again, as 공간에서 빼기): a placement
+            // in a space that is not there cannot be edited or taken out
+            for l in &mut self.doc.layers {
+                if l.place.as_ref().is_some_and(|p| p.space == gone) {
+                    l.place = None;
+                }
+            }
+            self.wall_sel = None;
+            self.space_place = None;
+            self.line_cands = None;
             self.space_sel = self.doc.spaces.last().map(|s| s.id);
             self.space_line = None;
             ch = true;

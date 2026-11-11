@@ -249,6 +249,40 @@ fn on_grid(v: f32, m: f32) -> bool {
     (k - k.round()).abs() < 1e-3
 }
 
+/// Wheel notches over a hovered dial this frame (+: up), from the wheel
+/// events themselves: egui's smoothed scroll spreads one notch over many
+/// frames (it moved a dial 11 ticks at 60 Hz, 28 at 165 Hz). A touchpad's
+/// small steps add up to notches. The scroll is taken, so the panel under
+/// the dial stays where it is.
+fn wheel_ticks(ui: &Ui, id: egui::Id) -> f32 {
+    const NOTCH: f32 = 50.0;
+    let dy: f32 = ui.input(|i| {
+        i.events
+            .iter()
+            .map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, .. } => {
+                    (delta.y + delta.x)
+                        * match unit {
+                            egui::MouseWheelUnit::Point => 1.0,
+                            egui::MouseWheelUnit::Line => NOTCH,
+                            egui::MouseWheelUnit::Page => NOTCH * 10.0,
+                        }
+                }
+                _ => 0.0,
+            })
+            .sum()
+    });
+    ui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    if dy == 0.0 {
+        return 0.0;
+    }
+    let acc_id = id.with("wheel");
+    let acc = ui.data(|d| d.get_temp::<f32>(acc_id)).unwrap_or(0.0) + dy;
+    let n = (acc / NOTCH).trunc();
+    ui.data_mut(|d| d.insert_temp(acc_id, acc - n * NOTCH));
+    n
+}
+
 /// Small "reset" glyph: an open circular arrow.
 fn reset_icon(p: &egui::Painter, c: Pos2, col: Color32) {
     let r = 5.0;
@@ -350,11 +384,11 @@ impl Widget for Dial<'_> {
                     u = (u - resp.drag_delta().x / TICK_PX * dt * fine).clamp(lo, hi);
                 }
                 if resp.hovered() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-                    if scroll != 0.0 {
+                    let n = wheel_ticks(ui, resp.id);
+                    if n != 0.0 {
                         moved = true;
                         // one tick per notch, snapped onto the tick grid
-                        u = (anchor + (((u - anchor) / dt).round() + scroll.signum()) * dt).clamp(lo, hi);
+                        u = (anchor + (((u - anchor) / dt).round() + n) * dt).clamp(lo, hi);
                     }
                 }
                 let nv = if integer { u.round().clamp(lo, hi) } else { u };
@@ -531,10 +565,10 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 u = (u - resp.drag_delta().y / TICK_PX * dt * fine).clamp(lo, hi);
             }
             if resp.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-                if scroll != 0.0 {
+                let n = wheel_ticks(ui, resp.id);
+                if n != 0.0 {
                     moved = true;
-                    u = (anchor + (((u - anchor) / dt).round() + scroll.signum()) * dt).clamp(lo, hi);
+                    u = (anchor + (((u - anchor) / dt).round() + n) * dt).clamp(lo, hi);
                 }
             }
             let nv = if integer { u.round().clamp(lo, hi) } else { u };
@@ -607,6 +641,36 @@ mod tests {
         });
         full.drop_without_applying_deltas();
         changed
+    }
+
+    /// One wheel notch over a dial is one tick, at any frame rate (before
+    /// 0.104.3: 11 ticks at 60 Hz, 28 at 165 Hz).
+    #[test]
+    fn a_wheel_notch_is_one_tick() {
+        for hz in [60.0f64, 165.0] {
+            let ctx = egui::Context::default();
+            let mut v = 50.0f32;
+            let mut t = 0.0;
+            let mut run = |v: &mut f32, events: Vec<egui::Event>| {
+                t += 1.0 / hz;
+                let input = egui::RawInput { time: Some(t), screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+                let mut rect = egui::Rect::NOTHING;
+                let r = &mut rect;
+                let full = ctx.run_ui(input, |ui| *r = ui.add(Dial::new(v, 0.0..=100.0).step(1.0)).rect);
+                full.drop_without_applying_deltas();
+                rect
+            };
+            let rect = run(&mut v, vec![]);
+            let p = pos2(rect.left() + 40.0, rect.center().y);
+            for _ in 0..3 {
+                run(&mut v, vec![egui::Event::PointerMoved(p)]);
+            }
+            run(&mut v, vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Default::default() }]);
+            for _ in 0..hz as usize {
+                run(&mut v, vec![]);
+            }
+            assert_eq!(v, 51.0, "at {hz} Hz");
+        }
     }
 
     /// A dial only shows a value outside its range (a handle or G/R/S made
