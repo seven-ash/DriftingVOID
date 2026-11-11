@@ -4,7 +4,7 @@
 //! Perspective spaces: a camera matched to a photo from hand-drawn vanishing lines.
 //! Maths and references: notes/SPACES.md.
 //!
-//! World is Blender's (Z up, right-handed); camera axes are x right, y down, z forward,
+//! The world is right-handed with Z up; camera axes are x right, y down, z forward,
 //! and `Xc = R (Xw - C)`. Image coordinates are canvas world pixels.
 
 use egui::{Pos2, Rect, pos2};
@@ -15,7 +15,7 @@ pub type V3 = [f64; 3];
 pub type M3 = [[f64; 3]; 3];
 
 pub const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
-/// Blender-like axis colours.
+/// Axis colours: X red, Y green, Z blue.
 pub const AXIS_COLORS: [egui::Color32; 3] =
     [egui::Color32::from_rgb(240, 72, 90), egui::Color32::from_rgb(132, 204, 40), egui::Color32::from_rgb(64, 144, 255)];
 
@@ -1118,7 +1118,7 @@ fn solve_now(space: &Space) -> Result<Camera, String> {
 
 // ---------------------------------------------------------------- placement (phase 2)
 
-/// Rotation from Blender-style XYZ Euler angles in degrees: R = Rz · Ry · Rx.
+/// Rotation from XYZ Euler angles in degrees (X first, then Y, then Z): R = Rz · Ry · Rx.
 pub fn euler_xyz(deg: V3) -> M3 {
     let (a, b, c) = (deg[0].to_radians(), deg[1].to_radians(), deg[2].to_radians());
     let rx = [[1.0, 0.0, 0.0], [0.0, a.cos(), -a.sin()], [0.0, a.sin(), a.cos()]];

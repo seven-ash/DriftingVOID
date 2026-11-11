@@ -60,7 +60,7 @@ fn sd(p: vec2f) -> f32 {
     let b = u.panel.zw;
     // a radius past half the short side is a capsule
     let r = min(u.p.x, min(b.x, b.y));
-    // corner smoothing (Figma's, roughly): the corner starts further along
+    // corner smoothing: the corner starts further along
     // the side, as a superellipse that eases into the straight edge; room
     // past half the short side is not there, so a capsule stays round
     let re = min(r * (1.0 + u.dir.z), min(b.x, b.y));

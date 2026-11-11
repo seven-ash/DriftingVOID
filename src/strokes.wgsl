@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
 // Pen (vector) strokes filled on the GPU (src/gpu.rs, raster_strokes). A
@@ -49,8 +49,28 @@ fn vs_seg(i: SegIn, @builtin(vertex_index) vi: u32) -> SegOut {
     return o;
 }
 
-// Distance to a capsule whose ends have different radii (Inigo Quilez's
-// uneven capsule); one circle inside the other: the bigger circle.
+// Distance to a capsule whose ends have different radii; one circle inside
+// the other: the bigger circle. The function follows Inigo Quilez's
+// "Uneven Capsule - distance 2D" (https://www.shadertoy.com/view/4lcBWn,
+// https://iquilezles.org/articles/distfunctions2d/), written for WGSL with the
+// contained-circle case added; his distance functions are under:
+//
+// The MIT License
+// Copyright © Inigo Quilez
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions: The
+// above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED
+// "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+// NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 fn capsule(p0: vec2f, a: vec2f, b0: vec2f, ra: f32, rb: f32) -> f32 {
     let p = p0 - a;
     let b = b0 - a;

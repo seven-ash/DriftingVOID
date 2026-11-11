@@ -10,7 +10,7 @@
 //!   8(6), 1986: Gaussian smoothing, Sobel gradient, non-maximum suppression
 //!   along the gradient, then hysteresis between two thresholds. The thresholds
 //!   come from the window's own gradients (the high one at a percentile of the
-//!   magnitudes, the low one 0.4 of it), as MATLAB's `edge(…, 'canny')` does.
+//!   magnitudes, the low one 0.4 of it), so no threshold is set by hand.
 
 /// Luminance (0..255) of premultiplied RGBA pixels; transparent ones read 0.
 pub fn luminance(rgba: &[u8]) -> Vec<f32> {

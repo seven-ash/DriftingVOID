@@ -54,7 +54,7 @@ The program includes third-party code and fonts under their own licences
 THIRD-PARTY-NOTICES.html. FFmpeg is not part of this program: the setup
 downloads it separately as its own program under its own licence.
 
-Two source files follow code published by others and keep its licence:
+Some source files follow code published by others and keep its licence:
 
 - src/lsd.rs (the line segment detector behind line suggestions) is a
   port of parts of LSD 1.6, the reference implementation of "LSD: a Line
@@ -71,3 +71,17 @@ Two source files follow code published by others and keep its licence:
   Ottosson's reference code for Oklab and Okhsv, Copyright (c) 2021
   Björn Ottosson, under the MIT licence; the notice is in that file and
   in THIRD-PARTY-NOTICES.html.
+
+- src/strokes.wgsl: the distance to a capsule with two radii follows
+  Inigo Quilez's "Uneven Capsule - distance 2D"
+  (https://www.shadertoy.com/view/4lcBWn), Copyright (c) Inigo Quilez,
+  under the MIT licence; the notice is in that file and in
+  THIRD-PARTY-NOTICES.html.
+
+- src/gpu.wgsl: the brightness and contrast filter uses the formulas of
+  GIMP's brightness-contrast operation, Copyright (C) 1995 Spencer
+  Kimball and Peter Mattis, Copyright (C) 2012 Michael Natterer, under
+  the GNU General Public License, version 3 or later (this program's own
+  licence). src/segment.rs takes the weights of its edge blur and the
+  choice of the strongest colour channel from GIMP's scissors tool, under
+  the same licence; the code is this program's own.

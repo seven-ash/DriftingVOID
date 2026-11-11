@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
 
-//! 3D workspace of a space (notes/SPACES.md, phase 3): a Blender-like orbit view with
+//! 3D workspace of a space (notes/SPACES.md, phase 3): an orbit view about a target with
 //! view presets, the matched camera as a gizmo, picking, and the G/R/S modal
 //! transforms. The world is the space's (Z up); one unit is one canvas pixel at the
 //! origin.
@@ -21,7 +21,7 @@ pub struct View3d {
     pub space: u64,
     pub target: V3,
     pub dist: f64,
-    /// Degrees around Z; 0 looks along +Y (Blender's front view).
+    /// Degrees around Z; 0 looks along +Y (the front view).
     pub yaw: f64,
     /// Degrees; positive looks down.
     pub pitch: f64,
@@ -79,7 +79,7 @@ impl View3d {
         sub(self.target, scale(self.forward(), self.dist))
     }
 
-    /// Blender's numpad views (Ctrl: the opposite side). They switch to orthographic.
+    /// The numpad views: 1 front, 3 right, 7 top (Ctrl: the opposite side). They switch to orthographic.
     pub fn preset(&mut self, key: u8, opposite: bool) {
         let (y, p) = match (key, opposite) {
             (1, false) => (0.0, 0.0),
@@ -687,7 +687,7 @@ impl Modal {
         Self { op, id, orig, start, center, axis: None, local: false, typed: String::new() }
     }
 
-    /// X/Y/Z: global axis → local axis → free (as in Blender).
+    /// X/Y/Z: global axis → local axis → free, on repeated presses.
     pub fn press_axis(&mut self, a: usize) {
         match (self.axis, self.local) {
             (Some(x), false) if x == a => self.local = true,

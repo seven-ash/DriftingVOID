@@ -448,8 +448,10 @@ mod tests {
 /// Edge features of a picture for the scissors (Mortensen & Barrett 1995):
 /// Laplacian zero-crossings, gradient magnitude and direction, on a grid of
 /// `cell` world units from `origin` (the world point of cell (0,0)'s corner).
-/// Gradients are taken per colour channel and the strongest kept (as GIMP),
-/// after a light blur, so colour edges of equal brightness count too.
+/// Gradients are taken per colour channel and the strongest kept, after a
+/// light blur, so colour edges of equal brightness count too. (That choice and
+/// the blur's weights are those of GIMP's scissors tool, GPL-3.0-or-later; the
+/// code here is this program's own. See NOTICE.)
 pub struct EdgeMap {
     pub origin: egui::Pos2,
     pub cell: f32,
@@ -485,7 +487,7 @@ fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 }
 
 /// Cost weights: zero-crossing, gradient direction, gradient magnitude (the
-/// paper's, also OpenCV's defaults).
+/// paper's).
 const W_Z: f32 = 0.43;
 const W_D: f32 = 0.43;
 const W_G: f32 = 0.14;
@@ -503,7 +505,7 @@ impl EdgeMap {
         let n = w * h;
         let at = |x: isize, y: isize| (y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize;
         let xy = |i: usize| ((i % w) as isize, (i / w) as isize);
-        // light blur (GIMP's 3×3: centre 24, the rest 1, over 32)
+        // light blur, 3×3: centre 24, the rest 1, over 32 (the weights GIMP's scissors use)
         let b: Vec<[f32; 3]> = par_map(n, |i| {
             let (x, y) = xy(i);
             let mut acc = [0f32; 3];

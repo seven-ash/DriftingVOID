@@ -502,12 +502,14 @@ fn curve(x: f32, k: i32) -> f32 {
     return mix(textureLoad(tex1, vec2i(i, 0), 0)[k], textureLoad(tex1, vec2i(i + 1, 0), 0)[k], f);
 }
 
-// The point filters on straight sRGB values (as GIMP and Krita by default).
+// The point filters, on straight sRGB values (not linear light).
 fn point(kind: i32, c: vec3f) -> vec3f {
     let p = u.h0;
     switch kind {
         case 0: {
-            // brightness, then contrast (GIMP's formulas)
+            // brightness, then contrast: the formulas of GIMP's brightness-contrast
+            // operation (GPL-3.0-or-later, Copyright (C) 1995 Spencer Kimball and
+            // Peter Mattis, 2012 Michael Natterer; see NOTICE)
             var v = c;
             if p.x < 0.0 {
                 v = v * (1.0 + p.x);

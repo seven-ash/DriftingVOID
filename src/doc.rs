@@ -743,7 +743,7 @@ pub struct FxLayer {
     #[serde(default = "fx_colors")]
     pub colors: [[u8; 4]; 2],
     /// 커브: the points (x, y in 0..1, sorted by x) of the RGB curve and of
-    /// the red, green and blue ones (each channel's own, then RGB, as GIMP).
+    /// the red, green and blue ones (each channel's own is applied, then RGB).
     /// 채널을 알파로: `curves[0]` maps the channel to the alpha. Empty in
     /// files before 0.102.0 (`upgrade`).
     #[serde(default)]
@@ -761,7 +761,7 @@ fn source_luma() -> u8 {
     3
 }
 
-/// How one side of a curve point meets its segment (Unity's tangent modes,
+/// How one side of a curve point meets its segment (four tangent modes,
 /// Ash 11-02): Auto the smooth monotone slope (as before), Free a slope of
 /// its own (a handle), Linear towards the neighbour on that side, Constant
 /// holds the segment at its left point (either end's Constant does).
@@ -775,7 +775,7 @@ pub enum Tan {
 }
 
 impl Tan {
-    /// In the menu's order (Unity's).
+    /// In the menu's order.
     pub const ALL: [Tan; 4] = [Tan::Constant, Tan::Linear, Tan::Free, Tan::Auto];
 
     pub fn label(self) -> &'static str {

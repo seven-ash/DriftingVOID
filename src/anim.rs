@@ -5,9 +5,9 @@
 //!
 //! A key is an absolute snapshot of what can move: the layer's centre, an extent
 //! (photo scale, text size, shape size), rotation, opacity and, in a 3D space, the
-//! pose. Moving the playhead writes the sampled state back into the layers (as in
-//! Blender, changes that are not keyed are replaced when the time changes). Layers
-//! without keys are never touched.
+//! pose. Moving the playhead writes the sampled state back into the layers (a
+//! change that is not keyed is replaced when the time changes). Layers without
+//! keys are never touched.
 
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 use serde::{Deserialize, Serialize};

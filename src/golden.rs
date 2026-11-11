@@ -808,7 +808,7 @@ fn fx_colour_filters() {
         ("그라디언트 맵", grad, [126, 128, 148]),
         ("커브 (그대로)", FxLayer::new(Filter::Curves), [200, 100, 50]),
         // red's own curve halves it, then the RGB curve inverts every channel
-        // (each channel's curve first, then RGB, as GIMP)
+        // (each channel's curve first, then RGB)
         ("커브 (R, RGB)", curves(&[[0.0, 1.0], [1.0, 0.0]], &[[0.0, 0.0], [1.0, 0.5]], 1.0), [155, 155, 205]),
         // 양 0.5: halfway between the original and that
         ("커브 (양)", curves(&[[0.0, 1.0], [1.0, 0.0]], &[[0.0, 0.0], [1.0, 0.5]], 0.5), [178, 128, 128]),

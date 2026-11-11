@@ -7615,7 +7615,7 @@ impl App {
                 self.modified = true;
             }
             Drag::Raster { id, stroke, smooth, curve } => {
-                // smoothing happens in the curve (weighted by arc length, as Krita)
+                // smoothing happens in the curve (weighted by the path's length)
                 *smooth = (w, pressure);
                 self.stroke_fed = self.now;
                 let id = *id;
@@ -13736,7 +13736,7 @@ fn align_row(ui: &mut egui::Ui, a: &mut crate::doc::TextAlign, mixed: bool) -> b
 /// a drag moves one (between its neighbours), dragging one off the graph or
 /// double-clicking it removes it (two always stay). A right click on a
 /// point sets how its left, right or both sides meet their segments
-/// (Unity's tangent modes, Ash 11-02); a Free side has a handle on the
+/// (Constant, Linear, Free or Auto; Ash 11-02); a Free side has a handle on the
 /// picked point.
 fn curve_editor(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer, id: LayerId) -> bool {
     use crate::doc::{CurvePt, Tan, curve_identity, curve_slope};

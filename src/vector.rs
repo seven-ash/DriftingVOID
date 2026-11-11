@@ -201,8 +201,8 @@ fn capsule(p0: Pos2, r0: f32, p1: Pos2, r1: f32, seg_scale: f32) -> Vec<Pos2> {
     pts
 }
 
-/// The brush's path from the pen's samples, as Photoshop's smoothing behaves
-/// (Ash, 10-22):
+/// The brush's path from the pen's samples: the brush trails the pen and
+/// never overshoots or turns back (Ash, 10-22):
 ///
 /// 1. The pen's path: a quadratic B-spline through the samples (each piece
 ///    runs from one midpoint between samples to the next, bent by the sample

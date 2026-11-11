@@ -114,7 +114,7 @@ pub fn radius_card() -> u8 {
     }
 }
 
-/// Corner smoothing of the glass (0 = circular arcs, 0.6 = the iOS squircle).
+/// Corner smoothing of the glass (0 = circular arcs, 0.6 = a full squircle).
 pub fn corner_smoothing() -> f32 {
     static S: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     if let Some(v) = *S.get_or_init(|| std::env::var("DV_CORNER_SMOOTH").ok().and_then(|v| v.parse().ok())) {
