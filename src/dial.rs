@@ -306,6 +306,7 @@ impl Widget for Dial<'_> {
             return vertical_ui(self, ui);
         }
         let Dial { value, range, step, text, suffix, default, integer, key, nav, mixed, .. } = self;
+        let locked = crate::kit::locked();
         let (lo, hi) = (*range.start(), *range.end());
         let span = (hi - lo).max(1e-6);
         // value per tick; the ring moves TICK_PX per step so ticks track the pointer.
@@ -425,7 +426,7 @@ impl Widget for Dial<'_> {
                     let x = r.center().x + radius * a.sin();
                     let fade = a.cos().powf(1.6);
                     let h = r.height() * if end { 0.62 } else { [0.26, 0.36, 0.46][kind as usize] };
-                    let col = (if end { INK_2() } else if kind == 2 { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
+                    let col = (if locked { ACCENT.gamma_multiply(if end { 1.0 } else if kind == 2 { 0.8 } else { 0.5 }) } else if end { INK_2() } else if kind == 2 { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
                     p.line_segment([pos2(x, y - h * 0.5), pos2(x, y + h * 0.5)], Stroke::new(if kind > 0 || end { 1.3 } else { 1.0 }, col));
                 };
                 for (t, kind) in ticks {
@@ -464,6 +465,7 @@ impl Widget for Dial<'_> {
                 bu.set_clip_rect(ui.clip_rect().intersect(box_r.expand(1.0)));
                 bu.spacing_mut().interact_size.x = box_w;
                 let vr = bu.add_sized(box_r.size(), dv);
+                crate::kit::lock_edge(ui, vr.rect, vr.rect.height() * 0.5);
 
                 // ---- reset pin
                 let (pr, presp) = (pin_r, ui.interact(pin_r, rid.with("pin"), Sense::click()));
@@ -501,6 +503,7 @@ pub fn dial_u8(ui: &mut Ui, v: &mut u8, range: RangeInclusive<u8>, text: &str) -
 /// Upright variant: pin, ring (dragging up raises the value), number, label.
 fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
     let Dial { value, range, step, text, suffix, default, integer, height, .. } = d;
+    let locked = crate::kit::locked();
     let (lo, hi) = (*range.start(), *range.end());
     let span = (hi - lo).max(1e-6);
     let dt = step.unwrap_or_else(|| {
@@ -593,7 +596,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 let y = r.center().y + radius * a.sin();
                 let fade = a.cos().powf(1.6);
                 let half = r.width() * if end { 0.48 } else if major { 0.36 } else { 0.2 };
-                let col = (if end { INK_2() } else if major { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
+                let col = (if locked { ACCENT.gamma_multiply(if end { 1.0 } else if major { 0.8 } else { 0.5 }) } else if end { INK_2() } else if major { INK_3().gamma_multiply(1.6) } else { INK_3() }).gamma_multiply(fade);
                 p.line_segment([pos2(cx - half, y), pos2(cx + half, y)], Stroke::new(if major || end { 1.3 } else { 1.0 }, col));
             };
             for k in k0..=k1 {
@@ -616,6 +619,7 @@ fn vertical_ui(d: Dial<'_>, ui: &mut Ui) -> Response {
                 dv = dv.suffix(suffix.clone());
             }
             let vr = ui.add_sized(vec2(w, 18.0), dv);
+            crate::kit::lock_edge(ui, vr.rect, vr.rect.height() * 0.5);
             let (lr, _) = ui.allocate_exact_size(vec2(w, 13.0), Sense::hover());
             ui.painter().with_clip_rect(lr.expand2(vec2(6.0, 0.0))).text(lr.center(), Align2::CENTER_CENTER, &text, FontId::proportional(crate::theme::TEXT_SMALL - 0.5), crate::theme::LABEL());
             resp.union(vr)

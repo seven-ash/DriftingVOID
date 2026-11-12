@@ -661,6 +661,7 @@ fn color_row_mx(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut
     let id = ui.id().with(("hex", format!("{target:?}")));
     let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| hex_of(*c));
     let te = ui.add(egui::TextEdit::singleline(&mut buf).hint_text(crate::dial::MIXED).desired_width(76.0).font(egui::TextStyle::Monospace)); // "#RRGGBBAA" fits
+    crate::kit::lock_edge(ui, te.rect, te.rect.height() * 0.5);
     if te.changed() {
         if let Some(nc) = parse_hex(&buf) {
             *c = nc;
@@ -671,10 +672,12 @@ fn color_row_mx(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut
         buf = if mixed { String::new() } else { hex_of(*c) };
     }
     ui.data_mut(|d| d.insert_temp(id, buf));
-    if ui.add_enabled(!mixed, egui::Button::new(crate::i18n::tr("복사")).small()).glass_tip(crate::i18n::tr("헥스 코드 복사")).clicked() {
+    let copy = ui.add_enabled(!mixed, egui::Button::new(crate::i18n::tr("복사")).small());
+    crate::kit::lock_edge(ui, copy.rect, copy.rect.height() * 0.5);
+    if copy.glass_tip(crate::i18n::tr("헥스 코드 복사")).clicked() {
         ui.ctx().copy_text(hex_of(*c));
     }
-    let paste = ui.small_button(crate::i18n::tr("붙여넣기"));
+    let paste = crate::kit::small_button(ui, crate::i18n::tr("붙여넣기"));
     if (paste.rect.center().y - r.center().y).abs() < 4.0 {
         ui.data_mut(|d| d.insert_temp(wid, paste.rect.right() - r.left()));
     }
@@ -9369,11 +9372,13 @@ impl App {
                 // the button keeps its place; the name field takes what is left
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !matches!(l.kind, LayerKind::Audio(_)) {
-                        want_mask = ui.button(crate::i18n::tr("마스크")).glass_tip(crate::i18n::tr("마스크 추가·선택")).clicked();
+                        want_mask = crate::kit::button(ui, crate::i18n::tr("마스크")).glass_tip(crate::i18n::tr("마스크 추가·선택")).clicked();
                     }
                     if !matches!(l.kind, LayerKind::Text(_)) {
                         let w = ui.available_width() - 8.0; // the field's own margins
-                        changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(w.max(24.0))).changed();
+                        let nr = ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(w.max(24.0)));
+                        crate::kit::lock_edge(ui, nr.rect, nr.rect.height() * 0.5);
+                        changed |= nr.changed();
                     }
                 });
             });
@@ -9434,13 +9439,13 @@ impl App {
                     if let Some(v) = &mut im.video {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = SPACE_XS;
-                            if ui.button(if is_playing { crate::i18n::tr("멈춤") } else { crate::i18n::tr("재생") }).clicked() {
+                            if crate::kit::button(ui, if is_playing { crate::i18n::tr("멈춤") } else { crate::i18n::tr("재생") }).clicked() {
                                 vid_act = Some(VidAct::Play(!is_playing));
                             }
-                            if ui.button(crate::i18n::tr("이전")).glass_tip(crate::i18n::tr("이전 프레임 ( , )")).clicked() {
+                            if crate::kit::button(ui, crate::i18n::tr("이전")).glass_tip(crate::i18n::tr("이전 프레임 ( , )")).clicked() {
                                 vid_act = Some(VidAct::Step(-1));
                             }
-                            if ui.button(crate::i18n::tr("다음")).glass_tip(crate::i18n::tr("다음 프레임 ( . )")).clicked() {
+                            if crate::kit::button(ui, crate::i18n::tr("다음")).glass_tip(crate::i18n::tr("다음 프레임 ( . )")).clicked() {
                                 vid_act = Some(VidAct::Step(1));
                             }
                         });
@@ -9479,7 +9484,7 @@ impl App {
                             v.info.codec,
                             if v.info.audio { crate::i18n::tr(" · 소리 있음") } else { "" }
                         ));
-                        if ui.button(crate::i18n::tr("이 프레임을 사진으로")).glass_tip(crate::i18n::tr("지금 프레임을 원본 해상도 사진 레이어로 복사")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("이 프레임을 사진으로")).glass_tip(crate::i18n::tr("지금 프레임을 원본 해상도 사진 레이어로 복사")).clicked() {
                             vid_act = Some(VidAct::Still);
                         }
                         ui.separator();
@@ -9497,20 +9502,20 @@ impl App {
                         changed = true;
                     }
                     ui.horizontal(|ui| {
-                        if ui.button(crate::i18n::tr("원본 크기")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("원본 크기")).clicked() {
                             im.scale = 1.0;
                             changed = true;
                         }
-                        if ui.button(crate::i18n::tr("회전 0°")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("회전 0°")).clicked() {
                             im.rotation = 0.0;
                             changed = true;
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button(crate::i18n::tr("자르기…")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("자르기…")).clicked() {
                             start_crop = true;
                         }
-                        if ui.button(crate::i18n::tr("자르기 해제")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("자르기 해제")).clicked() {
                             let full = Rect::from_min_size(Pos2::ZERO, im.src.size());
                             let c = im.src_to_world(full.center());
                             im.crop = full;
@@ -9523,7 +9528,7 @@ impl App {
                     changed |= ui.add(crate::dial::Dial::new(&mut a.brightness, -1.0..=1.0).text(crate::i18n::tr("밝기")).default(0.0).mixed(mx_adj[0])).changed();
                     changed |= ui.add(crate::dial::Dial::new(&mut a.contrast, -1.0..=1.0).text(crate::i18n::tr("대비")).default(0.0).mixed(mx_adj[1])).changed();
                     changed |= ui.add(crate::dial::Dial::new(&mut a.saturation, -1.0..=1.0).text(crate::i18n::tr("채도")).default(0.0).mixed(mx_adj[2])).changed();
-                    if ui.button(crate::i18n::tr("보정 초기화")).clicked() {
+                    if crate::kit::button(ui, crate::i18n::tr("보정 초기화")).clicked() {
                         a.reset_tone();
                         changed = true;
                     }
@@ -9551,7 +9556,7 @@ impl App {
                             chroma_drop = ui.ctx().pointer_latest_pos();
                         }
                         sresp.glass_tip(crate::i18n::tr("캔버스로 끌어 색 선택"));
-                        if a.chroma.is_some() && ui.small_button(crate::i18n::tr("해제")).clicked() {
+                        if a.chroma.is_some() && crate::kit::small_button(ui, crate::i18n::tr("해제")).clicked() {
                             a.chroma = None;
                             changed = true;
                         }
@@ -9564,6 +9569,7 @@ impl App {
                 LayerKind::Text(t) => {
                     let s0 = t.frame();
                     let r = ui.add(egui::TextEdit::multiline(&mut t.text).desired_rows(3).desired_width(f32::INFINITY));
+                    crate::kit::lock_edge(ui, r.rect, 10.0);
                     changed |= r.changed();
                     if tool != Tool::Text {
                         changed |= ui.add(crate::dial::Dial::new(&mut t.size, 6.0..=400.0).step(2.0).text(crate::i18n::tr("크기")).key(km(ch::SIZE), &mut kh[1]).nav(kn(ch::SIZE), &mut kv[1]).mixed(mxc(ch::SIZE))).changed();
@@ -9690,7 +9696,7 @@ impl App {
                 }
                 LayerKind::Raster(r) => {
                     ui.label(crate::i18n::trf("타일 {}개", &[format!("{}", r.tiles.len())]));
-                    if ui.button(crate::i18n::tr("모두 지우기")).clicked() {
+                    if crate::kit::button(ui, crate::i18n::tr("모두 지우기")).clicked() {
                         r.tiles.clear();
                         changed = true;
                     }
@@ -9780,12 +9786,12 @@ impl App {
                     let on_wall = pl.wall.is_some();
                     if !on_wall {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button(crate::i18n::tr("공간 축에 맞추기")).glass_tip(crate::i18n::tr("가장 가까운 벽·바닥 방향으로")).clicked() {
+                        if crate::kit::button(ui, crate::i18n::tr("공간 축에 맞추기")).glass_tip(crate::i18n::tr("가장 가까운 벽·바닥 방향으로")).clicked() {
                             pl.align_to_axes();
                             changed = true;
                         }
                         if let Some(cam) = cams.get(&pl.space) {
-                            if ui.button(crate::i18n::tr("2D 모습 유지")).glass_tip(crate::i18n::tr("지금 카메라 기준으로 다시 맞춤")).clicked() {
+                            if crate::kit::button(ui, crate::i18n::tr("2D 모습 유지")).glass_tip(crate::i18n::tr("지금 카메라 기준으로 다시 맞춤")).clicked() {
                                 let f = crate::persp::Placement::facing(pl.space, cam, pl.anchor);
                                 pl.base_r = f.base_r;
                                 pl.base_t = f.base_t;
@@ -10743,11 +10749,7 @@ impl App {
                                         theme::lock_icon(ui.painter(), r.center(), ACCENT);
                                         ui.label(egui::RichText::new(crate::i18n::tr("잠김")).color(ACCENT));
                                     });
-                                    ui.scope(|ui| {
-                                        ui.visuals_mut().disabled_alpha = 1.0;
-                                        ui.disable();
-                                        self.properties(ui);
-                                    });
+                                    crate::kit::with_locked(ui, |ui| self.properties(ui));
                                 } else {
                                     self.properties(ui);
                                 }
@@ -12742,6 +12744,7 @@ fn font_picker_mx(ui: &mut egui::Ui, id: &str, family: &mut String, style: &mut 
         }));
         // the wheel over the closed box: the family before / after (the
         // default first, then the installed ones in order)
+        crate::kit::lock_edge(ui, combo.response.rect, combo.response.rect.height() * 0.5);
         let step = crate::kit::dd_button(ui, id, &combo.response);
         if let (true, Some(fams)) = (step != 0 && !mixed_family, &fams) {
             let at = if family.is_empty() { Some(0) } else { fams.iter().position(|f| f.name == *family).map(|i| i + 1) };
@@ -14378,6 +14381,8 @@ fn pair_boxes(ui: &mut egui::Ui, la: &str, a: impl egui::Widget, lb: &str, b: im
     let ra = ui.add_sized([w, h], a);
     lab(ui, lb);
     let rb = ui.add_sized([w, h], b);
+    crate::kit::lock_edge(ui, ra.rect, ra.rect.height() * 0.5);
+    crate::kit::lock_edge(ui, rb.rect, rb.rect.height() * 0.5);
     (ra, rb)
 }
 

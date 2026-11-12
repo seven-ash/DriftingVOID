@@ -12,6 +12,55 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, S
 
 use crate::theme::{self, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, INK_3, ROW_H, SPACE_SM, SPACE_XS};
 
+thread_local! {
+    static LOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Are the controls being drawn those of a locked layer? (`with_locked`)
+pub fn locked() -> bool {
+    LOCKED.with(|l| l.get())
+}
+
+/// Draws `add` as a locked layer's controls (Ash, 11-12): they take no input,
+/// their values keep full ink, dials turn to the accent and the fields get
+/// `lock_edge`.
+pub fn with_locked<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let was = LOCKED.with(|l| l.replace(true));
+    let out = ui.scope(|ui| {
+        ui.visuals_mut().disabled_alpha = 1.0;
+        ui.disable();
+        add(ui)
+    });
+    LOCKED.with(|l| l.set(was));
+    out.inner
+}
+
+/// A locked control's edge: the accent along the inside of `r`, fading
+/// inwards. Draws nothing outside `with_locked`.
+pub fn lock_edge(ui: &Ui, r: Rect, radius: f32) {
+    if !locked() {
+        return;
+    }
+    for (i, a) in [0.8, 0.4, 0.2, 0.08].into_iter().enumerate() {
+        let d = i as f32;
+        ui.painter().rect_stroke(r.shrink(d), CornerRadius::same((radius - d).max(0.0) as u8), Stroke::new(1.0, ACCENT.gamma_multiply(a)), StrokeKind::Inside);
+    }
+}
+
+/// `ui.button`, with a locked layer's edge where that applies.
+pub fn button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
+    let r = ui.button(text);
+    lock_edge(ui, r.rect, r.rect.height() * 0.5);
+    r
+}
+
+/// `ui.small_button`, with a locked layer's edge where that applies.
+pub fn small_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
+    let r = ui.small_button(text);
+    lock_edge(ui, r.rect, r.rect.height() * 0.5);
+    r
+}
+
 /// Ink of a state glyph: unavailable, on, or off.
 pub fn state_ink(on: bool, enabled: bool) -> Color32 {
     if !enabled {
@@ -80,6 +129,7 @@ pub fn switch_mixed(ui: &mut Ui, on: &mut bool, text: &str, mixed: bool) -> Resp
         p.galley_with_override_text_color(pos2(tr.right() + SPACE_SM, r.center().y - galley.size().y * 0.5), galley, col);
     }
     focus_ring(ui, &resp, tr, rad);
+    lock_edge(ui, tr, rad);
     resp
 }
 
@@ -175,6 +225,7 @@ pub fn segmented_en<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T,
         focus_ring(ui, &sresp, sr, inner);
         resp = resp.union(sresp);
     }
+    lock_edge(ui, r, outer);
     resp
 }
 
@@ -399,6 +450,7 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, salt: impl egui::AsIdSalt + C
             }
         }
     }
+    lock_edge(ui, r.response.rect, r.response.rect.height() * 0.5);
     (picked, r.response)
 }
 
