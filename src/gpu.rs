@@ -224,9 +224,6 @@ pub struct Gpu {
     /// Brush strokes' dabs by stroke and scale (`brush::DabSet`), so a part
     /// of a layer drawn again lays none of them again.
     dab_sets: HashMap<(u64, u32), (Arc<crate::brush::DabSet>, u64)>,
-    /// Each brush layer's squares as last made (scale, the layer's content
-    /// key, canvas pixels and picture), shown scaled while the canvas zooms.
-    brush_last: HashMap<LayerId, (f32, u64, Vec<([i32; 4], Arc<wgpu::Texture>)>, u64)>,
     frame: u64,
     /// A picture drawn between the canvas's frames (`render_aside`).
     aside: bool,
@@ -699,7 +696,6 @@ impl Gpu {
             atlases: HashMap::new(),
             pages: HashMap::new(),
             dab_sets: HashMap::new(),
-            brush_last: HashMap::new(),
             edge_bufs: HashMap::new(),
             frame: 0,
             aside: false,
@@ -713,7 +709,6 @@ impl Gpu {
         self.atlases.clear();
         self.pages.clear();
         self.dab_sets.clear();
-        self.brush_last.clear();
         self.edge_bufs.clear();
         self.flat = Arc::default();
         self.rasters.clear();
@@ -996,7 +991,6 @@ impl Gpu {
         self.atlases.retain(|_, a| a.used + 600 >= g);
         self.pages.retain(|_, p| p.used + 600 >= g);
         self.dab_sets.retain(|_, v| v.1 + 120 >= g);
-        self.brush_last.retain(|_, v| v.3 + 600 >= g);
         self.edge_bufs.retain(|_, v| v.2 + 1800 >= g);
         self.ms_pool.retain(|_, v| v.3 + 30 >= g);
         self.flat.sweep();
@@ -1333,33 +1327,20 @@ impl Gpu {
         let crate::doc::LayerKind::Raster(r) = &layer.kind else { return };
         let Some([ox, oy]) = v.origin else { return };
         let Some(b) = layer.bounds() else { return };
-        let s = v.s;
+        // while the canvas zooms, the squares are made at the next finer step
+        // of √2 and shown a little smaller: one set serves every frame within
+        // that step, stays sharp (never enlarged), and the squares that come
+        // into view are made at once. At rest: the canvas's own scale.
+        let s = if v.zooming { 2f32.powf((v.s.log2() * 2.0).ceil() / 2.0).max(v.s) } else { v.s };
+        let k = s / v.s;
         let lb = [(b.min.x * s).floor() as i32 - 1, (b.min.y * s).floor() as i32 - 1, (b.max.x * s).ceil() as i32 + 1, (b.max.y * s).ceil() as i32 + 1];
-        let a = [lb[0].max(ox), lb[1].max(oy), lb[2].min(ox + v.tw as i32), lb[3].min(oy + v.th as i32)];
+        let view = [(ox as f32 * k).floor() as i32, (oy as f32 * k).floor() as i32, ((ox + v.tw as i32) as f32 * k).ceil() as i32, ((oy + v.th as i32) as f32 * k).ceil() as i32];
+        let a = [lb[0].max(view[0]), lb[1].max(view[1]), lb[2].min(view[2]), lb[3].min(view[3])];
         if a[2] <= a[0] || a[3] <= a[1] {
             return;
         }
-        // zooming: the squares made at the scale before, scaled (made sharp
-        // once the zoom rests, as the 3D layers are)
-        let whole = crate::canvas::content_key(layer);
         let frame = self.frame;
-        if v.zooming {
-            if let Some(last) = self.brush_last.get_mut(&layer.id).filter(|l| l.1 == whole && l.0 != s) {
-                last.3 = frame;
-                let k = last.0 / s;
-                for (px, tex) in &last.2 {
-                    let q = [px[0] as f32 / k - ox as f32, px[1] as f32 / k - oy as f32, px[2] as f32 / k - ox as f32, px[3] as f32 / k - oy as f32];
-                    let rect = [(q[0].floor() as i32).max(0), (q[1].floor() as i32).max(0), (q[2].ceil() as i32).min(v.tw as i32), (q[3].ceil() as i32).min(v.th as i32)];
-                    if rect[2] <= rect[0] || rect[3] <= rect[1] {
-                        continue;
-                    }
-                    let inv = [[k, 0.0, ox as f32 * k - px[0] as f32], [0.0, k, oy as f32 * k - px[1] as f32]];
-                    out.push(Node::Image { img: Img::Ready(tex.clone()), inv, rect, opacity: layer.opacity, nearest: false, px_per_src: 1e6, level: 0.0 });
-                }
-                return;
-            }
-        }
-        let mut made: Vec<([i32; 4], Arc<wgpu::Texture>)> = Vec::new();
+        let vkey = [0, 0, s.to_bits(), v.k.to_bits()];
         use std::hash::{Hash, Hasher};
         let base = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1393,7 +1374,7 @@ impl Gpu {
                 if ids.is_empty() && !has_pixels {
                     continue;
                 }
-                let key = Key { id: layer.id, content: content(&ids), rect: px, view: v.key() };
+                let key = Key { id: layer.id, content: content(&ids), rect: px, view: vkey };
                 let tex = match self.rasters.get_mut(&key) {
                     Some(e) => {
                         e.1 = frame;
@@ -1411,11 +1392,19 @@ impl Gpu {
                         t
                     }
                 };
-                made.push((px, tex.clone()));
-                out.push(Node::Over { img: Img::Ready(tex), off: [px[0] - ox, px[1] - oy], opacity: layer.opacity });
+                if k == 1.0 {
+                    out.push(Node::Over { img: Img::Ready(tex), off: [px[0] - ox, px[1] - oy], opacity: layer.opacity });
+                } else {
+                    // target pixel t -> square pixel (t + origin) k - corner
+                    let q = [px[0] as f32 / k - ox as f32, px[1] as f32 / k - oy as f32, px[2] as f32 / k - ox as f32, px[3] as f32 / k - oy as f32];
+                    let rect = [(q[0].floor() as i32).max(0), (q[1].floor() as i32).max(0), (q[2].ceil() as i32).min(v.tw as i32), (q[3].ceil() as i32).min(v.th as i32)];
+                    if rect[2] > rect[0] && rect[3] > rect[1] {
+                        let inv = [[k, 0.0, ox as f32 * k - px[0] as f32], [0.0, k, oy as f32 * k - px[1] as f32]];
+                        out.push(Node::Image { img: Img::Ready(tex), inv, rect, opacity: layer.opacity, nearest: false, px_per_src: 1e6, level: 0.0 });
+                    }
+                }
             }
         }
-        self.brush_last.insert(layer.id, (s, whole, made, frame));
     }
 
     /// One square of a brush layer (canvas pixels `px` at scale `s`): from
@@ -3227,6 +3216,43 @@ mod tests {
         });
     }
 
+    /// While zooming, a brush layer is drawn from squares made at the next
+    /// √2 step, a little reduced: it covers what the sharp picture covers
+    /// (nothing missing, Ash 11-12) and differs from it only at soft edges.
+    #[test]
+    fn a_brush_layer_while_zooming_looks_like_at_rest() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer};
+        let mut r = RasterLayer::default();
+        for k in 0..8 {
+            let pts: Vec<[f32; 3]> = (0..=120).map(|i| [i as f32 * 8.0, k as f32 * 60.0 + (i as f32 * 0.1).sin() * 40.0, 1.0]).collect();
+            let p = BrushParams { color: Color32::from_rgb(220, 90, 40), radius: 6.0 + k as f32 * 3.0, opacity: 1.0, hardness: 0.7, pressure_size: false, pressure_opacity: false, erase: false };
+            r.strokes.push(Arc::new(BStroke::new(pts, p)));
+        }
+        let mut doc = Document::default();
+        doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+        let ok = with_gpu(|g| {
+            let (w, h) = (900u32, 600u32);
+            let out = g.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING);
+            for s in [0.8f32, 1.2] {
+                let mut pic = |zooming: bool| {
+                    g.clear();
+                    g.render_canvas(&doc, pos2(-40.0, -80.0), s, &out, None, zooming, None);
+                    read(g, &out, w, h)
+                };
+                let (rest, zoom) = (pic(false), pic(true));
+                let cov = |p: &[u8]| p.chunks(4).filter(|x| x[3] > 128).count() as f64;
+                let (a, b) = (cov(&rest), cov(&zoom));
+                let mean = rest.iter().zip(&zoom).map(|(x, y)| x.abs_diff(*y) as f64).sum::<f64>() / rest.len() as f64;
+                eprintln!("at {s}: covered {a} at rest, {b} zooming; mean difference {mean:.2}");
+                assert!((a - b).abs() / a < 0.02 && mean < 1.5, "at {s}: covered {a} / {b}, mean {mean:.2}");
+            }
+        });
+        if ok.is_none() {
+            eprintln!("no GPU: skipped");
+        }
+    }
+
     /// A stroke drawn frame by frame over a brush layer far bigger than the
     /// view (its picture cut to the view) ends up as the same picture as
     /// the layer drawn whole from nothing.
@@ -3271,7 +3297,8 @@ mod tests {
 
     /// The frames that stutter (Ash, 11-12, after 0.108.1): 60 strokes drawn
     /// at 1 % (brushes 12 to 120), seen at 100 % in a 2560 × 1440 view,
-    /// panned 30 px a frame for 120 frames, then zoomed in steps; the
+    /// panned 30 px a frame for 120 frames, then zoomed in steps of 10 %
+    /// (each made sharp, and while zooming: squares at the next √2 step); the
     /// render alone (no read back), timed per frame.
     /// `cargo test --release bench_brush_hitches -- --ignored --nocapture`
     #[test]
@@ -3304,9 +3331,11 @@ mod tests {
             eprintln!("panning: median {:.1} ms, worst {:.1}, {slow} of 120 frames over 16 ms", ms[60], ms[119]);
             let zs: Vec<f64> = [1.0f32, 1.1, 1.21, 1.33, 1.46, 1.6].iter().map(|&s| frame(g, pos2(20000.0, 4000.0), s, false)).collect();
             eprintln!("zoom steps, each made sharp: {:?} ms", zs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
-            let zs: Vec<f64> = [1.6f32, 1.76, 1.94, 2.13, 2.34, 2.58].iter().map(|&s| frame(g, pos2(20000.0, 4000.0), s, true)).collect();
-            let rest = frame(g, pos2(20000.0, 4000.0), 2.58, false);
-            eprintln!("zoom steps while zooming: {:?} ms, then at rest {rest:.1} ms", zs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+            for (name, steps) in [("in", [1.6f32, 1.76, 1.94, 2.13, 2.34, 2.58, 2.84, 3.12]), ("out", [3.12f32, 2.84, 2.58, 2.34, 2.13, 1.94, 1.76, 1.6])] {
+                let zs: Vec<f64> = steps.iter().map(|&s| frame(g, pos2(20000.0, 4000.0), s, true)).collect();
+                let rest = frame(g, pos2(20000.0, 4000.0), steps[steps.len() - 1], false);
+                eprintln!("zooming {name}, 10 % a frame: {:?} ms, then at rest {rest:.1} ms", zs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+            }
         });
     }
 
