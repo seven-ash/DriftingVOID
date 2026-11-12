@@ -11,7 +11,9 @@
 //!
 //! The network goes through Windows' own curl.exe (Windows 10 1803+), so the
 //! app carries no HTTP or TLS stack. Dev builds (no release version) never
-//! check.
+//! check. Neither does a build run from an unzipped folder (Ash, 11-12): the
+//! installer would put the new version elsewhere and leave that folder as it
+//! was, so the unzipped build stays the version it is.
 //!
 //! Captures and tests: `DV_UPDATE_CURRENT=<version>` stands in for the
 //! release version (a dev build then checks too), `DV_UPDATE_FAKE=<version>`
@@ -60,6 +62,25 @@ pub struct Updater {
 /// The release this build is ("" for a dev build).
 pub fn current() -> String {
     std::env::var("DV_UPDATE_CURRENT").unwrap_or_else(|_| env!("DV_RELEASE").to_string())
+}
+
+/// Was this build put here by the installer? (Its uninstaller lies beside
+/// the program.) An unzipped build has no updates. `DV_UPDATE_CURRENT` and
+/// `DV_UPDATE_FAKE` count as installed, for captures and tests.
+pub fn installed() -> bool {
+    static I: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *I.get_or_init(|| {
+        if std::env::var_os("DV_UPDATE_CURRENT").is_some() || std::env::var_os("DV_UPDATE_FAKE").is_some() {
+            return true;
+        }
+        let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        dir.and_then(|d| std::fs::read_dir(d).ok()).is_some_and(|rd| {
+            rd.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                n.starts_with("unins") && n.ends_with(".exe")
+            })
+        })
+    })
 }
 
 /// Is release version `a` newer than `b`? Their numbers compared in order
@@ -150,7 +171,7 @@ impl Updater {
         }
         let cur = current();
         // (a downloaded installer stays ready: asking again would drop it)
-        if cur.is_empty() || matches!(self.state(), State::Checking | State::Downloading(..) | State::Ready(..)) {
+        if cur.is_empty() || !installed() || matches!(self.state(), State::Checking | State::Downloading(..) | State::Ready(..)) {
             return;
         }
         self.set(State::Checking);

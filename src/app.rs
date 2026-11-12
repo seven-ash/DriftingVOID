@@ -2667,7 +2667,7 @@ impl App {
         let t = if v.time >= v.info.duration - v.info.frame_len() * 1.5 { 0.0 } else { v.time };
         if solo && v.info.audio && !v.mute {
             if let Some(Some(data)) = self.audio_cache.get(&v.path).cloned() {
-                let voice = crate::audio::Voice { data, t0: 0.0, src0: t, speed: v.speed, span: (0.0, f64::MAX), gain: v.volume, env: None };
+                let voice = crate::audio::Voice { data, t0: 0.0, src0: t, speed: v.speed, span: (0.0, f64::MAX), gain: v.volume, env: None, wrap: None };
                 if let Some(o) = self.audio_output() {
                     o.play(vec![voice], 0.0);
                 }
@@ -4848,7 +4848,7 @@ impl App {
             }
             if let Some(Some(d)) = self.audio_cache.get(&a.path) {
                 let env = crate::anim::vol_envelope(an, s0, e0).map(Arc::new);
-                out.push(crate::audio::Voice { data: d.clone(), t0: s0, src0: an.video_start, speed: 1.0, span: (s0, e0), gain: a.volume, env });
+                out.push(crate::audio::Voice { data: d.clone(), t0: s0, src0: an.video_start, speed: 1.0, span: (s0, e0), gain: a.volume, env, wrap: None });
             }
         }
         for l in &self.doc.layers {
@@ -4860,7 +4860,7 @@ impl App {
             if l.visible {
                 let end = span.1.min(self.doc.timeline.duration.max(t0) + 1.0);
                 let env = l.anim.as_ref().and_then(|a| crate::anim::vol_envelope(a, span.0.max(0.0), end)).map(Arc::new);
-                out.push(crate::audio::Voice { data: d.clone(), t0, src0, speed: v.speed, span, gain: v.volume, env });
+                out.push(crate::audio::Voice { data: d.clone(), t0, src0, speed: v.speed, span, gain: v.volume, env, wrap: v.looping.then_some(v.info.duration) });
             }
         }
         out
@@ -10449,7 +10449,8 @@ impl App {
                 }
                 ui.separator();
                 // updates: the switch, then the row that acts (Ash, 11-02)
-                if crate::kit::switch(ui, &mut self.s.update_check, crate::i18n::tr("업데이트 확인")).glass_tip(crate::i18n::tr("시작할 때 GitHub에서 새 릴리즈 확인")).changed() {
+                let inst = crate::update::installed();
+                if ui.add_enabled_ui(inst, |ui| crate::kit::switch(ui, &mut self.s.update_check, crate::i18n::tr("업데이트 확인"))).inner.glass_tip(crate::i18n::tr("시작할 때 GitHub에서 새 릴리즈 확인")).changed() {
                     self.save_prefs();
                     if self.s.update_check {
                         self.upd.check(ui.ctx());
@@ -10459,6 +10460,7 @@ impl App {
                 let cur = crate::update::current();
                 let (key, can) = match self.upd.state() {
                     _ if cur.is_empty() => (crate::i18n::tr("개발 빌드").to_string(), false),
+                    _ if !inst => (crate::i18n::tr("설치본 전용").to_string(), false),
                     State::Checking => (crate::i18n::tr("확인 중…").to_string(), false),
                     State::Latest => (crate::i18n::trf("최신 {}", &[cur.clone()]), true),
                     State::Available(r) => (format!("→ {}", r.version), true),

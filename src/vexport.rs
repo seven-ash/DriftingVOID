@@ -730,7 +730,7 @@ mod tests {
         k1.center[0] += 100.0;
         l.anim = Some(crate::anim::Anim { keys: vec![k0, k1], ..Default::default() });
         let tone = Arc::new(crate::audio::AudioData::from_samples(48_000, (0..96_000).map(|i| ((i / 2) as f32 * 0.05).sin() * 0.3).collect()));
-        let voice = crate::audio::Voice { data: tone, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 10.0), gain: 1.0, env: None };
+        let voice = crate::audio::Voice { data: tone, t0: 0.0, src0: 0.0, speed: 1.0, span: (0.0, 10.0), gain: 1.0, env: None, wrap: None };
         let out = std::env::temp_dir().join("dv_export_test.mp4");
         let _ = std::fs::remove_file(&out);
         let job = Job {
