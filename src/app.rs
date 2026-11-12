@@ -579,6 +579,13 @@ fn parse_hex(s: &str) -> Option<Color32> {
     }
 }
 
+/// The hue at the top (and bottom) of the palette's hue bar: pure red. The
+/// colour model's own zero is a pinkish red, so the bar is turned to start here.
+fn hue_top() -> f32 {
+    static H: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *H.get_or_init(|| crate::okhsv::from_rgb(Color32::from_rgb(255, 0, 0), 0.0).0)
+}
+
 /// Swatch (opens the palette for this field) + editable hex + copy / paste.
 fn color_row(ui: &mut egui::Ui, c: &mut Color32, target: PalTarget, req: &mut PalReq) -> bool {
     color_row_mx(ui, c, target, req, false)
@@ -9481,8 +9488,12 @@ impl App {
                         ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                             let mut has = t.bg.is_some();
                             if crate::kit::switch_mixed(ui, &mut has, crate::i18n::tr("배경 상자"), mxs.bg_has).changed() {
+                                // switched off: this layer's colour is the one that comes back
+                                if let Some(old) = t.bg {
+                                    self.s.text_bg_color = old;
+                                }
                                 // from mixed, a click turns it on for all
-                                t.bg = (has || mxs.bg_has).then(|| t.bg.unwrap_or(self.s.text_bg_color));
+                                t.bg =(has || mxs.bg_has).then(|| t.bg.unwrap_or(self.s.text_bg_color));
                                 changed = true;
                                 if mxs.bg_has {
                                     force.push(Force::TextBg(t.bg));
@@ -10772,7 +10783,7 @@ impl App {
             }
         }
         if p.hue_tex.is_none() {
-            let px: Vec<Color32> = (0..256).map(|i| crate::okhsv::to_rgb(i as f32 / 255.0, 0.9, 0.95)).collect();
+            let px: Vec<Color32> = (0..256).map(|i| crate::okhsv::to_rgb((i as f32 / 255.0 + hue_top()).rem_euclid(1.0), 0.9, 0.95)).collect();
             p.hue_tex = Some(ctx.load_texture("palette_hue", egui::ColorImage::new([1, 256], px), egui::TextureOptions::LINEAR));
         }
         if !p.sub_down {
@@ -10838,10 +10849,10 @@ impl App {
                         ui.painter().image(p.hue_tex.as_ref().unwrap().id(), hr, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
                         if hresp.is_pointer_button_down_on() {
                             if let Some(pp) = hresp.interact_pointer_pos() {
-                                picked = Some((((pp.y - hr.top()) / SQ).clamp(0.0, 0.999), p.s, p.v));
+                                picked = Some(((((pp.y - hr.top()) / SQ).clamp(0.0, 0.999) + hue_top()).rem_euclid(1.0), p.s, p.v));
                             }
                         }
-                        let hy = hr.top() + p.h * SQ;
+                        let hy = hr.top() + (p.h - hue_top()).rem_euclid(1.0) * SQ;
                         ui.painter().rect_stroke(Rect::from_center_size(pos2(hr.center().x, hy), vec2(20.0, 6.0)), 3.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Middle);
                     });
                     ui.add_space(SPACE_SM);
@@ -13670,6 +13681,10 @@ fn text_look_ui(ui: &mut egui::Ui, look: &mut crate::doc::TextLook, has_box: boo
         ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
             let mut on = c.is_some();
             if crate::kit::switch(ui, &mut on, text).changed() {
+                // switched off: this layer's colour is the one that comes back
+                if let Some(old) = *c {
+                    *mem = old;
+                }
                 *c = on.then_some(*mem);
                 ch = true;
             }
@@ -14416,6 +14431,8 @@ mod tests {
         let m = mixed_style(&a, &[&b]);
         assert!(m.blend && m.bg_has, "blend and the background box differ");
         assert!(!m.color && !m.family && !m.style && !m.align && !m.bg, "the rest is the same");
+        // the hue bar starts at pure red
+        assert_eq!(crate::okhsv::to_rgb(hue_top(), 1.0, 1.0), Color32::from_rgb(255, 0, 0));
         // 보통 picked on the mixed 혼합: the first already has it, so nothing
         // changed there to spread; the forced value still reaches the other
         Force::TextBlend(Blend::Normal).apply(&mut b);
