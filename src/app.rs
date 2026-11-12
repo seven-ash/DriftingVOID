@@ -593,14 +593,22 @@ fn parse_hex(s: &str) -> Option<Color32> {
 /// stay as `now` has them. Where that moves the restored document's time,
 /// its keyed layers show the playhead's moment (at the same time they keep
 /// what they had, a change without a key included). A video layer's own
-/// preview position stays too (the same clip in both).
+/// preview position, loop switch and speed stay too (the same clip in both),
+/// and a space's grid switch.
 fn keep_navigation(doc: &mut Document, now: &Document) {
+    for s in &mut doc.spaces {
+        if let Some(cur) = now.spaces.iter().find(|c| c.id == s.id) {
+            s.grid = cur.grid;
+        }
+    }
     for l in &mut doc.layers {
         let LayerKind::Image(im) = &mut l.kind else { continue };
         let Some(v) = im.video.as_mut() else { continue };
         if let Some(LayerKind::Image(cur)) = now.get(l.id).map(|c| &c.kind) {
             if let Some(cv) = cur.video.as_ref().filter(|cv| cv.path == v.path) {
                 v.time = cv.time;
+                v.looping = cv.looping;
+                v.speed = cv.speed;
             }
         }
     }
@@ -2197,6 +2205,15 @@ impl App {
     fn mark(&mut self) {
         self.changed = true;
         self.modified = true;
+    }
+
+    /// A change undo does not cover (a video's loop switch and speed, a
+    /// space's grid switch; Ash, 11-12): the document is modified, and the
+    /// last history state takes the value too, so no step is made for it.
+    fn mark_quiet(&mut self) {
+        self.modified = true;
+        self.doc_rev += 1;
+        keep_navigation(&mut self.committed, &self.doc);
     }
 
     fn commit_if_idle(&mut self, typing: bool) {
@@ -9314,6 +9331,8 @@ impl App {
         let tool = self.tool;
         let shape_tool = matches!(tool, Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse);
         let mut changed = false;
+        // (a change undo does not cover: `mark_quiet`)
+        let mut quiet = false;
         let mut pal_req: PalReq = None;
         let mut start_crop = false;
         let mut want_mask = false;
@@ -9440,11 +9459,11 @@ impl App {
                         crate::kit::row(ui, crate::i18n::tr("속도"), |ui| {
                             if crate::kit::segmented(ui, &mut v.speed, &[(0.25, "0.25×"), (0.5, "0.5×"), (1.0, "1×"), (2.0, "2×"), (4.0, "4×")]).changed() {
                                 vid_act = Some(VidAct::Restart);
-                                changed = true;
+                                quiet = true;
                             }
                         });
                         ui.horizontal_wrapped(|ui| {
-                            changed |= crate::kit::switch(ui, &mut v.looping, crate::i18n::tr("반복")).changed();
+                            quiet |= crate::kit::switch(ui, &mut v.looping, crate::i18n::tr("반복")).changed();
                             if v.info.audio {
                                 changed |= crate::kit::switch(ui, &mut v.mute, crate::i18n::tr("소리 끔")).changed();
                             }
@@ -9807,6 +9826,10 @@ impl App {
                 }
             }
             self.mark();
+        }
+        if quiet {
+            self.spread_edit(&before);
+            self.mark_quiet();
         }
         let kc = kh.iter().enumerate().filter(|x| *x.1).fold(0u16, |a, (i, _)| a | (1 << i));
         if kc != 0 {
@@ -11644,7 +11667,8 @@ impl App {
         }
         let all3 = (0..3).all(|a| sp.count(a) >= 2);
         let (mut grid, mut fpp) = (sp.grid, sp.free_pp);
-        let mut ch = crate::kit::switch(ui, &mut grid, crate::i18n::tr("격자")).changed();
+        let grid_ch = crate::kit::switch(ui, &mut grid, crate::i18n::tr("격자")).changed();
+        let mut ch = false;
         let mut light = sp.light;
         let mut lon = light.is_some();
         let mut lch = crate::kit::switch(ui, &mut lon, crate::i18n::tr("조명")).glass_tip(crate::i18n::tr("두께 있는 객체에 방향광 음영")).changed();
@@ -11780,8 +11804,8 @@ impl App {
             s.mask = None;
             ch = true;
         }
+        s.grid = grid;
         if ch {
-            s.grid = grid;
             s.free_pp = fpp;
         }
         if lch {
@@ -11856,6 +11880,9 @@ impl App {
             self.space_sel = self.doc.spaces.last().map(|s| s.id);
             self.space_line = None;
             ch = true;
+        }
+        if grid_ch {
+            self.mark_quiet();
         }
         if ch {
             self.mark();
