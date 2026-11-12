@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later AND MIT
 // Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
-// Pen (vector) strokes filled on the GPU (src/gpu.rs, raster_strokes). A
+// Pen and brush strokes filled on the GPU (src/gpu.rs, raster_strokes,
+// brush_strokes). A
 // stroke is a chain of tapered capsules; as the CPU fills their union, each
 // pixel takes the largest coverage of the stroke's capsules (vs_seg/fs_seg,
 // max blend into a coverage target cleared over the stroke's box by
@@ -100,6 +101,44 @@ fn fs_seg(i: SegOut) -> @location(0) vec4f {
     // a stroke thinner than a pixel covers about its width
     let c = clamp(0.5 - d, 0.0, min(1.0, i.a.z + i.b.z));
     return vec4f(c);
+}
+
+// Brush strokes (src/brush.rs): each dab's coverage, the largest per pixel
+// over the stroke (max blend into an R16Float target), as `brush::dab_alpha`.
+// a: centre x, y, radius (target pixels), alpha; b.x: hardness.
+struct DabOut {
+    @builtin(position) pos: vec4f,
+    @location(0) d: vec4f,
+    @location(1) h: f32,
+}
+
+@vertex
+fn vs_dab(i: SegIn, @builtin(vertex_index) vi: u32) -> DabOut {
+    var o: DabOut;
+    let r = i.a.z + 1.0;
+    let lo = max(i.a.xy - r, s.rect.xy);
+    let hi = max(min(i.a.xy + r, s.rect.zw), lo);
+    o.pos = ndc(mix(lo, hi, corner(vi)));
+    o.d = i.a;
+    o.h = i.b.x;
+    return o;
+}
+
+@fragment
+fn fs_dab(i: DabOut) -> @location(0) vec4f {
+    let r = i.d.z;
+    let d = length(i.pos.xy - i.d.xy);
+    if d > r + 0.5 {
+        discard;
+    }
+    let inner = r * clamp(i.h, 0.0, 1.0);
+    let soft = max(r - inner, 1e-3);
+    var a = 1.0;
+    if d > inner {
+        let t = clamp((d - inner) / soft, 0.0, 1.0);
+        a = 1.0 - t * t * (3.0 - 2.0 * t);
+    }
+    return vec4f(min(a, clamp(r + 0.5 - d, 0.0, 1.0)) * i.d.w);
 }
 
 @vertex

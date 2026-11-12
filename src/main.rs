@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod audio;
+mod brush;
 mod calc;
 mod dial;
 mod edges;

@@ -1,6 +1,6 @@
 [package]
 name = "drifting-void"
-version = "0.107.3"
+version = "0.107.4"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/seven-ash/DriftingVOID"

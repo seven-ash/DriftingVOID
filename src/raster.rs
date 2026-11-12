@@ -406,56 +406,25 @@ pub struct RasterStroke {
     pub p: BrushParams,
     mask: HashMap<(i32, i32), Vec<f32>>,
     orig: HashMap<(i32, i32), Option<Arc<Tile>>>,
-    last: Option<(Pos2, f32)>,
-    carry: f32,
+    /// Where the dabs go (`brush::Stepper`, one pixel per layer unit).
+    steps: crate::brush::Stepper,
+    dabs: Vec<crate::brush::Dab>,
 }
 
 impl RasterStroke {
     pub fn new(p: BrushParams) -> Self {
-        Self { p, mask: HashMap::new(), orig: HashMap::new(), last: None, carry: 0.0 }
-    }
-
-    fn radius_at(&self, pressure: f32) -> f32 {
-        let r = if self.p.pressure_size { self.p.radius * (0.12 + 0.88 * pressure) } else { self.p.radius };
-        r.max(0.5)
-    }
-
-    fn alpha_at(&self, pressure: f32) -> f32 {
-        if self.p.pressure_opacity { pressure.clamp(0.0, 1.0) } else { 1.0 }
+        Self { p, mask: HashMap::new(), orig: HashMap::new(), steps: crate::brush::Stepper::new(p, 1.0), dabs: Vec::new() }
     }
 
     /// `p` is in the layer's local pixel space.
     pub fn add_point(&mut self, layer: &mut RasterLayer, p: Pos2, pressure: f32) {
-        let pressure = pressure.clamp(0.0, 1.0);
-        match self.last {
-            None => {
-                self.dab(layer, p, self.radius_at(pressure), self.alpha_at(pressure));
-                self.last = Some((p, pressure));
-                self.carry = 0.0;
-            }
-            Some((q, qp)) => {
-                let d = p - q;
-                let dist = d.length();
-                if dist < 1e-4 {
-                    return;
-                }
-                // `t` is the position of the previous dab relative to q along the segment.
-                let mut t = -self.carry;
-                loop {
-                    let pr = qp + (pressure - qp) * (t.max(0.0) / dist).min(1.0);
-                    let step = (self.radius_at(pr) * 0.12).max(0.35);
-                    if t + step > dist {
-                        self.carry = dist - t;
-                        break;
-                    }
-                    t += step;
-                    let c = q + d * (t / dist);
-                    let pr = qp + (pressure - qp) * (t / dist);
-                    self.dab(layer, c, self.radius_at(pr), self.alpha_at(pr));
-                }
-                self.last = Some((p, pressure));
-            }
+        let mut dabs = std::mem::take(&mut self.dabs);
+        dabs.clear();
+        self.steps.push(p, pressure, &mut dabs);
+        for d in &dabs {
+            self.dab(layer, d.c, d.r, d.a);
         }
+        self.dabs = dabs;
     }
 
     fn dab(&mut self, layer: &mut RasterLayer, c: Pos2, r: f32, alpha: f32) {
@@ -463,8 +432,7 @@ impl RasterStroke {
         let y0 = (c.y - r - 1.0).floor() as i32;
         let x1 = (c.x + r + 1.0).ceil() as i32;
         let y1 = (c.y + r + 1.0).ceil() as i32;
-        let inner = r * self.p.hardness.clamp(0.0, 1.0);
-        let soft = (r - inner).max(1e-3);
+        let hard = self.p.hardness;
         let op = self.p.opacity.clamp(0.0, 1.0);
         let col = self.p.color.to_srgba_unmultiplied();
         let cr = col[0] as f32 / 255.0;
@@ -497,13 +465,7 @@ impl RasterStroke {
                         if d > r + 0.5 {
                             continue;
                         }
-                        let mut a = if d <= inner {
-                            1.0
-                        } else {
-                            let t = ((d - inner) / soft).clamp(0.0, 1.0);
-                            1.0 - t * t * (3.0 - 2.0 * t)
-                        };
-                        a = a.min((r + 0.5 - d).clamp(0.0, 1.0)) * alpha;
+                        let a = crate::brush::dab_alpha(d, r, hard, alpha);
                         let li = ((y - oy) * TILE + (x - ox)) as usize;
                         if a <= mask[li] {
                             continue;

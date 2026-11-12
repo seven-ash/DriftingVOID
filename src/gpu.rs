@@ -166,6 +166,12 @@ pub struct Gpu {
     stroke_seg: wgpu::RenderPipeline,
     stroke_zero: wgpu::RenderPipeline,
     stroke_put: wgpu::RenderPipeline,
+    /// Brush strokes (`brush.rs`): dabs into an R16Float coverage target
+    /// (largest per pixel), cleared over the stroke's box; an eraser's
+    /// coverage takes away from the target.
+    brush_dab: wgpu::RenderPipeline,
+    brush_zero: wgpu::RenderPipeline,
+    brush_erase: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
     y_plane: wgpu::RenderPipeline,
     uv_plane: wgpu::RenderPipeline,
@@ -618,6 +624,14 @@ impl Gpu {
         let stroke_seg = stroke_pipe("vs_seg", "fs_seg", wgpu::TextureFormat::R8Unorm, Some(max_blend), true);
         let stroke_zero = stroke_pipe("vs_rect", "fs_zero", wgpu::TextureFormat::R8Unorm, None, false);
         let stroke_put = stroke_pipe("vs_rect", "fs_put", FMT, Some(over_blend), false);
+        let brush_dab = stroke_pipe("vs_dab", "fs_dab", wgpu::TextureFormat::R16Float, Some(max_blend), true);
+        let brush_zero = stroke_pipe("vs_rect", "fs_zero", wgpu::TextureFormat::R16Float, None, false);
+        // dst × (1 − coverage × opacity)
+        let erase_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+        };
+        let brush_erase = stroke_pipe("vs_rect", "fs_put", FMT, Some(erase_blend), false);
         let dummy = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -647,6 +661,9 @@ impl Gpu {
             stroke_seg,
             stroke_zero,
             stroke_put,
+            brush_dab,
+            brush_zero,
+            brush_erase,
             image,
             y_plane,
             uv_plane,
@@ -1427,6 +1444,88 @@ impl Gpu {
         }
         self.queue.submit([enc.finish()]);
         Some(Arc::new(tex))
+    }
+
+    /// Brush strokes (dabs in target pixels, with their brush) drawn in order
+    /// into `out` (w × h, RGBA8, premultiplied): per stroke, the dabs' largest
+    /// coverage, then the colour over what is there (an eraser: what is there
+    /// taken away), with the brush opacity, as `RasterStroke` paints.
+    pub(crate) fn brush_strokes(&mut self, enc: &mut wgpu::CommandEncoder, out: &wgpu::Texture, w: u32, h: u32, strokes: &[(&[crate::brush::Dab], &crate::raster::BrushParams)]) {
+        let boxr = Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32));
+        const SLOT: usize = 256;
+        let mut uni: Vec<u8> = Vec::new();
+        let mut inst: Vec<f32> = Vec::new();
+        let mut list: Vec<(u32, std::ops::Range<u32>, bool)> = Vec::new();
+        for (dabs, p) in strokes {
+            let r = crate::brush::dabs_box(dabs).intersect(boxr);
+            if !r.is_positive() {
+                continue;
+            }
+            let r = [r.min.x.floor(), r.min.y.floor(), r.max.x.ceil(), r.max.y.ceil()];
+            let first = (inst.len() / 8) as u32;
+            for d in dabs.iter() {
+                inst.extend_from_slice(&[d.c.x, d.c.y, d.r, d.a, p.hardness, 0.0, 0.0, 0.0]);
+            }
+            let op = p.opacity.clamp(0.0, 1.0);
+            let [cr, cg, cb, _] = p.color.to_srgba_unmultiplied().map(|x| x as f32 / 255.0);
+            let col = if p.erase { [0.0, 0.0, 0.0, op] } else { [cr * op, cg * op, cb * op, op] };
+            let off = uni.len() as u32;
+            for x in [r[0], r[1], r[2], r[3], w as f32, h as f32, 0.0, 0.0, col[0], col[1], col[2], col[3]] {
+                uni.extend_from_slice(&x.to_le_bytes());
+            }
+            uni.resize(off as usize + SLOT, 0);
+            list.push((off, first..(inst.len() / 8) as u32, p.erase));
+        }
+        if list.is_empty() {
+            return;
+        }
+        let cov = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("brush coverage"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: &uni, usage: wgpu::BufferUsages::UNIFORM });
+        let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: f32_bytes(&inst), usage: wgpu::BufferUsages::VERTEX });
+        let (cov_view, out_view, dummy_view) = (cov.create_view(&Default::default()), out.create_view(&Default::default()), self.dummy.create_view(&Default::default()));
+        let group = |t: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.stroke_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &ub, offset: 0, size: std::num::NonZeroU64::new(48) }) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(t) },
+                ],
+            })
+        };
+        let (g_cov, g_put) = (group(&dummy_view), group(&cov_view));
+        let pass = |enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView| {
+            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                ..Default::default()
+            })
+            .forget_lifetime()
+        };
+        for (off, range, erase) in &list {
+            {
+                let mut rp = pass(enc, &cov_view);
+                rp.set_bind_group(0, &g_cov, &[*off]);
+                rp.set_pipeline(&self.brush_zero);
+                rp.draw(0..6, 0..1);
+                rp.set_pipeline(&self.brush_dab);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.draw(0..6, range.clone());
+            }
+            let mut rp = pass(enc, &out_view);
+            rp.set_bind_group(0, &g_put, &[*off]);
+            rp.set_pipeline(if *erase { &self.brush_erase } else { &self.stroke_put });
+            rp.draw(0..6, 0..1);
+        }
     }
 
     /// A photo or video frame: uploaded once as it came, then cropped, adjusted,
@@ -2692,6 +2791,98 @@ mod tests {
         let _ = g.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });
         let m = buf.slice(..).get_mapped_range().unwrap();
         m.chunks(bpr as usize).take(h as usize).flat_map(|r| r[..(w * 4) as usize].to_vec()).collect()
+    }
+
+    /// The texture's pixels as RGBA, w×h.
+    fn read(g: &mut Gpu, out: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
+        let bpr = (w * 4).div_ceil(256) * 256;
+        let buf = g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let idx = g.queue.submit([enc.finish()]);
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = g.device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None });
+        let m = buf.slice(..).get_mapped_range().unwrap();
+        m.chunks(bpr as usize).take(h as usize).flat_map(|r| r[..(w * 4) as usize].to_vec()).collect()
+    }
+
+    /// Brush strokes drawn on the GPU from their dabs match the CPU brush
+    /// engine (`RasterStroke`) given the same points at the same scale
+    /// (notes/updates/2026-11-12-vector-brush.md, stage 1): hard and soft
+    /// brushes, pressure to size and to opacity, opacity under 1, and an
+    /// eraser over them, in order.
+    #[test]
+    fn gpu_brush_matches_the_cpu_engine() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer, RasterStroke, TILE};
+        let wave = |n: usize, x0: f32, y0: f32, dx: f32, amp: f32, p0: f32, p1: f32| -> Vec<[f32; 3]> {
+            (0..n).map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                [x0 + dx * i as f32, y0 + (t * 9.0).sin() * amp, p0 + (p1 - p0) * t]
+            }).collect()
+        };
+        let bp = |color: Color32, radius: f32, opacity: f32, hardness: f32, ps: bool, po: bool, erase: bool| BrushParams { color, radius, opacity, hardness, pressure_size: ps, pressure_opacity: po, erase };
+        let strokes = [
+            BStroke::new(wave(60, 40.0, 120.0, 12.0, 60.0, 1.0, 1.0), bp(Color32::from_rgb(220, 40, 50), 14.0, 1.0, 0.9, false, false, false)),
+            BStroke::new(wave(50, 60.0, 260.0, 14.0, 90.0, 0.2, 1.0), bp(Color32::from_rgb(40, 90, 230), 30.0, 0.5, 0.1, true, false, false)),
+            BStroke::new(wave(45, 120.0, 380.0, 13.0, 140.0, 1.0, 0.1), bp(Color32::from_rgb(30, 180, 90), 20.0, 1.0, 0.6, false, true, false)),
+            BStroke::new(wave(40, 20.0, 60.0, 18.0, 200.0, 0.6, 1.0), bp(Color32::BLACK, 18.0, 0.8, 0.9, true, false, true)),
+        ];
+        let ok = with_gpu(|g| {
+            for s in [0.37f32, 1.0, 2.5] {
+                let (w, h) = ((820.0 * s).ceil() as u32, (520.0 * s).ceil() as u32);
+                // the CPU engine, painting at this scale
+                let mut layer = RasterLayer::default();
+                for st in &strokes {
+                    let mut p = st.p;
+                    p.radius *= s;
+                    let mut rs = RasterStroke::new(p);
+                    for q in &st.pts {
+                        rs.add_point(&mut layer, pos2(q[0] * s, q[1] * s), q[2]);
+                    }
+                    rs.finish(&mut layer);
+                }
+                let cpu = |x: u32, y: u32| -> [u8; 4] {
+                    let (tx, ty) = ((x as i32).div_euclid(TILE), (y as i32).div_euclid(TILE));
+                    layer.tiles.get(&(tx, ty)).map_or([0; 4], |t| {
+                        let i = (((y as i32 - ty * TILE) * TILE + (x as i32 - tx * TILE)) * 4) as usize;
+                        [t.px[i], t.px[i + 1], t.px[i + 2], t.px[i + 3]]
+                    })
+                };
+                // the GPU, from the strokes' dabs at this scale
+                let out = g.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING);
+                let dabs: Vec<Vec<crate::brush::Dab>> = strokes.iter().map(|st| st.dabs(Pos2::ZERO, s)).collect();
+                let list: Vec<(&[crate::brush::Dab], &BrushParams)> = dabs.iter().zip(&strokes).map(|(d, st)| (d.as_slice(), &st.p)).collect();
+                let mut enc = g.device.create_command_encoder(&Default::default());
+                g.clear_to(&mut enc, &out, wgpu::Color::TRANSPARENT);
+                g.brush_strokes(&mut enc, &out, w, h, &list);
+                g.queue.submit([enc.finish()]);
+                let gpu = read(g, &out, w, h);
+                let (mut over1, mut over2, mut worst, mut painted) = (0usize, 0usize, 0u8, 0usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let c = cpu(x, y);
+                        let i = ((y * w + x) * 4) as usize;
+                        let d = (0..4).map(|k| c[k].abs_diff(gpu[i + k])).max().unwrap();
+                        worst = worst.max(d);
+                        over1 += (d > 1) as usize;
+                        over2 += (d > 2) as usize;
+                        painted += (c[3] > 0) as usize;
+                    }
+                }
+                eprintln!("brush at {s}: {painted} painted px, {over1} differ by more than 1, {over2} by more than 2, worst {worst}");
+                assert!(painted > 1000, "nothing painted at {s}");
+                // (measured 11-12: worst 1 at every scale, rounding alone)
+                assert!(over2 == 0 && over1 * 1000 < painted && worst <= 2, "brush at {s}: {over1} / {over2} of {painted} px off by more than 1 / 2, worst {worst}");
+            }
+        });
+        if ok.is_none() {
+            eprintln!("no GPU: skipped");
+        }
     }
 
     /// A brush stroke far longer than one texture (Ash, 10-22: past a certain
