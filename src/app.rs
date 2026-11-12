@@ -623,6 +623,9 @@ fn keep_navigation(doc: &mut Document, now: &Document) {
     }
 }
 
+/// Seconds after the start when a release build asks for a newer release.
+const UPDATE_AFTER: f64 = 2.0;
+
 /// The hue at the top (and bottom) of the palette's hue bar: pure red. The
 /// colour model's own zero is a pinkish red, so the bar is turned to start here.
 fn hue_top() -> f32 {
@@ -1046,6 +1049,8 @@ pub struct App {
     /// Newer releases (`update.rs`); `update_go`: install once this quits.
     upd: crate::update::Updater,
     update_go: Option<PathBuf>,
+    /// The start-up update check has run (`UPDATE_AFTER`).
+    upd_asked: bool,
     status: String,
     recent: Vec<Color32>,
     view_init: bool,
@@ -1460,6 +1465,7 @@ impl App {
             frames: 0,
             upd: crate::update::Updater::new(),
             update_go: None,
+            upd_asked: false,
             rail_active: None,
             rail_hover: None,
             rail_hint: None,
@@ -13755,9 +13761,16 @@ impl eframe::App for App {
             self.title = title;
         }
         self.frames += 1;
-        // a release build asks for a newer release once, after the first frames
-        if self.frames == 30 && self.s.update_check {
-            self.upd.check(&ctx);
+        // a release build asks for a newer release once, two seconds after
+        // the start (by the clock: an idle window draws no more frames, so a
+        // frame count could wait for the first input)
+        if !self.upd_asked && self.s.update_check {
+            if self.now >= UPDATE_AFTER {
+                self.upd_asked = true;
+                self.upd.check(&ctx);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(UPDATE_AFTER - self.now + 0.05));
+            }
         }
         // DV_UPDATE_AUTO=1: an available release downloads by itself (the
         // download and checksum tested without input; with DV_UPDATE_NOLAUNCH)
