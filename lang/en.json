@@ -458,6 +458,7 @@
  "자르기…": "Crop…",
  "자유": "Free",
  "자유롭게 둘러 선택 · 펜은 획, 브러시는 둘러싼 픽셀만, 나머지는 중심 기준 · 선택 안쪽 끌기: 이동": "Select by drawing around · pen by stroke, brush only the pixels inside, the rest by centre · drag inside the selection: move",
+ "잠김": "Locked",
  "재생": "Play",
  "재생 실패: {}": "Playback failed: {}",
  "재생 위치": "Position",

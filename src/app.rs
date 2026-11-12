@@ -2110,6 +2110,12 @@ impl App {
             app.sel = ids.first().copied();
             app.extra_sel = ids.iter().skip(1).copied().collect();
         }
+        // DV_LOCK_SEL=1: the selected layer starts locked (captures of the locked panel)
+        if std::env::var_os("DV_LOCK_SEL").is_some() {
+            if let Some(l) = app.sel.and_then(|id| app.doc.get_mut(id)) {
+                l.locked = true;
+            }
+        }
         // DV_TOOL=n: start with the n-th tool of the rail (panel captures)
         if let Some(t) = std::env::var("DV_TOOL").ok().and_then(|v| v.parse::<usize>().ok()).and_then(|i| TOOLS.get(i)) {
             app.tool = t.0;
@@ -9016,7 +9022,7 @@ impl App {
     fn recolor_selected(&mut self) {
         let c = self.s.color;
         if let Some(id) = self.sel {
-            if let Some(l) = self.doc.get_mut(id) {
+            if let Some(l) = self.doc.get_mut(id).filter(|l| !l.locked) {
                 match &mut l.kind {
                     LayerKind::Shape(s) if s.color != c => {
                         s.color = c;
@@ -9031,7 +9037,8 @@ impl App {
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         // Text and shape tools show one set of style controls: they edit the selected
         // layer of that kind (and become the defaults for new ones), or just the defaults.
-        let sel_idx = self.sel.and_then(|id| self.doc.index_of(id)).filter(|_| self.extra_sel.is_empty());
+        // (a locked layer is not edited from here: the tool shows its defaults)
+        let sel_idx = self.sel.and_then(|id| self.doc.index_of(id)).filter(|&i| self.extra_sel.is_empty() && !self.doc.layers[i].locked);
         let sel_text = sel_idx.filter(|&i| matches!(self.doc.layers[i].kind, LayerKind::Text(_)) && self.tool == Tool::Text);
         let sel_shape = sel_idx.filter(|&i| {
             matches!(self.doc.layers[i].kind, LayerKind::Shape(_))
@@ -10681,7 +10688,22 @@ impl App {
                                 ui.add_space(SPACE_MD);
                             }
                             if Self::fold_section(ui, crate::i18n::tr("선택한 항목"), &mut self.s.folded[1]) {
-                                self.properties(ui);
+                                // a locked layer: its values show as they are and
+                                // nothing here takes input (Ash, 11-12)
+                                if self.sel.and_then(|id| self.doc.get(id)).is_some_and(|l| l.locked) {
+                                    ui.horizontal(|ui| {
+                                        let (r, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
+                                        theme::lock_icon(ui.painter(), r.center(), ACCENT);
+                                        ui.label(egui::RichText::new(crate::i18n::tr("잠김")).color(ACCENT));
+                                    });
+                                    ui.scope(|ui| {
+                                        ui.visuals_mut().disabled_alpha = 1.0;
+                                        ui.disable();
+                                        self.properties(ui);
+                                    });
+                                } else {
+                                    self.properties(ui);
+                                }
                             }
                             // the region tool's cameras fold in here, so the
                             // number of columns never changes (Ash, 10-27)
