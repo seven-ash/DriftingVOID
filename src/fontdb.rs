@@ -62,8 +62,18 @@ fn font_dirs() -> Vec<PathBuf> {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         dirs.push(Path::new(&local).join("Microsoft\\Windows\\Fonts"));
     }
+    // the faces shipped with the app (`DEFAULT_FAMILY`): the `fonts` folder
+    // beside the program, else the repository's `assets/fonts` (builds run
+    // from the tree)
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("fonts"))).filter(|d| d.is_dir());
+    dirs.push(beside.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("fonts")));
     dirs
 }
+
+/// The family a new text starts in (Ash, 11-12): shipped with the app, with
+/// Hangul, kana, kanji and Latin. (A text with no family named is of a file
+/// from before and keeps the default it was made with, Malgun Gothic.)
+pub const DEFAULT_FAMILY: &str = "Pretendard JP";
 
 fn pick_name(face: &ttf_parser::Face, ids: &[u16]) -> Option<String> {
     // Prefer a Korean name, then English, then anything readable.

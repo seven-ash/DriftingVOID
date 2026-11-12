@@ -356,7 +356,7 @@ pub fn apply_visuals(ctx: &egui::Context) {
     ctx.set_global_style(style);
 }
 
-/// UI faces, best first. Falls back to the document default (Malgun Gothic).
+/// UI faces, best first. Falls back to the faces of `text::fonts` (Malgun Gothic).
 const UI_FACES: &[(&str, &str, &str)] = &[
     ("Pretendard", "Regular", "SemiBold"),
     ("Pretendard Variable", "Regular", "SemiBold"),

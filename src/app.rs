@@ -123,6 +123,9 @@ pub struct Settings {
     /// Last border / outline colours, for when they are switched on again.
     pub text_border_color: Color32,
     pub text_stroke_color: Color32,
+    /// 1 once the text tool's font has moved to `fontdb::DEFAULT_FAMILY`
+    /// (settings from before had no family named: the old default).
+    pub font_v: u8,
     pub touch_draw: bool,
     /// 0 light, 1 dark, 2 follow the system.
     pub theme: u8,
@@ -174,7 +177,7 @@ impl Default for Settings {
             shape_fill: false,
             fill_color: Color32::from_rgba_unmultiplied(255, 209, 59, 160),
             text_size: 40.0,
-            text_family: String::new(),
+            text_family: crate::fontdb::DEFAULT_FAMILY.into(),
             text_style: "Regular".into(),
             text_align: Default::default(),
             text_color: Color32::from_rgb(230, 57, 70),
@@ -183,6 +186,7 @@ impl Default for Settings {
             text_look: Default::default(),
             text_border_color: Color32::from_rgb(30, 30, 30),
             text_stroke_color: Color32::from_rgb(20, 20, 20),
+            font_v: 0,
             touch_draw: false,
             theme: 1,
             peek_delay: 0.2,
@@ -1545,6 +1549,15 @@ impl App {
                 };
                 if let Some(st) = pr.settings {
                     app.s = st;
+                }
+                // settings from before the shipped default: the text tool
+                // moves to it once (texts already made keep their font)
+                if app.s.font_v < 1 {
+                    if app.s.text_family.is_empty() {
+                        app.s.text_family = crate::fontdb::DEFAULT_FAMILY.into();
+                        app.s.text_style = "Regular".into();
+                    }
+                    app.s.font_v = 1;
                 }
                 app.recent = pr.recent;
                 app.last_export = pr.export;
@@ -12559,7 +12572,9 @@ impl App {
     }
 }
 
-const DEFAULT_FONT: &str = crate::i18n::k!("기본 (맑은 고딕)");
+/// The picker's first entry: no family named, which is what texts made
+/// before the shipped default have.
+const DEFAULT_FONT: &str = crate::i18n::k!("맑은 고딕 (이전 기본)");
 
 /// Family + style chooser over the installed fonts. Returns true if changed.
 /// Search text and rendered name previews for the font dropdowns.
