@@ -128,6 +128,8 @@ pub struct BStroke {
     /// Hash of the points and the brush, for the picture caches
     /// (`canvas::content_key`).
     pub key: u64,
+    /// The smallest dab radius along the stroke, in layer units.
+    pub min_r: f32,
 }
 
 impl BStroke {
@@ -151,7 +153,16 @@ impl BStroke {
             }
             h.finish()
         };
-        Self { pts, p, bounds, key }
+        let min_r = pts.iter().map(|q| if p.pressure_size { p.radius * (0.12 + 0.88 * q[2].clamp(0.0, 1.0)) } else { p.radius }).fold(f32::INFINITY, f32::min);
+        Self { pts, p, bounds, key, min_r }
+    }
+
+    /// The scale from which the dabs no longer change but in size: every
+    /// dab is at least 3 px across there, so neither the half-pixel radius
+    /// nor the 0.35 px spacing (`Stepper`) comes in, and the spacing is
+    /// 0.12 of the radius in layer units at any scale.
+    pub fn steady_from(&self) -> f32 {
+        (0.35 / 0.12 / self.min_r) * 1.0001
     }
 
     /// The dabs that paint this stroke at `s` target pixels per layer unit,
@@ -342,11 +353,14 @@ pub fn paint(px: &mut [u8], w: u32, h: u32, dabs: &[Dab], p: &BrushParams) {
     }
 }
 
-/// A stroke's dabs at one scale, in layer units × scale (layer point 0 at
-/// 0), kept so that drawing a part of the view lays nothing again; in runs
-/// of `RUN` with each run's box, to find the ones in a part quickly.
+/// A stroke's dabs at one scale, in layer units × `scale` (layer point 0
+/// at 0), kept so that drawing a part of the view lays nothing again; in
+/// runs of `RUN` with each run's box, to find the ones in a part quickly.
+/// From `BStroke::steady_from` up, the dabs are the same at every scale
+/// (only multiplied): one set serves all of those scales.
 pub struct DabSet {
     pub dabs: Vec<Dab>,
+    pub scale: f32,
     runs: Vec<(Rect, usize, usize)>,
 }
 
@@ -356,20 +370,22 @@ impl DabSet {
     pub fn new(st: &BStroke, s: f32) -> Self {
         let dabs = st.dabs(Pos2::ZERO, s);
         let runs = dabs.chunks(RUN).enumerate().map(|(i, c)| (dabs_box(c), i * RUN, i * RUN + c.len())).collect();
-        Self { dabs, runs }
+        Self { dabs, scale: s, runs }
     }
 
-    /// The dabs that reach into `clip`, moved by `shift` (both in target
-    /// pixels: the set's place plus `shift`).
-    pub fn visible(&self, clip: Rect, shift: Vec2, out: &mut Vec<Dab>) {
-        let k = clip.translate(-shift);
+    /// The dabs that reach into `clip`, for scale `s`, moved by `shift` (both
+    /// in target pixels at `s`: the set's place × `s / scale`, plus `shift`).
+    pub fn visible(&self, clip: Rect, s: f32, shift: Vec2, out: &mut Vec<Dab>) {
+        let m = s / self.scale;
+        let c = clip.translate(-shift);
+        let k = Rect::from_min_max((c.min.to_vec2() / m).to_pos2(), (c.max.to_vec2() / m).to_pos2());
         for (b, i0, i1) in &self.runs {
             if !b.intersects(k) {
                 continue;
             }
             for d in &self.dabs[*i0..*i1] {
-                if k.expand(d.r + 1.0).contains(d.c) {
-                    out.push(Dab { c: d.c + shift, ..*d });
+                if k.expand(d.r + 1.0 / m).contains(d.c) {
+                    out.push(Dab { c: (d.c.to_vec2() * m + shift).to_pos2(), r: d.r * m, a: d.a });
                 }
             }
         }
@@ -446,6 +462,28 @@ mod tests {
             assert!((a.c - b.c).length() < 0.05 && (a.r - b.r).abs() < 1e-3 && (a.a - b.a).abs() < 1e-4, "{a:?} {b:?}");
         }
         assert!(fast.len() * 20 < all.len(), "{} of {}", fast.len(), all.len());
+    }
+
+    /// From `steady_from` up, the dabs of one scale, multiplied, are the
+    /// dabs of any other: one set serves every zoom past it.
+    #[test]
+    fn steady_dabs_serve_every_larger_scale() {
+        let mut p = params(6.0);
+        p.pressure_size = true;
+        let pts: Vec<[f32; 3]> = (0..=60).map(|i| [i as f32 * 9.0, (i as f32 * 0.2).sin() * 30.0, 0.3 + 0.7 * (i as f32 * 0.15).sin().abs()]).collect();
+        let st = BStroke::new(pts, p);
+        let s0 = st.steady_from();
+        let set = DabSet::new(&st, s0);
+        let clip = Rect::from_min_size(pos2(-1e6, -1e6), Vec2::splat(2e6));
+        for s in [s0, s0 * 1.7, s0 * 5.0] {
+            let own = st.dabs(Pos2::ZERO, s);
+            let mut from_set = Vec::new();
+            set.visible(clip, s, Vec2::ZERO, &mut from_set);
+            assert_eq!(own.len(), from_set.len(), "at {s}");
+            for (a, b) in own.iter().zip(&from_set) {
+                assert!((a.c - b.c).length() < 1e-2 * s.max(1.0) && (a.r - b.r).abs() < 1e-3 * s.max(1.0) && (a.a - b.a).abs() < 1e-5, "at {s}: {a:?} {b:?}");
+            }
+        }
     }
 
     /// The dabs follow the stroke's length on screen: the same stroke shown
