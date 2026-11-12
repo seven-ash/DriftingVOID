@@ -584,6 +584,22 @@ fn parse_hex(s: &str) -> Option<Color32> {
     }
 }
 
+/// Undo and redo bring back the document, not where one was looking (Ash,
+/// 11-12): the playhead, the timeline's own switch and the auto-key switch
+/// stay as `now` has them. Where that moves the restored document's time,
+/// its keyed layers show the playhead's moment (at the same time they keep
+/// what they had, a change without a key included).
+fn keep_navigation(doc: &mut Document, now: &crate::anim::Timeline) {
+    let tl = &mut doc.timeline;
+    tl.on = now.on;
+    tl.autokey = now.autokey;
+    let t = now.time.clamp(0.0, tl.duration.max(0.0));
+    if (t - tl.time).abs() > 1e-9 {
+        tl.time = t;
+        crate::anim::evaluate(doc);
+    }
+}
+
 /// The hue at the top (and bottom) of the palette's hue bar: pure red. The
 /// colour model's own zero is a pinkish red, so the bar is turned to start here.
 fn hue_top() -> f32 {
@@ -2222,6 +2238,10 @@ impl App {
     /// current one, costed at `cost`.
     fn take_state(&mut self, u: Snap, cost: usize) -> Snap {
         let doc = std::mem::replace(&mut self.doc, u.doc);
+        keep_navigation(&mut self.doc, &doc.timeline);
+        if self.tl_play.is_none() {
+            self.sync_videos_to_timeline();
+        }
         let cur = Snap {
             doc,
             sel: std::mem::replace(&mut self.sel, u.sel),
@@ -14466,6 +14486,12 @@ mod tests {
         let m = mixed_style(&a, &[&b]);
         assert!(m.blend && m.bg_has, "blend and the background box differ");
         assert!(!m.color && !m.family && !m.style && !m.align && !m.bg, "the rest is the same");
+        // undo keeps the playhead and the timeline's switch
+        let mut old = Document::default();
+        old.timeline.duration = 4.0;
+        let now = crate::anim::Timeline { on: true, time: 7.0, autokey: true, ..Default::default() };
+        keep_navigation(&mut old, &now);
+        assert_eq!((old.timeline.on, old.timeline.autokey, old.timeline.time, old.timeline.duration), (true, true, 4.0, 4.0));
         // a filter's settings come back when the layer returns to it
         use crate::doc::{Filter, FxLayer};
         let mut fx = FxLayer::new(Filter::Blur);
