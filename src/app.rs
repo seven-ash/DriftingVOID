@@ -592,8 +592,19 @@ fn parse_hex(s: &str) -> Option<Color32> {
 /// 11-12): the playhead, the timeline's own switch and the auto-key switch
 /// stay as `now` has them. Where that moves the restored document's time,
 /// its keyed layers show the playhead's moment (at the same time they keep
-/// what they had, a change without a key included).
-fn keep_navigation(doc: &mut Document, now: &crate::anim::Timeline) {
+/// what they had, a change without a key included). A video layer's own
+/// preview position stays too (the same clip in both).
+fn keep_navigation(doc: &mut Document, now: &Document) {
+    for l in &mut doc.layers {
+        let LayerKind::Image(im) = &mut l.kind else { continue };
+        let Some(v) = im.video.as_mut() else { continue };
+        if let Some(LayerKind::Image(cur)) = now.get(l.id).map(|c| &c.kind) {
+            if let Some(cv) = cur.video.as_ref().filter(|cv| cv.path == v.path) {
+                v.time = cv.time;
+            }
+        }
+    }
+    let now = &now.timeline;
     let tl = &mut doc.timeline;
     tl.on = now.on;
     tl.autokey = now.autokey;
@@ -2257,7 +2268,7 @@ impl App {
     /// current one, costed at `cost`.
     fn take_state(&mut self, u: Snap, cost: usize) -> Snap {
         let doc = std::mem::replace(&mut self.doc, u.doc);
-        keep_navigation(&mut self.doc, &doc.timeline);
+        keep_navigation(&mut self.doc, &doc);
         if self.tl_play.is_none() {
             self.sync_videos_to_timeline();
         }
@@ -14526,7 +14537,8 @@ mod tests {
         // undo keeps the playhead and the timeline's switch
         let mut old = Document::default();
         old.timeline.duration = 4.0;
-        let now = crate::anim::Timeline { on: true, time: 7.0, autokey: true, ..Default::default() };
+        let mut now = Document::default();
+        now.timeline = crate::anim::Timeline { on: true, time: 7.0, autokey: true, ..Default::default() };
         keep_navigation(&mut old, &now);
         assert_eq!((old.timeline.on, old.timeline.autokey, old.timeline.time, old.timeline.duration), (true, true, 4.0, 4.0));
         // a filter's settings come back when the layer returns to it
