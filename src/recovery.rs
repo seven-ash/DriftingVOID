@@ -189,6 +189,27 @@ impl Session {
     }
 }
 
+/// How long a note left by `leave_reopen` counts: an update takes a minute
+/// or two; an older note is of an update that never started the app again.
+const REOPEN_FOR: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Before an update's installer runs: notes the open project in `dir`, so
+/// the app started after the update opens it again (Ash, 11-12).
+pub fn leave_reopen(dir: &Path, project: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("reopen.txt"), project.to_string_lossy().as_bytes());
+}
+
+/// At start: the project noted by `leave_reopen`, once (the note goes), if it
+/// is recent and the project is still there.
+pub fn take_reopen(dir: &Path) -> Option<PathBuf> {
+    let note = dir.join("reopen.txt");
+    let fresh = std::fs::metadata(&note).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d < REOPEN_FOR);
+    let text = std::fs::read_to_string(&note).ok();
+    let _ = std::fs::remove_file(&note);
+    text.filter(|_| fresh).map(|t| PathBuf::from(t.trim())).filter(|p| p.is_file())
+}
+
 /// "3분 전", "2시간 전", "5일 전" for an age in seconds.
 pub fn ago(secs: u64) -> String {
     match secs {
@@ -225,6 +246,24 @@ mod tests {
         let d = std::env::temp_dir().join(format!("dv_recovery_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// The project open before an update is opened once after it.
+    #[test]
+    fn the_project_is_noted_across_an_update() {
+        let dir = temp("reopen");
+        assert_eq!(take_reopen(&dir), None);
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let project = dir.join("work").join("포스터 1.void");
+        std::fs::write(&project, b"x").unwrap();
+        leave_reopen(&dir, &project);
+        assert!(found_in(&dir).is_empty(), "the note is not a recovery copy");
+        assert_eq!(take_reopen(&dir), Some(project.clone()));
+        assert_eq!(take_reopen(&dir), None, "once");
+        // a project that is gone is not opened
+        leave_reopen(&dir, &dir.join("gone.void"));
+        assert_eq!(take_reopen(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A copy shows up for the next start only once its session is gone; it

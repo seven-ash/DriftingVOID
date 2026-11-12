@@ -755,6 +755,23 @@ pub struct FxLayer {
     /// luma, as 흑백; Ash 11-02), of the picture as it shows over black.
     #[serde(default = "source_luma")]
     pub source: u8,
+    /// The settings of the filters this layer showed before (Ash, 11-12):
+    /// going back to one brings them back. Saved with the layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<FxKept>,
+}
+
+/// One filter's settings, put aside while the layer shows another filter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FxKept {
+    pub filter: Filter,
+    pub v: [f32; 4],
+    #[serde(default)]
+    pub curves: [Vec<CurvePt>; 4],
+    #[serde(default)]
+    pub moving: bool,
+    #[serde(default = "source_luma")]
+    pub source: u8,
 }
 
 fn source_luma() -> u8 {
@@ -935,7 +952,30 @@ pub enum Film {
 impl FxLayer {
     pub fn new(filter: Filter) -> Self {
         let curves = std::array::from_fn(|_| curve_identity());
-        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false, source: source_luma() }
+        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false, source: source_luma(), kept: Vec::new() }
+    }
+
+    /// Shows another filter: this one's settings are put aside, and the new
+    /// one comes with the settings it had here before (its defaults the first
+    /// time). The blend and the gradient's colours are the layer's and stay.
+    pub fn set_filter(&mut self, f: Filter) {
+        if f == self.filter {
+            return;
+        }
+        let old = FxKept { filter: self.filter, v: self.v, curves: std::mem::take(&mut self.curves), moving: self.moving, source: self.source };
+        self.kept.retain(|k| k.filter != old.filter);
+        self.kept.push(old);
+        let fresh = FxLayer::new(f);
+        let k = match self.kept.iter().position(|k| k.filter == f) {
+            Some(i) => self.kept.remove(i),
+            None => FxKept { filter: f, v: fresh.v, curves: fresh.curves, moving: fresh.moving, source: fresh.source },
+        };
+        self.filter = f;
+        self.v = k.v;
+        self.curves = k.curves;
+        self.moving = k.moving;
+        self.source = k.source;
+        self.upgrade();
     }
 
     /// Files before 0.102.0: a curve held three dials (y at x = 1/4, 1/2,

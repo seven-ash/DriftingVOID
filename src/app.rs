@@ -1542,6 +1542,11 @@ impl App {
             if let Some(dir) = crate::recovery::dir() {
                 app.rec_found = crate::recovery::found_in(&dir);
                 app.rec = crate::recovery::Session::start(&dir);
+                // started by an update's installer: the project that was open
+                // (a file given to open comes first)
+                if let Some(p) = crate::recovery::take_reopen(&dir).filter(|_| open.is_none()) {
+                    app.open_path(p);
+                }
             }
         }
         // the UI language: as chosen, else the system's (DV_LANG=en|ja|ko for captures)
@@ -5268,7 +5273,15 @@ impl App {
                 // an update waiting: its installer runs once this has quit. If
                 // it cannot start, the app stays (the notice says why).
                 if let Some(p) = self.update_go.take() {
+                    // the app the installer starts opens this project again
+                    let note = self.path.clone().zip(crate::recovery::dir()).filter(|_| self.rec.is_some());
+                    if let Some((project, dir)) = &note {
+                        crate::recovery::leave_reopen(dir, project);
+                    }
                     if !self.upd.install(&p) {
+                        if let Some((_, dir)) = &note {
+                            crate::recovery::take_reopen(dir);
+                        }
                         self.status = crate::i18n::tr("업데이트 설치 실패").into();
                         return;
                     }
@@ -14117,15 +14130,16 @@ fn gradient_bar(ui: &mut egui::Ui, colors: [[u8; 4]; 2], id: LayerId, req: &mut 
     }
 }
 
-/// An FX layer's filter and blend (복사, or a mode over the original). A new
-/// filter starts from its defaults.
+/// An FX layer's filter and blend (복사, or a mode over the original). A
+/// filter comes with the settings it had on this layer before, else its
+/// defaults.
 fn fx_props(ui: &mut egui::Ui, fx: &mut crate::doc::FxLayer) -> bool {
     let mut changed = false;
     crate::kit::row(ui, crate::i18n::tr("필터"), |ui| {
         let items: Vec<(crate::doc::Filter, String, bool)> = crate::doc::Filter::ALL.iter().map(|f| (*f, f.label().to_string(), true)).collect();
         if let (Some(f), _) = crate::kit::dropdown(ui, "fx_filter", fx.filter.label(), crate::kit::FILL, &items, Some(&fx.filter)) {
             if f != fx.filter {
-                *fx = crate::doc::FxLayer { blend: fx.blend, colors: fx.colors, ..crate::doc::FxLayer::new(f) };
+                fx.set_filter(f);
                 changed = true;
             }
         }
@@ -14452,6 +14466,20 @@ mod tests {
         let m = mixed_style(&a, &[&b]);
         assert!(m.blend && m.bg_has, "blend and the background box differ");
         assert!(!m.color && !m.family && !m.style && !m.align && !m.bg, "the rest is the same");
+        // a filter's settings come back when the layer returns to it
+        use crate::doc::{Filter, FxLayer};
+        let mut fx = FxLayer::new(Filter::Blur);
+        fx.v[0] = 33.0;
+        fx.set_filter(Filter::Curves);
+        assert_eq!(fx.v, Filter::Curves.defaults());
+        fx.curves[0][0].y = 0.4;
+        let curve = fx.curves.clone();
+        fx.set_filter(Filter::Blur);
+        assert_eq!((fx.v[0], fx.kept.len()), (33.0, 1));
+        fx.set_filter(Filter::Curves);
+        assert_eq!((&fx.curves, fx.kept.len()), (&curve, 1));
+        let back: FxLayer = serde_json::from_str(&serde_json::to_string(&fx).unwrap()).unwrap();
+        assert_eq!(back, fx);
         // the hue bar starts at pure red
         assert_eq!(crate::okhsv::to_rgb(hue_top(), 1.0, 1.0), Color32::from_rgb(255, 0, 0));
         // 보통 picked on the mixed 혼합: the first already has it, so nothing
