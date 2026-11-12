@@ -47,9 +47,9 @@
 
   <h3>セットアップ</h3>
   <ol class="steps">
-    <li>受け取った zip を<strong>すべて展開</strong>します。zip の中から直接実行すると、セットアップがファイルを見つけられません。</li>
-    <li><strong>Setup.cmd</strong> をダブルクリックします。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
-    <li>セットアップは 3 段階で進みます: プログラムのコピー、ffmpeg、ショートカットと <code>.void</code> ファイルの関連付け。デスクトップのショートカットを作るか、すぐ起動するかを聞かれたら、<kbd>Enter</kbd> で既定(はい)を選べます。</li>
+    <li>ダウンロードした <strong>DriftingVOID-…-Setup.exe</strong> を実行します。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
+    <li>デスクトップのショートカットを作るか、ffmpeg をダウンロードするかを選びます。</li>
+    <li>プログラム、ショートカット、<code>.void</code> ファイルの関連付けを設定し、選んだ場合は ffmpeg を取得します。終わるとそのまま起動できます。</li>
   </ol>
   <p>初回起動では Windows の表示言語に合わせて、韓国語、英語、日本語のいずれかで開きます。あとから <span class="ui">設定</span> › <span class="ui">言語</span> で変えられます。</p>
 
@@ -58,12 +58,12 @@
   <ul>
     <li>すでに ffmpeg が入っていれば、それを使います (PATH、または <code>winget install Gyan.FFmpeg</code> で入れたもの)。</li>
     <li>なければダウンロードするか聞きます。GitHub の <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の最新リリースビルド(約 80 MB)を取得し、SHA-256 チェックサムを確かめてから、インストール先の <code>ffmpeg</code> フォルダーにだけ置きます。</li>
-    <li>取得に失敗してもセットアップは最後まで進みます。あとで Setup.cmd をもう一度実行すれば、その段階だけやり直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
+    <li>取得に失敗してもセットアップは最後まで進みます。あとでセットアップをもう一度実行すれば、取得し直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
   </ul>
 
   <h3>更新と削除</h3>
   <ul>
-    <li><strong>新しいバージョンへの更新:</strong> 新しい zip の Setup.cmd を実行すると、同じ場所に上書きします。設定とプロジェクトはそのまま残ります。</li>
+    <li><strong>新しいバージョンへの更新:</strong> 新しいリリースが出ると、上のメニューの右に通知が出ます。押すとダウンロードしてインストールし、開いていたプロジェクトを開き直します。設定とプロジェクトはそのまま残ります。zip を展開して使う場合は、更新を確認しません。</li>
     <li><strong>削除:</strong> Windows の設定 › アプリ › インストールされているアプリ › Drifting VOID › アンインストール。設定ファイルも消すかは別に聞き、<code>.void</code> プロジェクトには触れません。</li>
   </ul>
 
@@ -158,7 +158,7 @@
   <p>数値欄には計算式をそのまま書けます: <code>40*1.5</code>、<code>2^3+1</code>、かっこも使えます。空のまま <kbd>Enter</kbd> を押すと 0 です。</p>
 
   <h3>元に戻す</h3>
-  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。保存せずに閉じようとすると、先に確認します。</p>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。再生位置と表示は元に戻しません。保存せずに閉じようとすると、先に確認します。保存していない変更は 30 秒ごとに復元用のコピーとして残り、アプリが突然終了した場合は、次の起動時に復元するか確認します。</p>
   <div class="folio">5</div>
 </section>
 
@@ -232,7 +232,7 @@
     <div>
       <ul>
         <li><kbd>T</kbd> でキャンバスを押して入力します。ボックスは入力に合わせて広がり、<span class="ui">折り返し幅</span>をオンにするとその幅で改行します。</li>
-        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。</li>
+        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。新しい文字は同梱の Pretendard JP で始まります。</li>
         <li><span class="ui">背景ボックス</span>をオンにすると、<span class="ui">左右余白</span>、<span class="ui">上下余白</span>、<span class="ui">角</span>、<span class="ui">ボックスの枠線</span>とその太さを決められます。</li>
         <li><span class="ui">文字の縁取り</span>はボックスとは別にオンにでき、色と太さを決めます。</li>
         <li>余白と太さは文字サイズに対する % なので、文字を大きくしても見た目が保たれます。変えても文字はその場から動かず、ボックスだけがまわりに広がります。</li>
@@ -612,7 +612,8 @@
 
   <h3>ffmpeg とライセンス</h3>
   <p>Drifting VOID は動画の処理に <a href="https://ffmpeg.org">FFmpeg</a> を別のプログラムとして実行します。ffmpeg はこの配布ファイルに含まれていません。セットアップ中に <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の公開ビルド(GPL)を取得してインストール先の <code>ffmpeg</code> フォルダーに置き、そのフォルダーの <code>LICENSE.txt</code> にライセンス全文が、<code>SOURCE.txt</code> に取得したファイル名、チェックサム、入手元があります。</p>
-  <p>日本語の画面フォント Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
+  <p>Drifting VOID は GNU AGPL バージョン 3 以降の自由ソフトウェアです。全文と追加条件は、インストール先の <code>LICENSE.txt</code> と <code>NOTICE.txt</code> にあります。</p>
+  <p>文字の既定フォントであり日本語の画面フォントでもある Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
 
   <div class="note"><b class="tag">このマニュアル</b><br>右上で言語を切り替え、<span class="ui">印刷</span>で A4 の冊子として印刷したり PDF に保存したりできます。最初はブラウザーの言語に合わせて開きます。画面ではシステムのテーマに従い、半円のボタンでライト・ダークを切り替えます。</div>
   <div class="folio">16</div>

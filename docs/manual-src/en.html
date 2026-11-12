@@ -47,9 +47,9 @@
 
   <h3>Setup</h3>
   <ol class="steps">
-    <li><strong>Extract the whole zip</strong> first. Run from inside the zip, setup cannot find its files.</li>
-    <li>Double-click <strong>Setup.cmd</strong>. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
-    <li>Setup runs three steps: copying the program, ffmpeg, then shortcuts and the <code>.void</code> file type. When it asks about a desktop shortcut and starting the app, <kbd>Enter</kbd> takes the default (yes).</li>
+    <li>Run the <strong>DriftingVOID-…-Setup.exe</strong> you downloaded. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
+    <li>Choose whether to make a desktop shortcut and whether to download ffmpeg.</li>
+    <li>Setup installs the program, its shortcuts and the <code>.void</code> file type, and fetches ffmpeg if you chose it. The app can start as setup ends.</li>
   </ol>
   <p>On its first start the app follows the Windows display language (Korean, English or Japanese). Change it any time in <span class="ui">Settings</span> › <span class="ui">Language</span>.</p>
 
@@ -58,12 +58,12 @@
   <ul>
     <li>An ffmpeg already on your PC is used (on PATH, or installed with <code>winget install Gyan.FFmpeg</code>).</li>
     <li>Otherwise setup asks to download one: the newest release build from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> on GitHub (about 80 MB), checked against its SHA-256 checksum and kept only in the install folder's <code>ffmpeg</code> folder.</li>
-    <li>If the download fails, setup still finishes; run Setup.cmd again later to retry that step. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
+    <li>If the download fails, setup still finishes; run the installer again later to fetch it. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
   </ul>
 
   <h3>Updating and removing</h3>
   <ul>
-    <li><strong>Updating:</strong> run Setup.cmd from the new zip; it installs over the old version. Settings and projects stay.</li>
+    <li><strong>Updating:</strong> a new release shows as a notice right of the menus. A click downloads and installs it, then opens the project you had open. Settings and projects stay. A copy run from an unzipped folder does not check for updates.</li>
     <li><strong>Removing:</strong> Windows Settings › Apps › Installed apps › Drifting VOID › Uninstall. It asks before deleting settings and never touches <code>.void</code> projects.</li>
   </ul>
 
@@ -158,7 +158,7 @@
   <p>Number boxes take sums as typed: <code>40*1.5</code>, <code>2^3+1</code>, brackets too. An empty box and <kbd>Enter</kbd> means 0.</p>
 
   <h3>Undo</h3>
-  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. Closing with unsaved changes asks first.</p>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. The playhead and the view are not undone. Closing with unsaved changes asks first. Unsaved changes are copied every 30 seconds; if the app ends unexpectedly, the next start offers to recover them.</p>
   <div class="folio">5</div>
 </section>
 
@@ -232,7 +232,7 @@
     <div>
       <ul>
         <li>With <kbd>T</kbd>, click the canvas and type. The box grows as you type; turn on <span class="ui">Wrap width</span> to break lines at a width.</li>
-        <li><span class="ui">Font</span> lists every font installed on the PC.</li>
+        <li><span class="ui">Font</span> lists every font installed on the PC. New text starts in Pretendard JP, which ships with the app.</li>
         <li><span class="ui">Background box</span> adds a box with <span class="ui">Pad X</span>, <span class="ui">Pad Y</span>, <span class="ui">Radius</span>, and a <span class="ui">Box border</span> with its width.</li>
         <li><span class="ui">Text outline</span> goes round the letters, with or without the box, in its own colour and width.</li>
         <li>Padding and widths are a % of the text size, so the look holds when the text grows. Changing them never moves the letters: the box grows round them.</li>
@@ -612,7 +612,8 @@
 
   <h3>ffmpeg and licences</h3>
   <p>Drifting VOID runs <a href="https://ffmpeg.org">FFmpeg</a> as a separate program for video. ffmpeg is not in this package: setup downloads a public build (GPL) from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> into the install folder's <code>ffmpeg</code> folder, where <code>LICENSE.txt</code> holds the full licence and <code>SOURCE.txt</code> the file name, checksum and source.</p>
-  <p>The Japanese UI face, Pretendard JP, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
+  <p>Drifting VOID is free software under the GNU AGPL, version 3 or later. The full text and the additional terms are in the install folder's <code>LICENSE.txt</code> and <code>NOTICE.txt</code>.</p>
+  <p>Pretendard JP, the default face for text and the Japanese UI face, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
 
   <div class="note"><b class="tag">This manual</b><br>Switch its language at the top right, and use <span class="ui">Print</span> to print it as an A4 booklet or save a PDF. It starts in your browser's language and follows the system theme; the half-circle button switches light and dark.</div>
   <div class="folio">16</div>

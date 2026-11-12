@@ -505,9 +505,9 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>설치</h3>
   <ol class="steps">
-    <li>받은 압축 파일을 <strong>모두 풉니다</strong>. 압축 파일 안에서 바로 실행하면 설치 파일을 찾지 못합니다.</li>
-    <li><strong>Setup.cmd</strong>를 더블 클릭합니다. “Windows의 PC 보호” 창이 뜨면 <span class="ui">추가 정보</span> → <span class="ui">실행</span>을 누릅니다. 아직 코드 서명이 없어서 나오는 창입니다.</li>
-    <li>설치 창이 세 단계를 차례로 진행합니다: 프로그램 복사, ffmpeg, 바로 가기와 <code>.void</code> 파일 연결. 바탕 화면 바로 가기를 만들지와 바로 실행할지를 물으면 <kbd>Enter</kbd>로 기본값(예)을 고를 수 있습니다.</li>
+    <li>받은 <strong>DriftingVOID-…-Setup.exe</strong>를 실행합니다. “Windows의 PC 보호” 창이 뜨면 <span class="ui">추가 정보</span> → <span class="ui">실행</span>을 누릅니다. 아직 코드 서명이 없어서 나오는 창입니다.</li>
+    <li>설치 창에서 바탕 화면 바로 가기를 만들지와 ffmpeg를 내려받을지를 고릅니다.</li>
+    <li>프로그램과 바로 가기, <code>.void</code> 파일 연결이 설치되고, 골랐다면 ffmpeg를 받습니다. 끝나면 바로 실행할 수 있습니다.</li>
   </ol>
   <p>처음 실행하면 Windows 표시 언어를 따라 한국어, 영어, 일본어 중 하나로 열립니다. 나중에 <span class="ui">설정</span> › <span class="ui">언어</span>에서 바꿀 수 있습니다.</p>
 
@@ -516,12 +516,12 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <ul>
     <li>이미 설치된 ffmpeg가 있으면 그것을 씁니다 (PATH 또는 <code>winget install Gyan.FFmpeg</code>로 설치한 것).</li>
     <li>없으면 내려받을지 묻습니다. GitHub의 <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> 최신 정식 빌드(약 80 MB)를 받아 SHA-256 체크섬을 확인한 뒤, 설치 폴더 안의 <code>ffmpeg</code> 폴더에만 둡니다.</li>
-    <li>받기에 실패해도 설치는 끝까지 진행됩니다. 나중에 Setup.cmd를 다시 실행하면 그 단계만 다시 해 볼 수 있습니다. ffmpeg가 없을 때 영상을 넣으면 아래쪽 상태 줄에 <span class="ui">ffmpeg 없음</span>이 뜹니다.</li>
+    <li>받기에 실패해도 설치는 끝까지 진행됩니다. 나중에 설치 파일을 다시 실행하면 다시 받을 수 있습니다. ffmpeg가 없을 때 영상을 넣으면 아래쪽 상태 줄에 <span class="ui">ffmpeg 없음</span>이 뜹니다.</li>
   </ul>
 
   <h3>업데이트와 제거</h3>
   <ul>
-    <li><strong>새 버전으로 업데이트:</strong> 새 압축 파일의 Setup.cmd를 실행하면 같은 자리에 덮어씁니다. 설정과 프로젝트는 그대로 남습니다.</li>
+    <li><strong>새 버전으로 업데이트:</strong> 새 릴리즈가 나오면 위쪽 메뉴 오른쪽에 알림이 뜹니다. 누르면 내려받아 설치하고, 열려 있던 프로젝트를 다시 엽니다. 설정과 프로젝트는 그대로 남습니다. 압축을 풀어 쓰는 경우에는 업데이트를 확인하지 않습니다.</li>
     <li><strong>제거:</strong> Windows 설정 › 앱 › 설치된 앱 › Drifting VOID › 제거. 설정 파일까지 지울지 따로 묻고, <code>.void</code> 프로젝트 파일은 건드리지 않습니다.</li>
   </ul>
 
@@ -616,7 +616,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <p>숫자 칸에는 계산식을 그대로 쓸 수 있습니다: <code>40*1.5</code>, <code>2^3+1</code>, 괄호도 됩니다. 칸을 비우고 <kbd>Enter</kbd>를 누르면 0입니다.</p>
 
   <h3>실행 취소</h3>
-  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> 실행 취소, <kbd>Ctrl</kbd>+<kbd>Y</kbd> 다시 실행. 저장하지 않은 채 닫으려 하면 먼저 물어봅니다.</p>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> 실행 취소, <kbd>Ctrl</kbd>+<kbd>Y</kbd> 다시 실행. 재생 위치와 보기는 되돌리지 않습니다. 저장하지 않은 채 닫으려 하면 먼저 물어봅니다. 저장하지 않은 변경은 30초마다 복구 사본으로 남고, 앱이 갑자기 꺼졌다면 다음에 시작할 때 복구할지 묻습니다.</p>
   <div class="folio">5</div>
 </section>
 
@@ -690,7 +690,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
     <div>
       <ul>
         <li><kbd>T</kbd>로 캔버스를 누르고 입력합니다. 상자는 입력하는 대로 늘어나고, <span class="ui">줄바꿈 폭</span>을 켜면 그 폭에서 줄을 바꿉니다.</li>
-        <li><span class="ui">글꼴</span>은 이 PC에 설치된 글꼴 전체에서 고릅니다.</li>
+        <li><span class="ui">글꼴</span>은 이 PC에 설치된 글꼴 전체에서 고릅니다. 새 글자는 함께 들어 있는 Pretendard JP로 시작합니다.</li>
         <li><span class="ui">배경 상자</span>를 켜면 <span class="ui">가로 여백</span>, <span class="ui">세로 여백</span>, <span class="ui">모서리</span>, <span class="ui">상자 테두리</span>와 그 굵기를 정합니다.</li>
         <li><span class="ui">글자 외곽선</span>은 상자와 따로 켜고, 색과 굵기를 정합니다.</li>
         <li>여백과 굵기는 글자 크기에 대한 %라서, 글자를 키워도 모양이 그대로입니다. 바꿔도 글자는 제자리에 있고 상자만 둘레로 커집니다.</li>
@@ -1070,7 +1070,8 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>ffmpeg와 라이선스</h3>
   <p>Drifting VOID는 영상 처리에 <a href="https://ffmpeg.org">FFmpeg</a>를 별도 프로그램으로 실행합니다. ffmpeg는 이 배포 파일에 들어 있지 않습니다. 설치 과정에서 <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a>의 공개 빌드(GPL)를 받아 설치 폴더의 <code>ffmpeg</code> 폴더에 두며, 그 폴더의 <code>LICENSE.txt</code>에 라이선스 전문이, <code>SOURCE.txt</code>에 받은 파일 이름, 체크섬, 출처가 있습니다.</p>
-  <p>일본어 화면 글꼴 Pretendard JP는 SIL Open Font License 1.1로 함께 배포되며, 설치 폴더의 <code>fonts</code>에 라이선스가 있습니다. 한국어와 영어 화면은 Pretendard 등 설치된 글꼴을 먼저 찾고, 없으면 맑은 고딕을 씁니다.</p>
+  <p>Drifting VOID는 GNU AGPL 3.0 이상으로 배포하는 자유 소프트웨어입니다. 전문과 추가 조건은 설치 폴더의 <code>LICENSE.txt</code>와 <code>NOTICE.txt</code>에 있습니다.</p>
+  <p>글자의 기본 글꼴이자 일본어 화면 글꼴인 Pretendard JP는 SIL Open Font License 1.1로 함께 배포되며, 설치 폴더의 <code>fonts</code>에 라이선스가 있습니다. 한국어와 영어 화면은 Pretendard 등 설치된 글꼴을 먼저 찾고, 없으면 맑은 고딕을 씁니다.</p>
 
   <div class="note"><b class="tag">이 설명서</b><br>오른쪽 위에서 언어를 바꾸고, <span class="ui">인쇄</span>로 A4 책자로 인쇄하거나 PDF로 저장할 수 있습니다. 처음에는 브라우저 언어를 따릅니다. 화면에서는 시스템 테마를 따르고, 반원 단추로 밝게·어둡게를 바꿉니다.</div>
   <div class="folio">16</div>
@@ -1127,9 +1128,9 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>Setup</h3>
   <ol class="steps">
-    <li><strong>Extract the whole zip</strong> first. Run from inside the zip, setup cannot find its files.</li>
-    <li>Double-click <strong>Setup.cmd</strong>. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
-    <li>Setup runs three steps: copying the program, ffmpeg, then shortcuts and the <code>.void</code> file type. When it asks about a desktop shortcut and starting the app, <kbd>Enter</kbd> takes the default (yes).</li>
+    <li>Run the <strong>DriftingVOID-…-Setup.exe</strong> you downloaded. If “Windows protected your PC” appears, choose <span class="ui">More info</span> → <span class="ui">Run anyway</span>; the app is not code-signed yet.</li>
+    <li>Choose whether to make a desktop shortcut and whether to download ffmpeg.</li>
+    <li>Setup installs the program, its shortcuts and the <code>.void</code> file type, and fetches ffmpeg if you chose it. The app can start as setup ends.</li>
   </ol>
   <p>On its first start the app follows the Windows display language (Korean, English or Japanese). Change it any time in <span class="ui">Settings</span> › <span class="ui">Language</span>.</p>
 
@@ -1138,12 +1139,12 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <ul>
     <li>An ffmpeg already on your PC is used (on PATH, or installed with <code>winget install Gyan.FFmpeg</code>).</li>
     <li>Otherwise setup asks to download one: the newest release build from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> on GitHub (about 80 MB), checked against its SHA-256 checksum and kept only in the install folder's <code>ffmpeg</code> folder.</li>
-    <li>If the download fails, setup still finishes; run Setup.cmd again later to retry that step. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
+    <li>If the download fails, setup still finishes; run the installer again later to fetch it. Without ffmpeg, dropping in a video shows <span class="ui">ffmpeg not found</span> in the status bar.</li>
   </ul>
 
   <h3>Updating and removing</h3>
   <ul>
-    <li><strong>Updating:</strong> run Setup.cmd from the new zip; it installs over the old version. Settings and projects stay.</li>
+    <li><strong>Updating:</strong> a new release shows as a notice right of the menus. A click downloads and installs it, then opens the project you had open. Settings and projects stay. A copy run from an unzipped folder does not check for updates.</li>
     <li><strong>Removing:</strong> Windows Settings › Apps › Installed apps › Drifting VOID › Uninstall. It asks before deleting settings and never touches <code>.void</code> projects.</li>
   </ul>
 
@@ -1238,7 +1239,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <p>Number boxes take sums as typed: <code>40*1.5</code>, <code>2^3+1</code>, brackets too. An empty box and <kbd>Enter</kbd> means 0.</p>
 
   <h3>Undo</h3>
-  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. Closing with unsaved changes asks first.</p>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes. The playhead and the view are not undone. Closing with unsaved changes asks first. Unsaved changes are copied every 30 seconds; if the app ends unexpectedly, the next start offers to recover them.</p>
   <div class="folio">5</div>
 </section>
 
@@ -1312,7 +1313,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
     <div>
       <ul>
         <li>With <kbd>T</kbd>, click the canvas and type. The box grows as you type; turn on <span class="ui">Wrap width</span> to break lines at a width.</li>
-        <li><span class="ui">Font</span> lists every font installed on the PC.</li>
+        <li><span class="ui">Font</span> lists every font installed on the PC. New text starts in Pretendard JP, which ships with the app.</li>
         <li><span class="ui">Background box</span> adds a box with <span class="ui">Pad X</span>, <span class="ui">Pad Y</span>, <span class="ui">Radius</span>, and a <span class="ui">Box border</span> with its width.</li>
         <li><span class="ui">Text outline</span> goes round the letters, with or without the box, in its own colour and width.</li>
         <li>Padding and widths are a % of the text size, so the look holds when the text grows. Changing them never moves the letters: the box grows round them.</li>
@@ -1692,7 +1693,8 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>ffmpeg and licences</h3>
   <p>Drifting VOID runs <a href="https://ffmpeg.org">FFmpeg</a> as a separate program for video. ffmpeg is not in this package: setup downloads a public build (GPL) from <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> into the install folder's <code>ffmpeg</code> folder, where <code>LICENSE.txt</code> holds the full licence and <code>SOURCE.txt</code> the file name, checksum and source.</p>
-  <p>The Japanese UI face, Pretendard JP, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
+  <p>Drifting VOID is free software under the GNU AGPL, version 3 or later. The full text and the additional terms are in the install folder's <code>LICENSE.txt</code> and <code>NOTICE.txt</code>.</p>
+  <p>Pretendard JP, the default face for text and the Japanese UI face, ships under the SIL Open Font License 1.1; its licence is in the install folder's <code>fonts</code>. Korean and English look for Pretendard and other installed fonts first, then Malgun Gothic.</p>
 
   <div class="note"><b class="tag">This manual</b><br>Switch its language at the top right, and use <span class="ui">Print</span> to print it as an A4 booklet or save a PDF. It starts in your browser's language and follows the system theme; the half-circle button switches light and dark.</div>
   <div class="folio">16</div>
@@ -1749,9 +1751,9 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>セットアップ</h3>
   <ol class="steps">
-    <li>受け取った zip を<strong>すべて展開</strong>します。zip の中から直接実行すると、セットアップがファイルを見つけられません。</li>
-    <li><strong>Setup.cmd</strong> をダブルクリックします。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
-    <li>セットアップは 3 段階で進みます: プログラムのコピー、ffmpeg、ショートカットと <code>.void</code> ファイルの関連付け。デスクトップのショートカットを作るか、すぐ起動するかを聞かれたら、<kbd>Enter</kbd> で既定(はい)を選べます。</li>
+    <li>ダウンロードした <strong>DriftingVOID-…-Setup.exe</strong> を実行します。「Windows によって PC が保護されました」が出たら <span class="ui">詳細情報</span> → <span class="ui">実行</span> を押します。まだコード署名がないために出る画面です。</li>
+    <li>デスクトップのショートカットを作るか、ffmpeg をダウンロードするかを選びます。</li>
+    <li>プログラム、ショートカット、<code>.void</code> ファイルの関連付けを設定し、選んだ場合は ffmpeg を取得します。終わるとそのまま起動できます。</li>
   </ol>
   <p>初回起動では Windows の表示言語に合わせて、韓国語、英語、日本語のいずれかで開きます。あとから <span class="ui">設定</span> › <span class="ui">言語</span> で変えられます。</p>
 
@@ -1760,12 +1762,12 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <ul>
     <li>すでに ffmpeg が入っていれば、それを使います (PATH、または <code>winget install Gyan.FFmpeg</code> で入れたもの)。</li>
     <li>なければダウンロードするか聞きます。GitHub の <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の最新リリースビルド(約 80 MB)を取得し、SHA-256 チェックサムを確かめてから、インストール先の <code>ffmpeg</code> フォルダーにだけ置きます。</li>
-    <li>取得に失敗してもセットアップは最後まで進みます。あとで Setup.cmd をもう一度実行すれば、その段階だけやり直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
+    <li>取得に失敗してもセットアップは最後まで進みます。あとでセットアップをもう一度実行すれば、取得し直せます。ffmpeg がないまま動画を入れると、下のステータスバーに <span class="ui">ffmpeg が見つかりません</span> と出ます。</li>
   </ul>
 
   <h3>更新と削除</h3>
   <ul>
-    <li><strong>新しいバージョンへの更新:</strong> 新しい zip の Setup.cmd を実行すると、同じ場所に上書きします。設定とプロジェクトはそのまま残ります。</li>
+    <li><strong>新しいバージョンへの更新:</strong> 新しいリリースが出ると、上のメニューの右に通知が出ます。押すとダウンロードしてインストールし、開いていたプロジェクトを開き直します。設定とプロジェクトはそのまま残ります。zip を展開して使う場合は、更新を確認しません。</li>
     <li><strong>削除:</strong> Windows の設定 › アプリ › インストールされているアプリ › Drifting VOID › アンインストール。設定ファイルも消すかは別に聞き、<code>.void</code> プロジェクトには触れません。</li>
   </ul>
 
@@ -1860,7 +1862,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
   <p>数値欄には計算式をそのまま書けます: <code>40*1.5</code>、<code>2^3+1</code>、かっこも使えます。空のまま <kbd>Enter</kbd> を押すと 0 です。</p>
 
   <h3>元に戻す</h3>
-  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。保存せずに閉じようとすると、先に確認します。</p>
+  <p><kbd>Ctrl</kbd>+<kbd>Z</kbd> で元に戻す、<kbd>Ctrl</kbd>+<kbd>Y</kbd> でやり直し。再生位置と表示は元に戻しません。保存せずに閉じようとすると、先に確認します。保存していない変更は 30 秒ごとに復元用のコピーとして残り、アプリが突然終了した場合は、次の起動時に復元するか確認します。</p>
   <div class="folio">5</div>
 </section>
 
@@ -1934,7 +1936,7 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
     <div>
       <ul>
         <li><kbd>T</kbd> でキャンバスを押して入力します。ボックスは入力に合わせて広がり、<span class="ui">折り返し幅</span>をオンにするとその幅で改行します。</li>
-        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。</li>
+        <li><span class="ui">フォント</span>は、この PC に入っているすべてのフォントから選べます。新しい文字は同梱の Pretendard JP で始まります。</li>
         <li><span class="ui">背景ボックス</span>をオンにすると、<span class="ui">左右余白</span>、<span class="ui">上下余白</span>、<span class="ui">角</span>、<span class="ui">ボックスの枠線</span>とその太さを決められます。</li>
         <li><span class="ui">文字の縁取り</span>はボックスとは別にオンにでき、色と太さを決めます。</li>
         <li>余白と太さは文字サイズに対する % なので、文字を大きくしても見た目が保たれます。変えても文字はその場から動かず、ボックスだけがまわりに広がります。</li>
@@ -2314,7 +2316,8 @@ html[data-lang="ja"] main.book[lang="ja"] { display: grid; }
 
   <h3>ffmpeg とライセンス</h3>
   <p>Drifting VOID は動画の処理に <a href="https://ffmpeg.org">FFmpeg</a> を別のプログラムとして実行します。ffmpeg はこの配布ファイルに含まれていません。セットアップ中に <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> の公開ビルド(GPL)を取得してインストール先の <code>ffmpeg</code> フォルダーに置き、そのフォルダーの <code>LICENSE.txt</code> にライセンス全文が、<code>SOURCE.txt</code> に取得したファイル名、チェックサム、入手元があります。</p>
-  <p>日本語の画面フォント Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
+  <p>Drifting VOID は GNU AGPL バージョン 3 以降の自由ソフトウェアです。全文と追加条件は、インストール先の <code>LICENSE.txt</code> と <code>NOTICE.txt</code> にあります。</p>
+  <p>文字の既定フォントであり日本語の画面フォントでもある Pretendard JP は SIL Open Font License 1.1 で同梱しており、インストール先の <code>fonts</code> にライセンスがあります。韓国語と英語の画面は Pretendard などインストール済みのフォントを先に探し、なければ Malgun Gothic を使います。</p>
 
   <div class="note"><b class="tag">このマニュアル</b><br>右上で言語を切り替え、<span class="ui">印刷</span>で A4 の冊子として印刷したり PDF に保存したりできます。最初はブラウザーの言語に合わせて開きます。画面ではシステムのテーマに従い、半円のボタンでライト・ダークを切り替えます。</div>
   <div class="folio">16</div>
