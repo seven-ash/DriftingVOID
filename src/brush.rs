@@ -27,11 +27,24 @@ pub struct Stepper {
     s: f32,
     last: Option<(Pos2, f32)>,
     carry: f32,
+    /// Only dabs that reach into this rect (target pixels) are given; the
+    /// spacing is kept along the whole stroke, so the ones given are where
+    /// they would be without it.
+    clip: Option<Rect>,
 }
 
 impl Stepper {
     pub fn new(p: BrushParams, s: f32) -> Self {
-        Self { p, s, last: None, carry: 0.0 }
+        Self { p, s, last: None, carry: 0.0, clip: None }
+    }
+
+    /// As `new`, giving only the dabs that reach into `clip`.
+    pub fn clipped(p: BrushParams, s: f32, clip: Rect) -> Self {
+        Self { p, s, last: None, carry: 0.0, clip: Some(clip) }
+    }
+
+    fn shows(&self, c: Pos2, r: f32) -> bool {
+        self.clip.is_none_or(|k| k.expand(r + 1.0).contains(c))
     }
 
     /// Dab radius in target pixels at this pressure (at least half a pixel).
@@ -49,7 +62,10 @@ impl Stepper {
         let pressure = pressure.clamp(0.0, 1.0);
         match self.last {
             None => {
-                out.push(Dab { c: p, r: self.radius_at(pressure), a: self.alpha_at(pressure) });
+                let r = self.radius_at(pressure);
+                if self.shows(p, r) {
+                    out.push(Dab { c: p, r, a: self.alpha_at(pressure) });
+                }
                 self.last = Some((p, pressure));
                 self.carry = 0.0;
             }
@@ -71,7 +87,10 @@ impl Stepper {
                     t += step;
                     let c = q + d * (t / dist);
                     let pr = qp + (pressure - qp) * (t / dist);
-                    out.push(Dab { c, r: self.radius_at(pr), a: self.alpha_at(pr) });
+                    let r = self.radius_at(pr);
+                    if self.shows(c, r) {
+                        out.push(Dab { c, r, a: self.alpha_at(pr) });
+                    }
                 }
                 self.last = Some((p, pressure));
             }
@@ -141,10 +160,30 @@ impl BStroke {
         self.dabs_mapped(|q| pos2((q.x - origin.x) * s, (q.y - origin.y) * s), s)
     }
 
+    /// As `dabs`, only those reaching into `clip` (target pixels): a stroke
+    /// drawn zoomed out and seen zoomed in is laid where it shows, not along
+    /// all of its length.
+    pub fn dabs_in(&self, origin: Pos2, s: f32, clip: Rect) -> Vec<Dab> {
+        let mut st = Stepper::clipped(self.p, s, clip);
+        let mut out = Vec::new();
+        for q in &self.pts {
+            st.push(pos2((q[0] - origin.x) * s, (q[1] - origin.y) * s), q[2], &mut out);
+        }
+        out
+    }
+
     /// The dabs for a drawing that maps layer points to target pixels by
     /// `map`: a uniform scale `s` (with any turn and shift).
     pub fn dabs_mapped(&self, map: impl Fn(Pos2) -> Pos2, s: f32) -> Vec<Dab> {
-        let mut st = Stepper::new(self.p, s);
+        self.dabs_mapped_in(map, s, None)
+    }
+
+    /// As `dabs_mapped`, only those reaching into `clip` when given.
+    pub fn dabs_mapped_in(&self, map: impl Fn(Pos2) -> Pos2, s: f32, clip: Option<Rect>) -> Vec<Dab> {
+        let mut st = match clip {
+            Some(k) => Stepper::clipped(self.p, s, k),
+            None => Stepper::new(self.p, s),
+        };
         let mut out = Vec::new();
         for q in &self.pts {
             st.push(map(pos2(q[0], q[1])), q[2], &mut out);
@@ -352,6 +391,27 @@ mod tests {
         let w = pos2(q[0], q[1]) + t.offset;
         assert!((w - pos2(-20.0, 80.0)).length() < 1e-3, "{w:?}");
         assert_eq!(t.strokes[0].p.radius, 10.0);
+    }
+
+    /// Dabs laid only where they show are the very dabs of the whole stroke
+    /// that reach there (same places, sizes and alphas), and far fewer of
+    /// them for a long stroke seen up close.
+    #[test]
+    fn clipped_dabs_are_the_same_dabs() {
+        let mut p = params(6.0);
+        p.pressure_size = true;
+        let pts: Vec<[f32; 3]> = (0..=150).map(|i| [i as f32 * 400.0, (i as f32 * 0.04).sin() * 5000.0, if i % 30 < 15 { 1.0 } else { 0.4 + (i as f32 * 0.1).sin().abs() * 0.6 }]).collect();
+        let st = BStroke::new(pts, p);
+        let origin = pos2(20000.0, -3000.0);
+        let clip = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+        let all = st.dabs(origin, 1.0);
+        let shown: Vec<Dab> = all.iter().copied().filter(|d| clip.expand(d.r + 1.0).contains(d.c)).collect();
+        let fast = st.dabs_in(origin, 1.0, clip);
+        assert_eq!(fast.len(), shown.len(), "{} of {}", fast.len(), all.len());
+        for (a, b) in fast.iter().zip(&shown) {
+            assert!((a.c - b.c).length() < 0.05 && (a.r - b.r).abs() < 1e-3 && (a.a - b.a).abs() < 1e-4, "{a:?} {b:?}");
+        }
+        assert!(fast.len() * 20 < all.len(), "{} of {}", fast.len(), all.len());
     }
 
     /// The dabs follow the stroke's length on screen: the same stroke shown

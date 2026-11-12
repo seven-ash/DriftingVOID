@@ -1303,11 +1303,15 @@ impl Gpu {
         let crate::doc::LayerKind::Raster(pr) = &mut prev.kind else { return None };
         let last = pr.strokes.pop()?;
         let pb = prev.bounds()?;
-        // the earlier picture's box: the whole of that layer (not cut to the view)
         let prect = if v.origin.is_some() { v.layer_box(pb)? } else { v.px(pb)? };
+        // a picture cut to the view (a layer bigger than it, `layer_box`) holds
+        // all of that layer inside its box; the box of this one is cut on the
+        // same grid then, so the earlier one is all of it there. Not when
+        // only the earlier one was cut: this one needs what lay outside it.
         let whole = |b: Rect| [(b.min.x * v.s).floor() as i32 - 1, (b.min.y * v.s).floor() as i32 - 1, (b.max.x * v.s).ceil() as i32 + 1, (b.max.y * v.s).ceil() as i32 + 1];
-        if let (Some([ox, oy]), w) = (v.origin, whole(pb)) {
-            if [prect[0] + ox, prect[1] + oy, prect[2] + ox, prect[3] + oy] != w {
+        if let Some([ox, oy]) = v.origin {
+            let cut = |r: [i32; 4], b: Rect| [r[0] + ox, r[1] + oy, r[2] + ox, r[3] + oy] != whole(b);
+            if cut(prect, pb) && !cut(rect, layer.bounds()?) {
                 return None;
             }
         }
@@ -1333,7 +1337,7 @@ impl Gpu {
             wgpu::Extent3d { width: ptex.width(), height: ptex.height(), depth_or_array_layers: 1 },
         );
         let origin = v.full.min - r.offset + vec2(rect[0] as f32, rect[1] as f32) / v.s;
-        let dabs = last.dabs(origin, v.s);
+        let dabs = last.dabs_in(origin, v.s, Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32)));
         self.brush_strokes(&mut enc, &tex, w, h, &[(dabs.as_slice(), &last.p)]);
         self.queue.submit([enc.finish()]);
         Some((Arc::new(tex), pkey.content))
@@ -1367,7 +1371,10 @@ impl Gpu {
         let crate::doc::LayerKind::Raster(r) = &layer.kind else { unreachable!() };
         let origin = v.full.min - r.offset + vec2(rx, ry) / s;
         let seen = Rect::from_min_size(origin, vec2(w as f32, h as f32) / s).expand(2.0);
-        let dabs: Vec<(Vec<crate::brush::Dab>, crate::raster::BrushParams)> = r.strokes.iter().filter(|st| st.bounds.intersects(seen)).map(|st| (st.dabs(origin, s), st.p)).collect();
+        // only the dabs that show in this box (a stroke drawn zoomed out, seen
+        // up close, is far longer than the box)
+        let clip = Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32));
+        let dabs: Vec<(Vec<crate::brush::Dab>, crate::raster::BrushParams)> = r.strokes.iter().filter(|st| st.bounds.intersects(seen)).map(|st| (st.dabs_in(origin, s, clip), st.p)).collect();
         let list: Vec<(&[crate::brush::Dab], &crate::raster::BrushParams)> = dabs.iter().map(|(d, p)| (d.as_slice(), p)).collect();
         self.brush_strokes(&mut enc, &tex, w, h, &list);
         self.queue.submit([enc.finish()]);
@@ -3040,6 +3047,100 @@ mod tests {
                 let crate::doc::LayerKind::Raster(r) = &mut doc.get_mut(id).unwrap().kind else { unreachable!() };
                 r.strokes.pop();
             }
+        });
+    }
+
+    /// A stroke drawn frame by frame over a brush layer far bigger than the
+    /// view (its picture cut to the view) ends up as the same picture as
+    /// the layer drawn whole from nothing.
+    #[test]
+    fn a_stroke_drawn_over_a_cut_picture_matches_a_fresh_one() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer};
+        let bp = |radius: f32, erase: bool| BrushParams { color: Color32::from_rgb(200, 80, 30), radius, opacity: 0.8, hardness: 0.5, pressure_size: true, pressure_opacity: false, erase };
+        let mut r = RasterLayer::default();
+        for k in 0..6 {
+            let pts: Vec<[f32; 3]> = (0..=150).map(|i| [i as f32 * 400.0, k as f32 * 150.0 + (i as f32 * 0.05).sin() * 300.0, 0.5 + 0.5 * (i as f32 * 0.2).sin().abs()]).collect();
+            r.strokes.push(Arc::new(BStroke::new(pts, bp(20.0, false))));
+        }
+        let mut doc = Document::default();
+        let id = doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+        let at = pos2(20000.0, -200.0);
+        let ok = with_gpu(|g| {
+            g.clear();
+            let _ = canvas(g, &doc, at, 1.0, 640, 480);
+            for (n, erase) in [(30usize, false), (25, true)] {
+                for k in 1..=n {
+                    let crate::doc::LayerKind::Raster(r) = &mut doc.get_mut(id).unwrap().kind else { unreachable!() };
+                    let pts: Vec<[f32; 3]> = (0..k * 4).map(|i| [20050.0 + i as f32 * 5.0, -100.0 + (i as f32 * 0.1).sin() * 120.0, 1.0]).collect();
+                    if k > 1 {
+                        r.strokes.pop();
+                    }
+                    r.strokes.push(Arc::new(BStroke::new(pts, bp(14.0, erase))));
+                    let _ = canvas(g, &doc, at, 1.0, 640, 480);
+                }
+            }
+            let kept = canvas(g, &doc, at, 1.0, 640, 480);
+            g.clear();
+            let fresh = canvas(g, &doc, at, 1.0, 640, 480);
+            let worst = kept.iter().zip(&fresh).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(worst <= 1, "built frame by frame vs drawn fresh: worst {worst}");
+            assert!(kept.chunks(4).filter(|p| p[3] > 0).count() > 10_000);
+        });
+        if ok.is_none() {
+            eprintln!("no GPU: skipped");
+        }
+    }
+
+    /// Strokes drawn at 1 % seen at 100 % (Ash, 11-12: panning and painting
+    /// there lag): a view moved frame by frame, and a stroke added there.
+    /// `cargo test --release bench_brush_zoomed_in -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_brush_zoomed_in() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer};
+        let bp = |radius: f32| BrushParams { color: Color32::RED, radius, opacity: 1.0, hardness: 0.8, pressure_size: false, pressure_opacity: false, erase: false };
+        let mut r = RasterLayer::default();
+        // ten strokes of 600 screen px drawn at 1 % (60 000 canvas units), brush 12
+        for k in 0..10 {
+            let pts: Vec<[f32; 3]> = (0..=150).map(|i| [i as f32 * 400.0, k as f32 * 3000.0 + (i as f32 * 0.04).sin() * 5000.0, 1.0]).collect();
+            r.strokes.push(Arc::new(BStroke::new(pts, bp(6.0))));
+        }
+        let mut doc = Document::default();
+        let id = doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+        with_gpu(|g| {
+            g.clear();
+            let _ = canvas(g, &doc, pos2(20000.0, 0.0), 1.0, 1200, 800);
+            let t = std::time::Instant::now();
+            let n = 20;
+            let mut worst = 0f64;
+            for k in 0..n {
+                let f = std::time::Instant::now();
+                let _ = canvas(g, &doc, pos2(20000.0 + k as f32 * 40.0, 0.0), 1.0, 1200, 800);
+                worst = worst.max(f.elapsed().as_secs_f64() * 1e3);
+            }
+            eprintln!("at 100 %, panning 40 px a frame: {:.1} ms a frame, worst {worst:.1}", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+            let ld = doc.get(id).unwrap().clone();
+            let crate::doc::LayerKind::Raster(r) = &ld.kind else { unreachable!() };
+            let dabs: usize = r.strokes.iter().map(|s| s.dabs(Pos2::ZERO, 1.0).len()).sum();
+            eprintln!("  dabs of the whole layer at 100 % (only those in view are laid): {dabs}");
+            let t = std::time::Instant::now();
+            for k in 1..=n {
+                let crate::doc::LayerKind::Raster(r) = &mut doc.get_mut(id).unwrap().kind else { unreachable!() };
+                let pts: Vec<[f32; 3]> = (0..k * 6).map(|i| [20300.0 + i as f32 * 4.0, 300.0, 1.0]).collect();
+                if k > 1 {
+                    r.strokes.pop();
+                }
+                r.strokes.push(Arc::new(BStroke::new(pts, bp(6.0))));
+                let _ = canvas(g, &doc, pos2(20000.0, 0.0), 1.0, 1200, 800);
+            }
+            eprintln!("at 100 %, a stroke growing: {:.1} ms a frame", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                let _ = canvas(g, &doc, pos2(20000.0, 0.0), 1.0, 1200, 800);
+            }
+            eprintln!("at 100 %, nothing changing (read back only): {:.1} ms a frame", t.elapsed().as_secs_f64() * 1e3 / n as f64);
         });
     }
 

@@ -713,7 +713,7 @@ fn draw_brushed(pm: &mut Pixmap, r: &crate::raster::RasterLayer, base: Transform
         if !st.bounds.translate(off).intersects(region) {
             continue;
         }
-        let dabs = st.dabs_mapped(|q| map(q + off), scale);
+        let dabs = st.dabs_mapped_in(|q| map(q + off), scale, Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32))));
         crate::brush::paint(px, w, h, &dabs, &st.p);
     }
     pm.draw_pixmap(x0 as i32, y0 as i32, own.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
