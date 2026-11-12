@@ -1,13 +1,15 @@
 # Publishes the user manual (dist/manual) to GitHub Pages:
 # https://seven-ash.github.io/DriftingVOID/
+# It runs when the manual changes on main. The cover names the latest
+# release; after a release that did not change the manual, run it by hand
+# on main (workflow_dispatch). Pages deploy only from main, so it does not
+# run on the release's tag.
 name: Manual
 
 on:
   push:
     branches: [main]
     paths: ["dist/manual/**", ".github/workflows/manual.yml"]
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
