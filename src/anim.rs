@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
 //! Timeline and keyframes (notes/VIDEO.md, V2).
 //!
@@ -701,6 +701,44 @@ pub fn layer_at_time(doc: &Document, l: &Layer) -> Option<Layer> {
             Some(out)
         }
         _ => None,
+    }
+}
+
+/// After an FX layer's filter changed from `old` (Ash, 11-12): the keys of
+/// the old filter's values go with its kept settings instead of driving the
+/// new filter's dials, and the keys the new filter had here come back.
+pub fn fx_keys_follow(l: &mut Layer, old: crate::doc::Filter) {
+    let LayerKind::Fx(fx) = &mut l.kind else { return };
+    if fx.filter == old {
+        return;
+    }
+    let bits = ch::FX.iter().fold(0u16, |m, c| m | c);
+    let mut out = Vec::new();
+    if let Some(an) = l.anim.as_mut() {
+        let mut stay = Vec::with_capacity(an.keys.len());
+        for mut k in std::mem::take(&mut an.keys) {
+            if k.ch & bits != 0 {
+                out.push(Key { ch: k.ch & bits, ..k.clone() });
+                k.ch &= !bits;
+            }
+            if k.ch != 0 {
+                stay.push(k);
+            }
+        }
+        an.keys = stay;
+    }
+    if !out.is_empty() {
+        match fx.kept.iter_mut().find(|k| k.filter == old) {
+            Some(e) => e.keys = out,
+            None => fx.kept.push(crate::doc::FxKept { keys: out, ..crate::doc::FxKept::fresh(old) }),
+        }
+    }
+    let back = std::mem::take(&mut fx.keys_back);
+    if !back.is_empty() {
+        let an = l.anim.get_or_insert_with(Default::default);
+        for k in back {
+            an.set_key(k);
+        }
     }
 }
 

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
 //! Updates from the GitHub releases (Ash, 11-02): no pop-up. A release build
 //! asks GitHub once at start (an off switch in 설정) for the latest release;

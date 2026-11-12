@@ -4,16 +4,12 @@ Thank you for wanting to help with Drifting VOID.
 
 ## Licence of contributions
 
-Drifting VOID is licensed under the GNU General Public License, version 3
-or (at your option) any later version, with additional terms on
+Drifting VOID is licensed under the GNU Affero General Public License,
+version 3 or (at your option) any later version, with additional terms on
 attribution, marking of modified versions and the program's name (see
 `LICENSE` and `NOTICE`). By contributing, you license your contribution
 under the same licence and the same additional terms. You keep the
 copyright to your contribution.
-
-One file is different: `src/lsd.rs` is a port of AGPL-licensed reference
-code, so a contribution to that file is licensed under the GNU Affero
-General Public License, version 3 or later (`LICENSE-AGPL`).
 
 ## Sign-off (Developer Certificate of Origin)
 
@@ -74,5 +70,5 @@ commit keeps the contributor's authorship and sign-off (as
 contributed stays in the history.
 
 Code copied from elsewhere must come with its licence, and that licence
-must be compatible with the GNU GPL version 3; say where it came from in
+must be compatible with the GNU AGPL version 3; say where it came from in
 the pull request.

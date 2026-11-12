@@ -1,8 +1,8 @@
 [package]
 name = "drifting-void"
-version = "0.106.6"
+version = "0.107.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/seven-ash/DriftingVOID"
 publish = false
 

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 """The installer's wizard images, drawn from the app icon's parts
 (assets/icon.svg: the dot grid, the dashed frame, the violet-to-amber
 stroke) on the icon's night colour. Writes dist/inno/img/:

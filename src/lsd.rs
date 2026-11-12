@@ -16,9 +16,9 @@
 //   GNU Affero General Public License for more details.
 //
 // Port and changes: Copyright (C) 2026 Ash (seven-ash), under the same
-// licence (GNU AGPL version 3 or later; the text is in LICENSE-AGPL). The
-// rest of Drifting VOID is under the GNU GPL version 3 or later, which its
-// section 13 allows to be combined with this file; see NOTICE.
+// licence (GNU AGPL version 3 or later; the text is in LICENSE), which is
+// the licence of the whole of Drifting VOID. Additional terms (AGPL-3.0
+// section 7): see NOTICE.
 //
 // Changed from the reference code: written in Rust for this program's image
 // and segment types; only the parts needed here (the scale step, level-line

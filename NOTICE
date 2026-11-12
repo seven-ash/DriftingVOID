@@ -3,19 +3,24 @@ Copyright (C) 2026 Ash (seven-ash)
 Original repository: https://github.com/seven-ash/DriftingVOID
 
 This program is free software: you can redistribute it and/or modify it
-under the terms of the GNU General Public License as published by the Free
-Software Foundation, either version 3 of the License, or (at your option)
-any later version, with the additional terms below. It is distributed in
-the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
-implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-See the GNU General Public License (the file LICENSE) for more details.
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version, with the additional terms below. It is
+distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License (the file
+LICENSE) for more details.
+
+Versions up to 0.106.6 (releases up to 1.0.1.R) were published under the
+GNU General Public License, version 3 or later, and stay available under
+it.
 
 ------------------------------------------------------------------------
-Additional terms (GNU GPL version 3, section 7)
+Additional terms (GNU AGPL version 3, section 7)
 ------------------------------------------------------------------------
 
 These terms apply to this program and to every work based on it, as
-section 7 of the GNU GPL allows. They are part of the licence; removing
+section 7 of the GNU AGPL allows. They are part of the licence; removing
 them is not permitted.
 
 1. Attribution (section 7(b)). Any copy you convey, in source or object
@@ -50,7 +55,7 @@ Third-party components
 ------------------------------------------------------------------------
 
 The program includes third-party code and fonts under their own licences
-(all compatible with the GNU GPL version 3); their notices are in
+(all compatible with the GNU AGPL version 3); their notices are in
 THIRD-PARTY-NOTICES.html. FFmpeg is not part of this program: the setup
 downloads it separately as its own program under its own licence.
 
@@ -59,13 +64,11 @@ Some source files follow code published by others and keep its licence:
 - src/lsd.rs (the line segment detector behind line suggestions) is a
   port of parts of LSD 1.6, the reference implementation of "LSD: a Line
   Segment Detector" (Image Processing On Line, 2012), Copyright (c)
-  2007-2011 rafael grompone von gioi <grompone@gmail.com>. That file,
-  with the changes made here, is under the GNU Affero General Public
-  License, version 3 or (at your option) any later version; its text is
-  in the file LICENSE-AGPL. Section 13 of both licences allows that file
-  to be combined with the rest of the program, which stays under the GNU
-  GPL as above, and the Affero licence's terms keep applying to that
-  file. The additional terms above apply to the changes made to it here.
+  2007-2011 rafael grompone von gioi <grompone@gmail.com>, published
+  under the GNU Affero General Public License, version 3 or (at your
+  option) any later version: this program's own licence (the file
+  LICENSE). The additional terms above apply to the changes made to it
+  here.
 
 - src/okhsv.rs (colour conversions for the palette) follows Björn
   Ottosson's reference code for Oklab and Okhsv, Copyright (c) 2021
@@ -81,7 +84,9 @@ Some source files follow code published by others and keep its licence:
 - src/gpu.wgsl: the brightness and contrast filter uses the formulas of
   GIMP's brightness-contrast operation, Copyright (C) 1995 Spencer
   Kimball and Peter Mattis, Copyright (C) 2012 Michael Natterer, under
-  the GNU General Public License, version 3 or later (this program's own
-  licence). src/segment.rs takes the weights of its edge blur and the
-  choice of the strongest colour channel from GIMP's scissors tool, under
-  the same licence; the code is this program's own.
+  the GNU General Public License, version 3 or later (its text is in
+  the file LICENSE-GPL). src/segment.rs takes the weights of its edge
+  blur and the choice of the strongest colour channel from GIMP's
+  scissors tool, under the same licence; the code is this program's own.
+  Section 13 of both licences allows these parts to be combined with the
+  rest of the program.

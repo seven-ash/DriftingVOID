@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
 //! Document model. World units are pixels: an image placed at scale 1.0
 //! exports at its original resolution when the export scale is 1.0.
@@ -759,6 +759,10 @@ pub struct FxLayer {
     /// going back to one brings them back. Saved with the layer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<FxKept>,
+    /// The keys of the filter just returned to, on their way back to the
+    /// layer's keys (`anim::fx_keys_follow` takes them at once). Not saved.
+    #[serde(skip)]
+    pub keys_back: Vec<crate::anim::Key>,
 }
 
 /// One filter's settings, put aside while the layer shows another filter.
@@ -772,6 +776,9 @@ pub struct FxKept {
     pub moving: bool,
     #[serde(default = "source_luma")]
     pub source: u8,
+    /// The keys of this filter's values (`anim::fx_keys_follow`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<crate::anim::Key>,
 }
 
 fn source_luma() -> u8 {
@@ -949,10 +956,18 @@ pub enum Film {
     Fixed(Rect),
 }
 
+impl FxKept {
+    /// A filter's settings as a new layer has them.
+    pub fn fresh(f: Filter) -> Self {
+        let l = FxLayer::new(f);
+        FxKept { filter: f, v: l.v, curves: l.curves, moving: l.moving, source: l.source, keys: Vec::new() }
+    }
+}
+
 impl FxLayer {
     pub fn new(filter: Filter) -> Self {
         let curves = std::array::from_fn(|_| curve_identity());
-        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false, source: source_luma(), kept: Vec::new() }
+        FxLayer { filter, v: filter.defaults(), blend: None, colors: fx_colors(), curves, moving: false, source: source_luma(), kept: Vec::new(), keys_back: Vec::new() }
     }
 
     /// Shows another filter: this one's settings are put aside, and the new
@@ -962,14 +977,17 @@ impl FxLayer {
         if f == self.filter {
             return;
         }
-        let old = FxKept { filter: self.filter, v: self.v, curves: std::mem::take(&mut self.curves), moving: self.moving, source: self.source };
+        let old = FxKept { filter: self.filter, v: self.v, curves: std::mem::take(&mut self.curves), moving: self.moving, source: self.source, keys: Vec::new() };
         self.kept.retain(|k| k.filter != old.filter);
-        self.kept.push(old);
-        let fresh = FxLayer::new(f);
-        let k = match self.kept.iter().position(|k| k.filter == f) {
+        // (settings still at their defaults need no keeping)
+        if old != FxKept::fresh(old.filter) {
+            self.kept.push(old);
+        }
+        let mut k = match self.kept.iter().position(|k| k.filter == f) {
             Some(i) => self.kept.remove(i),
-            None => FxKept { filter: f, v: fresh.v, curves: fresh.curves, moving: fresh.moving, source: fresh.source },
+            None => FxKept::fresh(f),
         };
+        self.keys_back = std::mem::take(&mut k.keys);
         self.filter = f;
         self.v = k.v;
         self.curves = k.curves;

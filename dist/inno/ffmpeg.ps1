@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 # FFmpeg for the Inno Setup installer (DriftingVOID.iss), run hidden:
 #   -Resolve -Out <file>: picks the newest numbered GPL shared build of
 #     BtbN/FFmpeg-Builds and writes "url|sha256|name|bytes" (or "error|...")

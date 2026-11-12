@@ -88,7 +88,7 @@ After changing dependencies, regenerate the notices:
 cargo about generate -c dist/legal/about.toml dist/legal/about.hbs -o THIRD-PARTY-NOTICES.html
 ```
 
-Every dependency must be under a licence compatible with the GPL-3.0; the
+Every dependency must be under a licence compatible with the AGPL-3.0; the
 accepted list is in `dist/legal/about.toml`.
 
 ## Packaging and releases

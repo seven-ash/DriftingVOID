@@ -1,5 +1,5 @@
-﻿; SPDX-License-Identifier: GPL-3.0-or-later
-; Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+﻿; SPDX-License-Identifier: AGPL-3.0-or-later
+; Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 ;
 ; Drifting VOID installer (Inno Setup 6.7). Built by dist\package.ps1 from
 ; the packaged folder:
@@ -35,7 +35,7 @@ AppPublisher=Ash (seven-ash)
 AppPublisherURL={#Repo}
 AppSupportURL={#Repo}/issues
 AppUpdatesURL={#Repo}/releases
-AppCopyright=Copyright (C) 2026 Ash (seven-ash). GPL-3.0-or-later.
+AppCopyright=Copyright (C) 2026 Ash (seven-ash). AGPL-3.0-or-later.
 VersionInfoVersion={#FileVer}
 VersionInfoProductVersion={#FileVer}
 VersionInfoProductTextVersion={#AppVer}
@@ -112,7 +112,7 @@ Source: "{#Src}\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\fonts\*"; DestDir: "{app}\fonts"; Flags: ignoreversion
 Source: "{#Src}\manual\*"; DestDir: "{app}\manual"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Src}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Src}\LICENSE-AGPL.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Src}\LICENSE-GPL.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Src}\THIRD-PARTY-NOTICES.html"; DestDir: "{app}"; Flags: ignoreversion
 Source: "ffmpeg.ps1"; Flags: dontcopy

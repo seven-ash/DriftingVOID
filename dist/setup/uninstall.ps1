@@ -1,5 +1,5 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+﻿# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 # Drifting VOID uninstall: removes the install folder (with its ffmpeg),
 # shortcuts, the .void file type and the uninstall entry. Settings in
 # %APPDATA%\DriftingVOID stay unless asked. Projects (.void files) are never touched.

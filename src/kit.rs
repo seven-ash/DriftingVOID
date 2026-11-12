@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
 //! The controls kit (UI overhaul phase 1, `notes/updates/ui-overhaul.md`): one
 //! control per job on the shared row grid (`theme::ROW_H`). Sections move onto

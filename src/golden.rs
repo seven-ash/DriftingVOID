@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 
 //! Golden images of the CPU export: the render overhaul (notes/updates/
 //! wgpu-renderer.md) must not change what an export looks like. Each scene is

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 """The UI's translations, one row per Korean key: (English, Japanese).
 `python lang/translations.py` writes lang/en.json and lang/ja.json.
 Style (notes/updates/localisation.md): terse labels as in Korean; English in

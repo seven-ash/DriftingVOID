@@ -12,7 +12,7 @@
   <a href="https://github.com/seven-ash/DriftingVOID/releases/latest"><b>Download</b></a> ·
   <a href="https://seven-ash.github.io/DriftingVOID/">Manual</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="LICENSE">GPL-3.0-or-later</a>
+  <a href="LICENSE">AGPL-3.0-or-later</a>
 </p>
 
 ![Drifting VOID: photos, drawing and the layer panels on the canvas](dist/manual/img/overview.jpg)
@@ -127,8 +127,8 @@ see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 Copyright (C) 2026 Ash (seven-ash).
 
 Drifting VOID is free software under the
-[GNU General Public License, version 3 or later](LICENSE), with additional
-terms under its section 7 ([`NOTICE`](NOTICE)):
+[GNU Affero General Public License, version 3 or later](LICENSE), with
+additional terms under its section 7 ([`NOTICE`](NOTICE)):
 
 - keep the attribution *"Based on Drifting VOID by Ash (seven-ash),
   https://github.com/seven-ash/DriftingVOID"*;
@@ -136,11 +136,15 @@ terms under its section 7 ([`NOTICE`](NOTICE)):
 - give a modified version a name and icon of its own (the licence grants no
   rights to the name "Drifting VOID" or its icons).
 
-One source file, `src/lsd.rs` (the line segment detector), is a port of the
-LSD reference code and stays under the
-[GNU Affero General Public License, version 3 or later](LICENSE-AGPL);
-`src/okhsv.rs` follows MIT-licensed reference code. Both are described in
-[`NOTICE`](NOTICE).
+Releases up to 1.0.1.R were published under the GNU General Public License,
+version 3 or later.
+
+Some source files follow code published by others: `src/lsd.rs` (the line
+segment detector) is a port of the AGPL-licensed LSD reference code,
+`src/okhsv.rs` and one shader function follow MIT-licensed code, and two
+filters use formulas from GIMP under the
+[GNU General Public License, version 3 or later](LICENSE-GPL). They are
+described in [`NOTICE`](NOTICE).
 
 Third-party components and their licences:
 [`THIRD-PARTY-NOTICES.html`](THIRD-PARTY-NOTICES.html) (regenerate with

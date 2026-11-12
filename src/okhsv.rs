@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later AND MIT
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later AND MIT
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 //
 // The conversions follow Björn Ottosson's reference code for Oklab, Okhsv
 // and its gamut functions (https://bottosson.github.io/posts/colorpicker/,

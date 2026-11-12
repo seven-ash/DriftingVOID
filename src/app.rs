@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9809,18 +9809,11 @@ impl App {
                 }
             }
         }
-        // another filter: its values are other things, so keys of the old
-        // filter's values go (they would drive the new one's dials)
+        // another filter: its values are other things, so the keys of the
+        // old filter's values are put aside with its settings (they would
+        // drive the new one's dials) and the new filter's own come back
         if let (LayerKind::Fx(b), Some(l)) = (&before.kind, self.doc.get_mut(id)) {
-            if matches!(&l.kind, LayerKind::Fx(a) if a.filter != b.filter) {
-                if let Some(an) = l.anim.as_mut() {
-                    let fx_bits = ch::FX.iter().fold(0u16, |m, c| m | c);
-                    for k in &mut an.keys {
-                        k.ch &= !fx_bits;
-                    }
-                    an.keys.retain(|k| k.ch != 0);
-                }
-            }
+            crate::anim::fx_keys_follow(l, b.filter);
         }
         if changed {
             self.spread_edit(&before);
@@ -14587,6 +14580,33 @@ mod tests {
         assert_eq!((&fx.curves, fx.kept.len()), (&curve, 1));
         let back: FxLayer = serde_json::from_str(&serde_json::to_string(&fx).unwrap()).unwrap();
         assert_eq!(back, fx);
+        // settings at their defaults are not kept
+        let mut plain = FxLayer::new(Filter::Blur);
+        plain.set_filter(Filter::Invert);
+        assert!(plain.kept.is_empty());
+        // keys follow their filter: put aside on a change, back on return
+        let mut doc = Document::default();
+        let id = doc.insert("fx".into(), LayerKind::Fx(FxLayer::new(Filter::Blur)), None);
+        let l = doc.get_mut(id).unwrap();
+        let mut k = crate::anim::key_of(l, 1.0);
+        k.ch = crate::anim::ch::FX[0] | crate::anim::ch::OPA;
+        k.fx[0] = 12.0;
+        l.anim.get_or_insert_with(Default::default).set_key(k);
+        let change = |l: &mut Layer, f: Filter| {
+            let LayerKind::Fx(fx) = &mut l.kind else { unreachable!() };
+            let old = fx.filter;
+            fx.set_filter(f);
+            crate::anim::fx_keys_follow(l, old);
+        };
+        let chs = |l: &Layer| l.anim.as_ref().unwrap().keys.iter().map(|k| k.ch).collect::<Vec<_>>();
+        change(l, Filter::Hsl);
+        assert_eq!(chs(l), vec![crate::anim::ch::OPA], "the blur's key is aside, the opacity key stays");
+        change(l, Filter::Blur);
+        let keys = &l.anim.as_ref().unwrap().keys;
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().any(|k| k.ch == crate::anim::ch::FX[0] && k.fx[0] == 12.0 && k.t == 1.0));
+        let LayerKind::Fx(fx) = &l.kind else { unreachable!() };
+        assert!(fx.kept.is_empty() && fx.keys_back.is_empty());
         // the hue bar starts at pure red
         assert_eq!(crate::okhsv::to_rgb(hue_top(), 1.0, 1.0), Color32::from_rgb(255, 0, 0));
         // 보통 picked on the mixed 혼합: the first already has it, so nothing

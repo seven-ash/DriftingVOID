@@ -1,5 +1,5 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Ash (seven-ash). Additional terms (GPL-3.0 section 7): see NOTICE.
+﻿# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Ash (seven-ash). Additional terms (AGPL-3.0 section 7): see NOTICE.
 # Drifting VOID setup: copies the app to the user's programs folder,
 # adds shortcuts, the .void file type and an uninstall entry, and fetches
 # ffmpeg (video, sound) from GitHub when none is installed.
@@ -66,7 +66,7 @@ if (Test-Path $fontsSrc) {
     New-Item -ItemType Directory -Force $fontsDst | Out-Null
     Copy-Item (Join-Path $fontsSrc "*") $fontsDst -Force
 }
-foreach ($f in "LICENSE.txt", "NOTICE.txt", "THIRD-PARTY-NOTICES.html") {
+foreach ($f in "LICENSE.txt", "LICENSE-GPL.txt", "NOTICE.txt", "THIRD-PARTY-NOTICES.html") {
     $p = Join-Path $src $f
     if (Test-Path $p) { Copy-Item $p (Join-Path $InstallDir $f) -Force }
 }
