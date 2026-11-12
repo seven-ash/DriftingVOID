@@ -114,6 +114,9 @@ pub struct Settings {
     pub text_style: String,
     #[serde(default)]
     pub text_align: crate::doc::TextAlign,
+    /// The text tool's own colour: the last one a text was given (not the
+    /// main colour; Ash 11-12).
+    pub text_color: Color32,
     pub text_bg: bool,
     pub text_bg_color: Color32,
     pub text_look: crate::doc::TextLook,
@@ -174,6 +177,7 @@ impl Default for Settings {
             text_family: String::new(),
             text_style: "Regular".into(),
             text_align: Default::default(),
+            text_color: Color32::from_rgb(230, 57, 70),
             text_bg: false,
             text_bg_color: Color32::from_rgba_unmultiplied(255, 255, 255, 220),
             text_look: Default::default(),
@@ -551,6 +555,7 @@ enum PalTarget {
     ShapeFill(LayerId),
     /// An FX layer's gradient map colour (0 dark, 1 light).
     FxColor(LayerId, usize),
+    DefaultTextColor,
     DefaultTextBg,
     DefaultTextBorder,
     DefaultTextStroke,
@@ -5216,7 +5221,7 @@ impl App {
             pos: at,
             text,
             size: self.s.text_size,
-            color: self.s.color,
+            color: self.s.text_color,
             family: self.s.text_family.clone(),
             style: self.s.text_style.clone(),
             bg: self.s.text_bg.then_some(self.s.text_bg_color),
@@ -8973,16 +8978,13 @@ impl App {
         }
     }
 
-    /// Applies the picked colour to a selected text/shape layer, like most editors.
+    /// Applies the picked main colour to a selected shape layer. (A text has
+    /// the text tool's own colour and is left alone.)
     fn recolor_selected(&mut self) {
         let c = self.s.color;
         if let Some(id) = self.sel {
             if let Some(l) = self.doc.get_mut(id) {
                 match &mut l.kind {
-                    LayerKind::Text(t) if t.color != c => {
-                        t.color = c;
-                        self.mark();
-                    }
                     LayerKind::Shape(s) if s.color != c => {
                         s.color = c;
                         self.mark();
@@ -9064,6 +9066,10 @@ impl App {
                     layer_changed |= font_picker(ui, "tool_font", &mut t.family, &mut t.style, &mut self.font_ui);
                     layer_changed |= align_row(ui, &mut t.align, false);
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
+                        ui.label(crate::i18n::tr("색"));
+                        layer_changed |= color_row(ui, &mut t.color, PalTarget::TextColor(lid), &mut pal_req);
+                    });
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         let mut has = t.bg.is_some();
                         if crate::kit::switch(ui, &mut has, crate::i18n::tr("배경 상자")).changed() {
                             t.bg = has.then_some(s.text_bg_color);
@@ -9082,6 +9088,7 @@ impl App {
                     s.text_family = t.family.clone();
                     s.text_style = t.style.clone();
                     s.text_align = t.align;
+                    s.text_color = t.color;
                     s.text_bg = t.bg.is_some();
                     s.text_look = t.look;
                     if let Some(c) = t.bg {
@@ -9092,6 +9099,10 @@ impl App {
                     ui.add(crate::dial::Dial::new(&mut s.text_size, 6.0..=400.0).step(2.0).text(crate::i18n::tr("크기")));
                     font_picker(ui, "tool_font", &mut s.text_family, &mut s.text_style, &mut self.font_ui);
                     align_row(ui, &mut s.text_align, false);
+                    ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
+                        ui.label(crate::i18n::tr("색"));
+                        color_row(ui, &mut s.text_color, PalTarget::DefaultTextColor, &mut pal_req);
+                    });
                     ui.horizontal_wrapped(|ui| { // colour row: wraps instead of overflowing the card
                         crate::kit::switch(ui, &mut s.text_bg, crate::i18n::tr("배경 상자"));
                         color_row(ui, &mut s.text_bg_color, PalTarget::DefaultTextBg, &mut pal_req);
@@ -9493,7 +9504,7 @@ impl App {
                                     self.s.text_bg_color = old;
                                 }
                                 // from mixed, a click turns it on for all
-                                t.bg =(has || mxs.bg_has).then(|| t.bg.unwrap_or(self.s.text_bg_color));
+                                t.bg = (has || mxs.bg_has).then(|| t.bg.unwrap_or(self.s.text_bg_color));
                                 changed = true;
                                 if mxs.bg_has {
                                     force.push(Force::TextBg(t.bg));
@@ -9514,6 +9525,7 @@ impl App {
                         ui.label(crate::i18n::tr("색"));
                         if color_row_mx(ui, &mut t.color, PalTarget::TextColor(id), &mut pal_req, mxs.color) {
                             changed = true;
+                            self.s.text_color = t.color;
                             if mxs.color {
                                 force.push(Force::TextColor(t.color));
                             }
@@ -10694,7 +10706,10 @@ impl App {
                 self.recolor_selected();
                 return;
             }
-            PalTarget::TextColor(id) => Some((id, Force::TextColor(c))),
+            PalTarget::TextColor(id) => {
+                self.s.text_color = c;
+                Some((id, Force::TextColor(c)))
+            }
             PalTarget::TextBg(id) => {
                 self.s.text_bg_color = c;
                 Some((id, Force::TextBg(Some(c))))
@@ -10718,6 +10733,10 @@ impl App {
                     self.mark();
                 }
                 return;
+            }
+            PalTarget::DefaultTextColor => {
+                self.s.text_color = c;
+                None
             }
             PalTarget::DefaultTextBg => {
                 self.s.text_bg_color = c;
