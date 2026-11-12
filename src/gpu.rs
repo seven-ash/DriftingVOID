@@ -25,6 +25,10 @@ use crate::scene::{Draw, Projected};
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// The side of a brush layer's square pictures on the canvas, in canvas
+/// pixels (`brush_tiles`).
+const BRUSH_TILE: i32 = 512;
+
 /// A picture queued on the GPU (`Gpu::submit`), collected by `Gpu::finish`.
 pub struct Pending {
     buf: wgpu::Buffer,
@@ -217,6 +221,12 @@ pub struct Gpu {
     /// only where there are tiles (any size of layer; no texture for the
     /// empty space between strokes).
     pages: HashMap<LayerId, Paged>,
+    /// Brush strokes' dabs by stroke and scale (`brush::DabSet`), so a part
+    /// of a layer drawn again lays none of them again.
+    dab_sets: HashMap<(u64, u32), (Arc<crate::brush::DabSet>, u64)>,
+    /// Each brush layer's squares as last made (scale, the layer's content
+    /// key, canvas pixels and picture), shown scaled while the canvas zooms.
+    brush_last: HashMap<LayerId, (f32, u64, Vec<([i32; 4], Arc<wgpu::Texture>)>, u64)>,
     frame: u64,
     /// A picture drawn between the canvas's frames (`render_aside`).
     aside: bool,
@@ -688,6 +698,8 @@ impl Gpu {
             ms_pool: HashMap::new(),
             atlases: HashMap::new(),
             pages: HashMap::new(),
+            dab_sets: HashMap::new(),
+            brush_last: HashMap::new(),
             edge_bufs: HashMap::new(),
             frame: 0,
             aside: false,
@@ -700,6 +712,8 @@ impl Gpu {
     pub fn clear(&mut self) {
         self.atlases.clear();
         self.pages.clear();
+        self.dab_sets.clear();
+        self.brush_last.clear();
         self.edge_bufs.clear();
         self.flat = Arc::default();
         self.rasters.clear();
@@ -981,6 +995,8 @@ impl Gpu {
         self.flats.retain(|_, v| v.2 + 1800 >= g);
         self.atlases.retain(|_, a| a.used + 600 >= g);
         self.pages.retain(|_, p| p.used + 600 >= g);
+        self.dab_sets.retain(|_, v| v.1 + 120 >= g);
+        self.brush_last.retain(|_, v| v.3 + 600 >= g);
         self.edge_bufs.retain(|_, v| v.2 + 1800 >= g);
         self.ms_pool.retain(|_, v| v.3 + 30 >= g);
         self.flat.sweep();
@@ -1184,6 +1200,9 @@ impl Gpu {
             Draw::Flat(layer) if v.origin.is_some() && matches!(&layer.kind, crate::doc::LayerKind::Raster(r) if r.strokes.is_empty()) => {
                 self.atlas(&layer, v, out);
             }
+            Draw::Flat(layer) if v.origin.is_some() && matches!(layer.kind, crate::doc::LayerKind::Raster(_)) && std::env::var_os("DV_CPU_2D").is_none() => {
+                self.brush_tiles(&layer, v, out);
+            }
             Draw::Flat(layer) => {
                 let opacity = layer.opacity;
                 if let Some((img, off)) = self.raster(layer, bounds, v, jobs) {
@@ -1291,6 +1310,164 @@ impl Gpu {
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
+    }
+
+    /// A stroke's dabs at scale `s` (kept: `dab_sets`).
+    fn dab_set(&mut self, st: &crate::brush::BStroke, s: f32) -> Arc<crate::brush::DabSet> {
+        let frame = self.frame;
+        let e = self.dab_sets.entry((st.key, s.to_bits())).or_insert_with(|| (Arc::new(crate::brush::DabSet::new(st, s)), frame));
+        e.1 = frame;
+        e.0.clone()
+    }
+
+    /// A brush layer with strokes on the canvas, in square pictures of
+    /// `BRUSH_TILE` canvas pixels on a fixed grid (Ash, 11-12: panning over
+    /// strokes drawn zoomed out stuttered when the whole view was drawn
+    /// again). Only the squares in view are made; each is kept by what lies
+    /// in it (the pixels and the strokes that reach it), so panning makes
+    /// only the squares that come into view, and a stroke being drawn
+    /// changes only the squares it reaches: each of those is the square
+    /// without that stroke (kept from before it began) and the stroke over it.
+    fn brush_tiles(&mut self, layer: &Layer, v: &View, out: &mut Vec<Node>) {
+        const T: i32 = BRUSH_TILE;
+        let crate::doc::LayerKind::Raster(r) = &layer.kind else { return };
+        let Some([ox, oy]) = v.origin else { return };
+        let Some(b) = layer.bounds() else { return };
+        let s = v.s;
+        let lb = [(b.min.x * s).floor() as i32 - 1, (b.min.y * s).floor() as i32 - 1, (b.max.x * s).ceil() as i32 + 1, (b.max.y * s).ceil() as i32 + 1];
+        let a = [lb[0].max(ox), lb[1].max(oy), lb[2].min(ox + v.tw as i32), lb[3].min(oy + v.th as i32)];
+        if a[2] <= a[0] || a[3] <= a[1] {
+            return;
+        }
+        // zooming: the squares made at the scale before, scaled (made sharp
+        // once the zoom rests, as the 3D layers are)
+        let whole = crate::canvas::content_key(layer);
+        let frame = self.frame;
+        if v.zooming {
+            if let Some(last) = self.brush_last.get_mut(&layer.id).filter(|l| l.1 == whole && l.0 != s) {
+                last.3 = frame;
+                let k = last.0 / s;
+                for (px, tex) in &last.2 {
+                    let q = [px[0] as f32 / k - ox as f32, px[1] as f32 / k - oy as f32, px[2] as f32 / k - ox as f32, px[3] as f32 / k - oy as f32];
+                    let rect = [(q[0].floor() as i32).max(0), (q[1].floor() as i32).max(0), (q[2].ceil() as i32).min(v.tw as i32), (q[3].ceil() as i32).min(v.th as i32)];
+                    if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                        continue;
+                    }
+                    let inv = [[k, 0.0, ox as f32 * k - px[0] as f32], [0.0, k, oy as f32 * k - px[1] as f32]];
+                    out.push(Node::Image { img: Img::Ready(tex.clone()), inv, rect, opacity: layer.opacity, nearest: false, px_per_src: 1e6, level: 0.0 });
+                }
+                return;
+            }
+        }
+        let mut made: Vec<([i32; 4], Arc<wgpu::Texture>)> = Vec::new();
+        use std::hash::{Hash, Hasher};
+        let base = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (r.offset.x.to_bits(), r.offset.y.to_bits(), r.tiles.len()).hash(&mut h);
+            let mut acc = 0u64;
+            for (k, t) in &r.tiles {
+                let mut th = std::collections::hash_map::DefaultHasher::new();
+                (k, t.rev).hash(&mut th);
+                acc = acc.wrapping_add(th.finish());
+            }
+            acc.hash(&mut h);
+            h.finish()
+        };
+        let pages = self.pages_of(layer);
+        let content = |ids: &[usize]| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            base.hash(&mut h);
+            for &i in ids {
+                r.strokes[i].key.hash(&mut h);
+            }
+            h.finish()
+        };
+        let last = r.strokes.len() - 1;
+        for j in a[1].div_euclid(T)..=(a[3] - 1).div_euclid(T) {
+            for i in a[0].div_euclid(T)..=(a[2] - 1).div_euclid(T) {
+                let px = [i * T, j * T, (i + 1) * T, (j + 1) * T];
+                // the square in layer units, with a pixel of margin
+                let world = Rect::from_min_max(egui::pos2(px[0] as f32, px[1] as f32) / s, egui::pos2(px[2] as f32, px[3] as f32) / s).expand(2.0 / s).translate(-r.offset);
+                let ids: Vec<usize> = (0..r.strokes.len()).filter(|&k| r.strokes[k].bounds.intersects(world)).collect();
+                let has_pixels = r.pixel_bounds().is_some_and(|pb| pb.translate(-r.offset).intersects(world));
+                if ids.is_empty() && !has_pixels {
+                    continue;
+                }
+                let key = Key { id: layer.id, content: content(&ids), rect: px, view: v.key() };
+                let tex = match self.rasters.get_mut(&key) {
+                    Some(e) => {
+                        e.1 = frame;
+                        e.0.clone()
+                    }
+                    None => {
+                        // the stroke being drawn reaches it: the square without it, and it
+                        let before = (ids.last() == Some(&last)).then(|| Key { content: content(&ids[..ids.len() - 1]), ..key });
+                        let kept = before.and_then(|k| self.rasters.get_mut(&k).map(|e| {
+                            e.1 = frame;
+                            e.0.clone()
+                        }));
+                        let t = self.brush_square(r, px, s, &pages, &ids, kept);
+                        self.rasters.insert(key, (t.clone(), frame));
+                        t
+                    }
+                };
+                made.push((px, tex.clone()));
+                out.push(Node::Over { img: Img::Ready(tex), off: [px[0] - ox, px[1] - oy], opacity: layer.opacity });
+            }
+        }
+        self.brush_last.insert(layer.id, (s, whole, made, frame));
+    }
+
+    /// One square of a brush layer (canvas pixels `px` at scale `s`): from
+    /// `kept` (the square without the last of `ids`) and that stroke, or
+    /// from nothing: the layer's pixels (`pages`) and the strokes `ids`.
+    fn brush_square(&mut self, r: &crate::raster::RasterLayer, px: [i32; 4], s: f32, pages: &[(Arc<wgpu::Texture>, Pos2)], ids: &[usize], kept: Option<Arc<wgpu::Texture>>) -> Arc<wgpu::Texture> {
+        let (w, h) = ((px[2] - px[0]) as u32, (px[3] - px[1]) as u32);
+        let tex = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        let draw: &[usize] = match &kept {
+            Some(k) => {
+                enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo { texture: k, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+                &ids[ids.len() - 1..]
+            }
+            None => {
+                self.clear_to(&mut enc, &tex, wgpu::Color::TRANSPARENT);
+                let side = (PAGE * crate::raster::TILE) as f32;
+                for (page, o) in pages {
+                    let (fx, fy) = (o.x * s - px[0] as f32, o.y * s - px[1] as f32);
+                    let q = [fx.floor().max(0.0), fy.floor().max(0.0), (fx + side * s).ceil().min(w as f32), (fy + side * s).ceil().min(h as f32)];
+                    if q[2] <= q[0] || q[3] <= q[1] {
+                        continue;
+                    }
+                    let mut u = Uniform::new(q, w, h);
+                    u.tsize[2] = 1.0;
+                    u.h0 = [1.0 / s, 0.0, -fx / s, 0.0];
+                    u.h1 = [0.0, 1.0 / s, -fy / s, 0.0];
+                    u.p1 = [1e6, ((s - 1.0).abs() < 1e-4) as u8 as f32, 0.0, 0.0];
+                    self.pass(&mut enc, &self.image, &tex, &u, page, &self.dummy);
+                }
+                ids
+            }
+        };
+        // the dabs of each stroke in this square: the stroke's set at this
+        // scale, moved from layer point 0 to the square
+        let clip = Rect::from_min_size(Pos2::ZERO, vec2(w as f32, h as f32));
+        let shift = r.offset * s - vec2(px[0] as f32, px[1] as f32);
+        let mut lists: Vec<(Vec<crate::brush::Dab>, crate::raster::BrushParams)> = Vec::with_capacity(draw.len());
+        for &i in draw {
+            let set = self.dab_set(&r.strokes[i], s);
+            let mut d = Vec::new();
+            set.visible(clip, shift, &mut d);
+            lists.push((d, r.strokes[i].p));
+        }
+        let list: Vec<(&[crate::brush::Dab], &crate::raster::BrushParams)> = lists.iter().map(|(d, p)| (d.as_slice(), p)).collect();
+        self.brush_strokes(&mut enc, &tex, w, h, &list);
+        self.queue.submit([enc.finish()]);
+        Arc::new(tex)
     }
 
     /// A brush layer's picture made from the picture of the layer without its
@@ -3090,6 +3267,47 @@ mod tests {
         if ok.is_none() {
             eprintln!("no GPU: skipped");
         }
+    }
+
+    /// The frames that stutter (Ash, 11-12, after 0.108.1): 60 strokes drawn
+    /// at 1 % (brushes 12 to 120), seen at 100 % in a 2560 × 1440 view,
+    /// panned 30 px a frame for 120 frames, then zoomed in steps; the
+    /// render alone (no read back), timed per frame.
+    /// `cargo test --release bench_brush_hitches -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_brush_hitches() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer};
+        let bp = |radius: f32| BrushParams { color: Color32::RED, radius, opacity: 1.0, hardness: 0.8, pressure_size: true, pressure_opacity: false, erase: false };
+        let mut r = RasterLayer::default();
+        for k in 0..60 {
+            let pts: Vec<[f32; 3]> = (0..=150).map(|i| [i as f32 * 400.0, k as f32 * 400.0 + (i as f32 * 0.04 + k as f32).sin() * 6000.0, 0.5 + 0.5 * (i as f32 * 0.1).sin().abs()]).collect();
+            r.strokes.push(Arc::new(BStroke::new(pts, bp(6.0 + (k % 6) as f32 * 10.0))));
+        }
+        let mut doc = Document::default();
+        doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+        let (w, h) = (2560u32, 1440u32);
+        with_gpu(|g| {
+            let out = g.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING);
+            let frame = |g: &mut Gpu, at: Pos2, s: f32, zooming: bool| {
+                let t = std::time::Instant::now();
+                g.render_canvas(&doc, at, s, &out, None, zooming, None);
+                let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                t.elapsed().as_secs_f64() * 1e3
+            };
+            g.clear();
+            frame(g, pos2(20000.0, 4000.0), 1.0, false);
+            let mut ms: Vec<f64> = (0..120).map(|k| frame(g, pos2(20000.0 + k as f32 * 30.0, 4000.0), 1.0, false)).collect();
+            let slow = ms.iter().filter(|x| **x > 16.0).count();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!("panning: median {:.1} ms, worst {:.1}, {slow} of 120 frames over 16 ms", ms[60], ms[119]);
+            let zs: Vec<f64> = [1.0f32, 1.1, 1.21, 1.33, 1.46, 1.6].iter().map(|&s| frame(g, pos2(20000.0, 4000.0), s, false)).collect();
+            eprintln!("zoom steps, each made sharp: {:?} ms", zs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+            let zs: Vec<f64> = [1.6f32, 1.76, 1.94, 2.13, 2.34, 2.58].iter().map(|&s| frame(g, pos2(20000.0, 4000.0), s, true)).collect();
+            let rest = frame(g, pos2(20000.0, 4000.0), 2.58, false);
+            eprintln!("zoom steps while zooming: {:?} ms, then at rest {rest:.1} ms", zs.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
+        });
     }
 
     /// Strokes drawn at 1 % seen at 100 % (Ash, 11-12: panning and painting

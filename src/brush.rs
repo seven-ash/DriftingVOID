@@ -342,6 +342,40 @@ pub fn paint(px: &mut [u8], w: u32, h: u32, dabs: &[Dab], p: &BrushParams) {
     }
 }
 
+/// A stroke's dabs at one scale, in layer units × scale (layer point 0 at
+/// 0), kept so that drawing a part of the view lays nothing again; in runs
+/// of `RUN` with each run's box, to find the ones in a part quickly.
+pub struct DabSet {
+    pub dabs: Vec<Dab>,
+    runs: Vec<(Rect, usize, usize)>,
+}
+
+const RUN: usize = 64;
+
+impl DabSet {
+    pub fn new(st: &BStroke, s: f32) -> Self {
+        let dabs = st.dabs(Pos2::ZERO, s);
+        let runs = dabs.chunks(RUN).enumerate().map(|(i, c)| (dabs_box(c), i * RUN, i * RUN + c.len())).collect();
+        Self { dabs, runs }
+    }
+
+    /// The dabs that reach into `clip`, moved by `shift` (both in target
+    /// pixels: the set's place plus `shift`).
+    pub fn visible(&self, clip: Rect, shift: Vec2, out: &mut Vec<Dab>) {
+        let k = clip.translate(-shift);
+        for (b, i0, i1) in &self.runs {
+            if !b.intersects(k) {
+                continue;
+            }
+            for d in &self.dabs[*i0..*i1] {
+                if k.expand(d.r + 1.0).contains(d.c) {
+                    out.push(Dab { c: d.c + shift, ..*d });
+                }
+            }
+        }
+    }
+}
+
 /// The target pixels a set of dabs can touch: x0, y0, x1, y1.
 pub fn dabs_box(dabs: &[Dab]) -> Rect {
     dabs.iter().fold(Rect::NOTHING, |b, d| b.union(Rect::from_center_size(d.c, Vec2::splat((d.r + 1.0) * 2.0))))
