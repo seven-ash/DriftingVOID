@@ -474,6 +474,50 @@ fn gpu_pen_matches_cpu() {
     }
 }
 
+/// A brush layer with pixels and strokes over them (an eraser stroke among
+/// them) looks the same drawn by the GPU (`raster_brush`) and by the CPU
+/// (`export::draw_brushed`), at three scales, and the eraser takes away from
+/// that layer only (vector brush, stage 3).
+#[test]
+fn gpu_brush_layer_matches_cpu() {
+    use crate::brush::BStroke;
+    use crate::raster::{BrushParams, RasterLayer};
+    use std::sync::Arc;
+    let mut doc = Document::default();
+    // under it: a blue shape the eraser must leave
+    doc.insert("under".into(), LayerKind::Shape(shape(ShapeKind::Rect, pos2(100.0, 80.0), pos2(700.0, 420.0), Color32::from_rgb(40, 60, 200), Some(Color32::from_rgb(40, 60, 200)), 0.0)), None);
+    let mut r = RasterLayer { offset: vec2(37.0, -11.0), ..Default::default() };
+    // pixels: a filled square, then strokes over it
+    r.fill_rect(Rect::from_min_max(pos2(200.0, 150.0), pos2(420.0, 330.0)), true);
+    let bp = |color: Color32, radius: f32, opacity: f32, hardness: f32, ps: bool, erase: bool| BrushParams { color, radius, opacity, hardness, pressure_size: ps, pressure_opacity: false, erase };
+    let wave = |x0: f32, y0: f32, amp: f32| -> Vec<[f32; 3]> { (0..60).map(|i| [x0 + i as f32 * 11.0, y0 + (i as f32 * 0.2).sin() * amp, 0.3 + 0.7 * (i as f32 / 59.0)]).collect() };
+    r.strokes.push(Arc::new(BStroke::new(wave(60.0, 140.0, 50.0), bp(Color32::from_rgb(230, 50, 40), 16.0, 1.0, 0.8, true, false))));
+    r.strokes.push(Arc::new(BStroke::new(wave(90.0, 260.0, 80.0), bp(Color32::from_rgb(30, 170, 80), 26.0, 0.6, 0.2, false, false))));
+    r.strokes.push(Arc::new(BStroke::new(wave(120.0, 200.0, 120.0), bp(Color32::BLACK, 20.0, 1.0, 0.9, false, true))));
+    doc.insert("brush".into(), LayerKind::Raster(r), None);
+    let region = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 500.0));
+    for s in [0.5f32, 1.0, 2.0] {
+        let cpu = render_ss(&doc, region.center(), region.size(), 0.0, s, Some(Color32::WHITE), 1).unwrap();
+        let Some(gpu) = crate::gpu::with_gpu(|g| g.render_ss(&doc, region.center(), region.size(), 0.0, s, Some(Color32::WHITE), 1)) else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let gpu = gpu.unwrap();
+        let (big, mean, worst) = diff(&cpu, &gpu);
+        eprintln!("brush layer at {s}: {:.3} % over 8 levels, mean {mean:.3}, worst {worst}", big * 100.0);
+        if std::env::var_os("DV_SAVE_BRUSH").is_some() {
+            let dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"));
+            crate::export::to_rgba(&gpu).save(dir.join(format!("brush_{s}.gpu.got.png"))).unwrap();
+            crate::export::to_rgba(&cpu).save(dir.join(format!("brush_{s}.cpu.got.png"))).unwrap();
+        }
+        assert!(big < 0.005 && mean < 0.3, "brush layer at {s}: {:.3} %, mean {mean:.3}", big * 100.0);
+        // where the eraser crossed the red stroke over the shape, the shape
+        // shows (blue): its 21st point, local (340, 109) + the offset
+        let p = gpu.pixel((377.0 * s) as u32, (98.0 * s) as u32).unwrap();
+        assert!(p.blue() > p.red(), "under the eraser: {p:?}");
+    }
+}
+
 /// What is left on the CPU, timed (render-finish items 3–5): a pen layer
 /// rasterized, a thick text flattened and traced, big brush dabs.
 /// `cargo test --release bench_cpu_work -- --ignored --nocapture`

@@ -1181,7 +1181,7 @@ impl Gpu {
     fn prepare(&mut self, d: Draw, bounds: Rect, v: &View, jobs: &mut Vec<(Raster, Option<Key>)>, out: &mut Vec<Node>) {
         match d {
             Draw::Flat(layer) if matches!(layer.kind, crate::doc::LayerKind::Image(_)) => self.image(layer, v, jobs, out),
-            Draw::Flat(layer) if v.origin.is_some() && matches!(layer.kind, crate::doc::LayerKind::Raster(_)) => {
+            Draw::Flat(layer) if v.origin.is_some() && matches!(&layer.kind, crate::doc::LayerKind::Raster(r) if r.strokes.is_empty()) => {
                 self.atlas(&layer, v, out);
             }
             Draw::Flat(layer) => {
@@ -1258,6 +1258,22 @@ impl Gpu {
             e.1 = self.frame;
             return Some((Img::Ready(e.0.clone()), off));
         }
+        if matches!(&layer.kind, crate::doc::LayerKind::Raster(r) if !r.strokes.is_empty()) && std::env::var_os("DV_CPU_2D").is_none() {
+            // a brush layer with strokes: its pixels, then its strokes, on the
+            // GPU. While a stroke is drawn, the layer without it is the picture
+            // of the frame before: that picture, and the one stroke over it.
+            let t = match self.raster_brush_after(&layer, rect, v) {
+                Some((t, prev)) => {
+                    // the pictures of earlier frames of this stroke are done
+                    // with (only the layer without it is drawn from again)
+                    self.rasters.retain(|k, _| k.id != layer.id || k.content == prev);
+                    t
+                }
+                None => self.raster_brush(&layer, rect, v),
+            };
+            self.rasters.insert(key, (t.clone(), self.frame));
+            return Some((Img::Ready(t), off));
+        }
         if crate::gpu_paths::handles(&layer) && std::env::var_os("DV_CPU_2D").is_none() {
             // text and shapes: filled on the GPU from their outlines
             let t = self.raster_paths(&layer, rect, v)?;
@@ -1275,6 +1291,87 @@ impl Gpu {
         });
         jobs.push((job, Some(key)));
         Some((Img::Job(jobs.len() - 1), off))
+    }
+
+    /// A brush layer's picture made from the picture of the layer without its
+    /// last stroke, when that is kept for a box inside this one and was not
+    /// cut to the view: copied in, and the last stroke drawn over it; with
+    /// the earlier picture's content key. None when there is no such picture.
+    fn raster_brush_after(&mut self, layer: &Layer, rect: [i32; 4], v: &View) -> Option<(Arc<wgpu::Texture>, u64)> {
+        let crate::doc::LayerKind::Raster(r) = &layer.kind else { return None };
+        let mut prev = layer.clone();
+        let crate::doc::LayerKind::Raster(pr) = &mut prev.kind else { return None };
+        let last = pr.strokes.pop()?;
+        let pb = prev.bounds()?;
+        // the earlier picture's box: the whole of that layer (not cut to the view)
+        let prect = if v.origin.is_some() { v.layer_box(pb)? } else { v.px(pb)? };
+        let whole = |b: Rect| [(b.min.x * v.s).floor() as i32 - 1, (b.min.y * v.s).floor() as i32 - 1, (b.max.x * v.s).ceil() as i32 + 1, (b.max.y * v.s).ceil() as i32 + 1];
+        if let (Some([ox, oy]), w) = (v.origin, whole(pb)) {
+            if [prect[0] + ox, prect[1] + oy, prect[2] + ox, prect[3] + oy] != w {
+                return None;
+            }
+        }
+        if prect[0] < rect[0] || prect[1] < rect[1] || prect[2] > rect[2] || prect[3] > rect[3] {
+            return None;
+        }
+        let pkey = Key { id: prev.id, content: crate::canvas::content_key(&prev), rect: v.abs(prect), view: v.key() };
+        let frame = self.frame;
+        let ptex = self.rasters.get_mut(&pkey).map(|e| {
+            e.1 = frame;
+            e.0.clone()
+        })?;
+        if !ptex.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+            return None;
+        }
+        let (w, h) = ((rect[2] - rect[0]).max(1) as u32, (rect[3] - rect[1]).max(1) as u32);
+        let tex = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.clear_to(&mut enc, &tex, wgpu::Color::TRANSPARENT);
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &ptex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d { x: (prect[0] - rect[0]) as u32, y: (prect[1] - rect[1]) as u32, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::Extent3d { width: ptex.width(), height: ptex.height(), depth_or_array_layers: 1 },
+        );
+        let origin = v.full.min - r.offset + vec2(rect[0] as f32, rect[1] as f32) / v.s;
+        let dabs = last.dabs(origin, v.s);
+        self.brush_strokes(&mut enc, &tex, w, h, &[(dabs.as_slice(), &last.p)]);
+        self.queue.submit([enc.finish()]);
+        Some((Arc::new(tex), pkey.content))
+    }
+
+    /// A brush layer with strokes drawn into its box (target pixels `rect`):
+    /// its pixels from their pages, then its strokes dabbed at the view's
+    /// scale (`brush_strokes`), so an eraser stroke takes away from this
+    /// layer only.
+    fn raster_brush(&mut self, layer: &Layer, rect: [i32; 4], v: &View) -> Arc<wgpu::Texture> {
+        let (w, h) = ((rect[2] - rect[0]).max(1) as u32, (rect[3] - rect[1]).max(1) as u32);
+        let tex = self.texture(w, h, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        self.clear_to(&mut enc, &tex, wgpu::Color::TRANSPARENT);
+        let s = v.s;
+        let (rx, ry) = (rect[0] as f32, rect[1] as f32);
+        let side = (PAGE * crate::raster::TILE) as f32;
+        for (page, o) in self.pages_of(layer) {
+            let (fx, fy) = ((o.x - v.full.min.x) * s - rx, (o.y - v.full.min.y) * s - ry);
+            let r = [fx.floor().max(0.0), fy.floor().max(0.0), (fx + side * s).ceil().min(w as f32), (fy + side * s).ceil().min(h as f32)];
+            if r[2] <= r[0] || r[3] <= r[1] {
+                continue;
+            }
+            let mut u = Uniform::new(r, w, h);
+            u.tsize[2] = 1.0;
+            u.h0 = [1.0 / s, 0.0, -fx / s, 0.0];
+            u.h1 = [0.0, 1.0 / s, -fy / s, 0.0];
+            u.p1 = [1e6, ((s - 1.0).abs() < 1e-4) as u8 as f32, 0.0, 0.0];
+            self.pass(&mut enc, &self.image, &tex, &u, &page, &self.dummy);
+        }
+        let crate::doc::LayerKind::Raster(r) = &layer.kind else { unreachable!() };
+        let origin = v.full.min - r.offset + vec2(rx, ry) / s;
+        let seen = Rect::from_min_size(origin, vec2(w as f32, h as f32) / s).expand(2.0);
+        let dabs: Vec<(Vec<crate::brush::Dab>, crate::raster::BrushParams)> = r.strokes.iter().filter(|st| st.bounds.intersects(seen)).map(|st| (st.dabs(origin, s), st.p)).collect();
+        let list: Vec<(&[crate::brush::Dab], &crate::raster::BrushParams)> = dabs.iter().map(|(d, p)| (d.as_slice(), p)).collect();
+        self.brush_strokes(&mut enc, &tex, w, h, &list);
+        self.queue.submit([enc.finish()]);
+        Arc::new(tex)
     }
 
     /// Text or a shape drawn into its box (target pixels `rect`) on the GPU:
@@ -2883,6 +2980,67 @@ mod tests {
         if ok.is_none() {
             eprintln!("no GPU: skipped");
         }
+    }
+
+    /// Timing of brush layers drawn from their strokes (vector brush, stage
+    /// 7): the 600 screen-px stroke at 1 % that the old engine took 172 ms
+    /// (brush 12) and 3.3 s (brush 400) to paint, and a layer of 300 strokes
+    /// drawn again whole, as it is while a stroke is added to it.
+    /// `cargo test --release bench_brush_layer -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_brush_layer() {
+        use crate::brush::BStroke;
+        use crate::raster::{BrushParams, RasterLayer};
+        let bp = |radius: f32| BrushParams { color: Color32::RED, radius, opacity: 1.0, hardness: 0.8, pressure_size: false, pressure_opacity: false, erase: false };
+        let time = |g: &mut Gpu, doc: &Document, world_min: Pos2, s: f32| {
+            g.clear();
+            let t = std::time::Instant::now();
+            let _ = canvas(g, doc, world_min, s, 1200, 800);
+            t.elapsed().as_secs_f64() * 1e3
+        };
+        with_gpu(|g| {
+            for size in [12.0f32, 400.0] {
+                let zoom = 0.01;
+                let pts: Vec<[f32; 3]> = (0..=150).map(|i| {
+                    let sx = i as f32 * 4.0;
+                    [sx / zoom, (sx * 0.01).sin() * 50.0 / zoom, 1.0]
+                }).collect();
+                let mut r = RasterLayer::default();
+                r.strokes.push(Arc::new(BStroke::new(pts, bp(size * 0.5))));
+                let mut doc = Document::default();
+                doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+                let ms = time(g, &doc, pos2(-10000.0, -40000.0), zoom);
+                eprintln!("1 %, brush {size}: one 600 px stroke drawn in {ms:.1} ms (old engine: 172 ms / 3342 ms)");
+            }
+            let mut r = RasterLayer::default();
+            for k in 0..300 {
+                let (x0, y0) = ((k % 20) as f32 * 60.0, (k / 20) as f32 * 50.0);
+                let pts: Vec<[f32; 3]> = (0..150).map(|i| [x0 + i as f32 * 3.0, y0 + (i as f32 * 0.1).sin() * 30.0, 1.0]).collect();
+                r.strokes.push(Arc::new(BStroke::new(pts, bp(8.0))));
+            }
+            let mut doc = Document::default();
+            let id = doc.insert("b".into(), crate::doc::LayerKind::Raster(r), None);
+            for s in [0.25f32, 1.0, 2.0, 0.25, 0.1] {
+                let ms = time(g, &doc, pos2(0.0, -40.0), s);
+                eprintln!("300 strokes × 150 points at {s}: {ms:.1} ms");
+                // a stroke being added: frame after frame, it grows
+                let t = std::time::Instant::now();
+                let n = 20;
+                for k in 1..=n {
+                    let crate::doc::LayerKind::Raster(r) = &mut doc.get_mut(id).unwrap().kind else { unreachable!() };
+                    let pts: Vec<[f32; 3]> = (0..k * 6).map(|i| [100.0 + i as f32 * 4.0, 200.0, 1.0]).collect();
+                    if k > 1 {
+                        r.strokes.pop();
+                    }
+                    r.strokes.push(Arc::new(BStroke::new(pts, bp(8.0))));
+                    let _ = canvas(g, &doc, pos2(0.0, -40.0), s, 1200, 800);
+                }
+                eprintln!("  a stroke growing on it: {:.1} ms a frame", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+                let crate::doc::LayerKind::Raster(r) = &mut doc.get_mut(id).unwrap().kind else { unreachable!() };
+                r.strokes.pop();
+            }
+        });
     }
 
     /// A brush stroke far longer than one texture (Ash, 10-22: past a certain

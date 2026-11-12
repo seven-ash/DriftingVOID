@@ -1276,6 +1276,9 @@ impl Document {
                     for rec in &r.recs {
                         f(Arc::as_ptr(rec) as usize, rec.pts.len() * 12 + rec.times.len() * 4 + 64);
                     }
+                    for s in &r.strokes {
+                        f(Arc::as_ptr(s) as usize, s.pts.len() * 12 + 96);
+                    }
                 }
                 _ => {}
             }

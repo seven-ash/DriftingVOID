@@ -106,6 +106,9 @@ pub struct BStroke {
     pub p: BrushParams,
     /// The points' box grown by the brush radius (layer space).
     pub bounds: Rect,
+    /// Hash of the points and the brush, for the picture caches
+    /// (`canvas::content_key`).
+    pub key: u64,
 }
 
 impl BStroke {
@@ -115,18 +118,188 @@ impl BStroke {
             b = b.union(Rect::from_min_max(pos2(q[0], q[1]), pos2(q[0], q[1])));
         }
         let bounds = if pts.is_empty() { Rect::NOTHING } else { b.expand(p.radius.max(0.5) + 1.0) };
-        Self { pts, p, bounds }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for v in [p.radius, p.opacity, p.hardness] {
+                v.to_bits().hash(&mut h);
+            }
+            (p.color, p.pressure_size, p.pressure_opacity, p.erase).hash(&mut h);
+            for q in &pts {
+                for v in q {
+                    v.to_bits().hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        Self { pts, p, bounds, key }
     }
 
     /// The dabs that paint this stroke at `s` target pixels per layer unit,
     /// with the layer point `origin` at the target's top left.
     pub fn dabs(&self, origin: Pos2, s: f32) -> Vec<Dab> {
+        self.dabs_mapped(|q| pos2((q.x - origin.x) * s, (q.y - origin.y) * s), s)
+    }
+
+    /// The dabs for a drawing that maps layer points to target pixels by
+    /// `map`: a uniform scale `s` (with any turn and shift).
+    pub fn dabs_mapped(&self, map: impl Fn(Pos2) -> Pos2, s: f32) -> Vec<Dab> {
         let mut st = Stepper::new(self.p, s);
         let mut out = Vec::new();
         for q in &self.pts {
-            st.push(pos2((q[0] - origin.x) * s, (q[1] - origin.y) * s), q[2], &mut out);
+            st.push(map(pos2(q[0], q[1])), q[2], &mut out);
         }
         out
+    }
+
+    /// The same stroke moved by `map` (a uniform scale `s` with any turn and
+    /// shift): its points follow, its brush grows by `s`.
+    pub fn mapped(&self, map: impl Fn(Pos2) -> Pos2, s: f32) -> Self {
+        let pts = self.pts.iter().map(|q| {
+            let m = map(pos2(q[0], q[1]));
+            [m.x, m.y, q[2]]
+        }).collect();
+        Self::new(pts, BrushParams { radius: self.p.radius * s, ..self.p })
+    }
+
+    /// Does the stroke cover layer point `q` (an eraser stroke never does)?
+    pub fn hit(&self, q: Pos2) -> bool {
+        if self.p.erase || !self.bounds.contains(q) {
+            return false;
+        }
+        let st = Stepper::new(self.p, 1.0);
+        let near = |a: &[f32; 3], b: &[f32; 3]| {
+            let (pa, pb) = (pos2(a[0], a[1]), pos2(b[0], b[1]));
+            let ab = pb - pa;
+            let t = ((q - pa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+            let r = st.radius_at(a[2] + (b[2] - a[2]) * t);
+            (pa + ab * t).distance(q) <= r
+        };
+        match self.pts.len() {
+            0 => false,
+            1 => near(&self.pts[0], &self.pts[0]),
+            _ => self.pts.windows(2).any(|w| near(&w[0], &w[1])),
+        }
+    }
+}
+
+/// A brush stroke being made: into the layer's pixels (masks, recording:
+/// the CPU engine) or as a stroke object that grows (`BStroke`, the last of
+/// the layer's strokes while it is drawn).
+pub enum Painting {
+    Pixels(crate::raster::RasterStroke),
+    Stroke { p: BrushParams, pts: Vec<[f32; 3]> },
+}
+
+impl Painting {
+    pub fn params(&self) -> BrushParams {
+        match self {
+            Painting::Pixels(st) => st.p,
+            Painting::Stroke { p, .. } => *p,
+        }
+    }
+
+    /// Starts on `layer` at layer point `lp`.
+    pub fn start(layer: &mut crate::raster::RasterLayer, p: BrushParams, as_stroke: bool, lp: Pos2, pressure: f32) -> Self {
+        if as_stroke {
+            let pts = vec![[lp.x, lp.y, pressure]];
+            layer.strokes.push(std::sync::Arc::new(BStroke::new(pts.clone(), p)));
+            Painting::Stroke { p, pts }
+        } else {
+            let mut st = crate::raster::RasterStroke::new(p);
+            st.add_point(layer, lp, pressure);
+            Painting::Pixels(st)
+        }
+    }
+
+    /// More points (layer space); a stroke object is made again once per call.
+    pub fn add(&mut self, layer: &mut crate::raster::RasterLayer, more: &[[f32; 3]]) {
+        match self {
+            Painting::Pixels(st) => {
+                for q in more {
+                    st.add_point(layer, pos2(q[0], q[1]), q[2]);
+                }
+            }
+            Painting::Stroke { p, pts } => {
+                if more.is_empty() {
+                    return;
+                }
+                pts.extend_from_slice(more);
+                let s = std::sync::Arc::new(BStroke::new(pts.clone(), *p));
+                match layer.strokes.last_mut() {
+                    Some(last) => *last = s,
+                    None => layer.strokes.push(s),
+                }
+            }
+        }
+    }
+
+    pub fn finish(self, layer: &mut crate::raster::RasterLayer) {
+        if let Painting::Pixels(st) = self {
+            st.finish(layer);
+        }
+    }
+
+    /// Takes the stroke back out (Esc).
+    pub fn cancel(self, layer: &mut crate::raster::RasterLayer) {
+        match self {
+            Painting::Pixels(st) => st.cancel(layer),
+            Painting::Stroke { .. } => {
+                layer.strokes.pop();
+            }
+        }
+    }
+}
+
+/// Paints one stroke's dabs into a premultiplied RGBA buffer (w × h), as
+/// `RasterStroke` does into tiles: the dabs' largest coverage per pixel,
+/// then the colour over what is there (an eraser: what is there taken
+/// away), with the brush opacity.
+pub fn paint(px: &mut [u8], w: u32, h: u32, dabs: &[Dab], p: &BrushParams) {
+    let b = dabs_box(dabs).intersect(Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32)));
+    if !b.is_positive() {
+        return;
+    }
+    let (x0, y0) = (b.min.x.floor().max(0.0) as i32, b.min.y.floor().max(0.0) as i32);
+    let (x1, y1) = ((b.max.x.ceil() as i32).min(w as i32), (b.max.y.ceil() as i32).min(h as i32));
+    let (bw, bh) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+    let mut mask = vec![0f32; bw * bh];
+    for d in dabs {
+        let (dx0, dy0) = (((d.c.x - d.r - 1.0).floor() as i32).max(x0), ((d.c.y - d.r - 1.0).floor() as i32).max(y0));
+        let (dx1, dy1) = (((d.c.x + d.r + 1.0).ceil() as i32).min(x1 - 1), ((d.c.y + d.r + 1.0).ceil() as i32).min(y1 - 1));
+        for y in dy0..=dy1 {
+            let fy = y as f32 + 0.5 - d.c.y;
+            for x in dx0..=dx1 {
+                let fx = x as f32 + 0.5 - d.c.x;
+                let a = dab_alpha((fx * fx + fy * fy).sqrt(), d.r, p.hardness, d.a);
+                let m = &mut mask[(y - y0) as usize * bw + (x - x0) as usize];
+                if a > *m {
+                    *m = a;
+                }
+            }
+        }
+    }
+    let op = p.opacity.clamp(0.0, 1.0);
+    let col = p.color.to_srgba_unmultiplied().map(|x| x as f32 / 255.0);
+    for y in 0..bh {
+        for x in 0..bw {
+            let a = mask[y * bw + x];
+            if a <= 0.0 {
+                continue;
+            }
+            let sa = a * op;
+            let i = ((y0 as usize + y) * w as usize + x0 as usize + x) * 4;
+            if p.erase {
+                for k in 0..4 {
+                    px[i + k] = (px[i + k] as f32 * (1.0 - sa)).round() as u8;
+                }
+            } else {
+                let src = [col[0] * sa, col[1] * sa, col[2] * sa, sa];
+                for k in 0..4 {
+                    px[i + k] = (src[k] * 255.0 + px[i + k] as f32 * (1.0 - sa)).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
     }
 }
 
@@ -142,6 +315,43 @@ mod tests {
 
     fn params(radius: f32) -> BrushParams {
         BrushParams { color: Color32::RED, radius, opacity: 1.0, hardness: 0.8, pressure_size: false, pressure_opacity: false, erase: false }
+    }
+
+    /// A stroke being drawn grows as the layer's last stroke; Esc takes it
+    /// out; baking paints it into pixels like the old engine; hitting and
+    /// bounds see it.
+    #[test]
+    fn a_painting_stroke_lives_in_the_layer() {
+        use crate::raster::{RasterLayer, RasterStroke};
+        let mut l = RasterLayer::default();
+        let mut p = Painting::start(&mut l, params(5.0), true, pos2(10.0, 10.0), 1.0);
+        p.add(&mut l, &[[40.0, 10.0, 1.0], [80.0, 30.0, 1.0]]);
+        assert_eq!((l.strokes.len(), l.strokes[0].pts.len(), l.tiles.len()), (1, 3, 0));
+        assert!(l.alpha_at_world(pos2(40.0, 12.0)) > 0 && l.alpha_at_world(pos2(40.0, 40.0)) == 0);
+        assert!(l.bounds().unwrap().contains(pos2(80.0, 30.0)));
+        p.finish(&mut l);
+        // baked: the same pixels as the old engine painting those points
+        let mut old = RasterLayer::default();
+        let mut st = RasterStroke::new(params(5.0));
+        for q in [[10.0, 10.0], [40.0, 10.0], [80.0, 30.0]] {
+            st.add_point(&mut old, pos2(q[0], q[1]), 1.0);
+        }
+        st.finish(&mut old);
+        let mut baked = l.clone();
+        baked.bake();
+        assert!(baked.strokes.is_empty());
+        assert_eq!(baked.read_region(0, 0, 100, 50), old.read_region(0, 0, 100, 50));
+        // a second stroke, cancelled: gone
+        let p2 = Painting::start(&mut l, params(5.0), true, pos2(0.0, 0.0), 1.0);
+        assert_eq!(l.strokes.len(), 2);
+        p2.cancel(&mut l);
+        assert_eq!(l.strokes.len(), 1);
+        // moved exactly by a scale and a turn: points follow, the brush grows
+        let t = crate::raster::transformed(&l, pos2(0.0, 0.0), 2.0, std::f32::consts::FRAC_PI_2).unwrap();
+        let q = t.strokes[0].pts[1];
+        let w = pos2(q[0], q[1]) + t.offset;
+        assert!((w - pos2(-20.0, 80.0)).length() < 1e-3, "{w:?}");
+        assert_eq!(t.strokes[0].p.radius, 10.0);
     }
 
     /// The dabs follow the stroke's length on screen: the same stroke shown

@@ -41,6 +41,10 @@ pub struct RasterLayer {
     pub rec_base: Option<TileMap>,
     /// How the layer mixes with what is under it.
     pub blend: crate::doc::Blend,
+    /// Brush strokes over the pixels, kept as their input and drawn at the
+    /// size they are shown (notes/updates/2026-11-12-vector-brush.md).
+    /// Tools that work on pixels bake them first (`bake`).
+    pub strokes: Vec<Arc<crate::brush::BStroke>>,
 }
 
 /// One recorded brush (or eraser) stroke: input points (local x, y, pressure) with
@@ -167,14 +171,76 @@ impl RasterLayer {
 
     pub fn alpha_at_world(&self, p: Pos2) -> u8 {
         let l = p - self.offset;
+        if self.strokes.iter().any(|s| s.hit(l)) {
+            return 255;
+        }
         self.pixel(l.x.floor() as i32, l.y.floor() as i32)[3]
+    }
+
+    /// No pixels and no strokes.
+    pub fn is_blank(&self) -> bool {
+        self.tiles.is_empty() && self.strokes.is_empty()
+    }
+
+    /// Paints the strokes into the pixels (one pixel per layer unit), for
+    /// the tools that work on pixels. Costs what the old brush engine did.
+    pub fn bake(&mut self) {
+        for st in std::mem::take(&mut self.strokes) {
+            let mut rs = RasterStroke::new(st.p);
+            for q in &st.pts {
+                rs.add_point(self, pos2(q[0], q[1]), q[2]);
+            }
+            rs.finish(self);
+        }
+    }
+
+    /// The layer with its strokes baked in, for what draws pixels only (the
+    /// canvas without a GPU); the last few are kept, so their tiles keep
+    /// their revisions from frame to frame.
+    pub fn shown(&self) -> std::borrow::Cow<'_, RasterLayer> {
+        if self.strokes.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.offset.x.to_bits(), self.offset.y.to_bits(), self.tiles.len()).hash(&mut h);
+        for (k, t) in &self.tiles {
+            (k, t.rev).hash(&mut h);
+        }
+        for s in &self.strokes {
+            s.key.hash(&mut h);
+        }
+        let key = h.finish();
+        static SHOWN: std::sync::Mutex<Vec<(u64, RasterLayer)>> = std::sync::Mutex::new(Vec::new());
+        if let Some(l) = SHOWN.lock().ok().and_then(|c| c.iter().find(|x| x.0 == key).map(|x| x.1.clone())) {
+            return std::borrow::Cow::Owned(l);
+        }
+        let mut l = self.clone();
+        l.bake();
+        if let Ok(mut c) = SHOWN.lock() {
+            c.push((key, l.clone()));
+            if c.len() > 4 {
+                c.remove(0);
+            }
+        }
+        std::borrow::Cow::Owned(l)
+    }
+
+    /// The pixels' and the strokes' bounds, in world space.
+    pub fn bounds(&self) -> Option<Rect> {
+        let s = self.strokes.iter().fold(Rect::NOTHING, |b, s| b.union(s.bounds));
+        let s = s.is_positive().then(|| s.translate(self.offset));
+        match (self.pixel_bounds(), s) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Exact bounds of non-transparent pixels, in world space. Each tile's
     /// own bounds are kept by its revision (`tile_bounds`), so this costs a
     /// look-up per tile, not a scan of every pixel (it runs several times a
     /// frame; Ash saw frame times grow with the tile count, 10-22).
-    pub fn bounds(&self) -> Option<Rect> {
+    pub fn pixel_bounds(&self) -> Option<Rect> {
         let mut acc: Option<(i32, i32, i32, i32)> = None;
         for (&(tx, ty), t) in &self.tiles {
             if let Some([x0, y0, x1, y1]) = tile_bounds(t) {
@@ -344,9 +410,26 @@ impl RasterLayer {
     }
 }
 
-/// Resamples a raster layer scaled by `s` and rotated by `th` about world point `c`.
+/// Resamples a raster layer scaled by `s` and rotated by `th` about world
+/// point `c`. Its strokes are moved exactly (their points follow, the brush
+/// grows by `s`): only the pixels are resampled.
 pub fn transformed(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<RasterLayer> {
-    let b = src.bounds()?;
+    let (sin, cos) = th.sin_cos();
+    let map = |p: Pos2| {
+        let d = (p - c) * s;
+        c + Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
+    };
+    let mut n = match src.pixel_bounds() {
+        Some(_) => transformed_pixels(src, c, s, th)?,
+        None => RasterLayer { offset: src.offset, blend: src.blend, ..Default::default() },
+    };
+    let (from, to) = (src.offset, n.offset);
+    n.strokes = src.strokes.iter().map(|st| Arc::new(st.mapped(|q| map(q + from) - to, s))).collect();
+    Some(n)
+}
+
+fn transformed_pixels(src: &RasterLayer, c: Pos2, s: f32, th: f32) -> Option<RasterLayer> {
+    let b = src.pixel_bounds()?;
     let lb = b.translate(-src.offset);
     let (x0, y0) = (lb.min.x as i32, lb.min.y as i32);
     let (w, h) = (lb.width() as i32, lb.height() as i32);

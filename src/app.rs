@@ -12,7 +12,7 @@ use egui::{
 use crate::canvas::{self, TexCache, Xf};
 use crate::theme::{self, GlassTip, ACCENT, ACCENT_INK, FILL_1, FILL_2, FILL_3, INK, INK_2, INK_3, PAPER_4, SPACE_2XS, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS};
 use crate::doc::*;
-use crate::raster::{BrushParams, RasterLayer, RasterStroke};
+use crate::raster::{BrushParams, RasterLayer};
 use crate::vector::{VStroke, radius_for};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -245,7 +245,7 @@ enum Drag {
     NewShape { id: LayerId, start: Pos2 },
     Crop { id: LayerId, handle: u8, start_src: Pos2, orig: ImageLayer },
     Frame { handle: u8, start: Pos2, orig: Rect },
-    Raster { id: LayerId, stroke: Option<RasterStroke>, smooth: (Pos2, f32), curve: crate::vector::Curve },
+    Raster { id: LayerId, stroke: Option<crate::brush::Painting>, smooth: (Pos2, f32), curve: crate::vector::Curve },
     Vector { id: LayerId, pts: Vec<[f32; 3]>, smooth: (Pos2, f32), base_r: f32, pressure: bool, color: Color32, curve: crate::vector::Curve },
     VErase { id: LayerId, r: f32 },
     Zoom { anchor: Pos2 },
@@ -493,6 +493,8 @@ pub(crate) fn apply_part(o: &Layer, part: &Part, c: Pos2, s: f32, th: f32, d: Ve
         Part::Pixels(polys) => {
             let mut l = o.clone();
             if let LayerKind::Raster(r) = &mut l.kind {
+                // (a pixel selection's layer is baked when it is made: `bake_pixel_sel`)
+                r.bake();
                 let (mut patch, mut rest) = r.lift(polys);
                 if plain_move {
                     patch.offset += d.round();
@@ -2145,6 +2147,33 @@ impl App {
                 d.use_mbps = true;
             }
         }
+        // DV_TEST_BRUSH=zoom: a brush layer with stroke objects as the brush
+        // tool makes them (soft, hard, pressure, an eraser over them), over a
+        // filled square of pixels, framed at that zoom (vector brush checks)
+        if let Some(z) = std::env::var("DV_TEST_BRUSH").ok().and_then(|v| v.parse::<f32>().ok()) {
+            let k = 1.0 / z;
+            let mut r = RasterLayer::default();
+            // (pixels only near 100 %: at 1 % that square would be 2 GB of tiles)
+            if z >= 0.25 {
+                r.fill_rect(Rect::from_min_max(pos2(200.0, 100.0), pos2(500.0, 300.0)) * k, true);
+            }
+            let bp = |color: Color32, size: f32, opacity: f32, hardness: f32, erase: bool| BrushParams { color, radius: size * 0.5 * k, opacity, hardness, pressure_size: true, pressure_opacity: false, erase };
+            let wave = |y0: f32, amp: f32, f: f32| -> Vec<[f32; 3]> { (0..=150).map(|i| [(40.0 + i as f32 * 4.0) * k, (y0 + (i as f32 * f).sin() * amp) * k, 0.3 + 0.7 * (i as f32 * 0.05).sin().abs()]).collect() };
+            for (pts, p) in [
+                (wave(120.0, 60.0, 0.05), bp(Color32::from_rgb(230, 60, 50), 18.0, 1.0, 0.8, false)),
+                (wave(220.0, 90.0, 0.03), bp(Color32::from_rgb(40, 200, 120), 40.0, 0.6, 0.1, false)),
+                (wave(330.0, 40.0, 0.08), bp(Color32::from_rgb(255, 200, 40), 10.0, 1.0, 1.0, false)),
+                (wave(200.0, 140.0, 0.04), bp(Color32::BLACK, 24.0, 1.0, 0.9, true)),
+            ] {
+                let mut st = crate::brush::Painting::start(&mut r, p, true, pos2(pts[0][0], pts[0][1]), pts[0][2]);
+                st.add(&mut r, &pts[1..]);
+                st.finish(&mut r);
+            }
+            app.doc.insert("brush".into(), LayerKind::Raster(r), None);
+            app.zoom = z;
+            app.view_init = true;
+            app.pan = vec2(700.0, 450.0) - vec2(340.0, 220.0) * k * z;
+        }
         // DV_SELECT_ALL=1: every unlocked layer selected (group box captures)
         if std::env::var_os("DV_SELECT_ALL").is_some() {
             let ids: Vec<LayerId> = app.doc.layers.iter().filter(|l| !l.locked && l.mask_of.is_none()).map(|l| l.id).collect();
@@ -2258,7 +2287,7 @@ impl App {
             // (masks stay: an empty mask is a valid "hide nothing" mask)
             self.doc.layers.retain(|l| match &l.kind {
                 LayerKind::Raster(_) if l.mask_of.is_some() => true,
-                LayerKind::Raster(r) => !r.tiles.is_empty(),
+                LayerKind::Raster(r) => !r.is_blank(),
                 LayerKind::Vector(v) => !v.strokes.is_empty(),
                 _ => true,
             });
@@ -5423,6 +5452,7 @@ impl App {
         }
         for (id, polys) in sub.pixels {
             if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                r.bake();
                 *r = r.lift(&polys).1;
                 self.changed = true;
                 self.modified = true;
@@ -5464,6 +5494,7 @@ impl App {
         match &mut l.kind {
             LayerKind::Raster(r) => {
                 r.tiles.clear();
+                r.strokes.clear();
                 r.recs.clear();
                 r.rec_base = None;
             }
@@ -6235,6 +6266,14 @@ impl App {
                         // recording: a live stroke when recording, or an instant one on a
                         // layer that already has recorded strokes (so replay stays whole)
                         let record = tl_on && (self.rec_on || !r.recs.is_empty());
+                        // a brush layer gets a stroke object, drawn at the size it is
+                        // shown (notes/updates/2026-11-12-vector-brush.md); masks and
+                        // recorded strokes paint pixels, after the strokes are baked so
+                        // the new pixels go over them
+                        let as_stroke = !is_mask && !record && space.is_none();
+                        if !as_stroke {
+                            r.bake();
+                        }
                         self.rec_clock = None;
                         if record {
                             if r.rec_base.is_none() {
@@ -6245,8 +6284,8 @@ impl App {
                             self.rec_pts = vec![[lp.x, lp.y, pressure]];
                             self.rec_times = vec![0.0];
                         }
-                        let mut st = RasterStroke::new(p);
-                        st.add_point(r, to_px(w) - r.offset, pressure);
+                        let lp = to_px(w) - r.offset;
+                        let st = crate::brush::Painting::start(r, p, as_stroke, lp, pressure);
                         self.drag = Some(Drag::Raster { id, stroke: Some(st), smooth: (w, pressure), curve: crate::vector::Curve::new([w.x, w.y, pressure], self.smooth_distance()) });
                         if !erase {
                             self.remember_color(self.s.color);
@@ -7317,6 +7356,20 @@ impl App {
         self.mark();
     }
 
+    /// A pixel selection works on pixels: the strokes of its brush layers
+    /// are baked into them first (`RasterLayer::bake`).
+    fn bake_pixel_sel(&mut self) {
+        let ids: Vec<LayerId> = self.sub.pixels.iter().map(|x| x.0).collect();
+        for id in ids {
+            if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
+                if !r.strokes.is_empty() {
+                    r.bake();
+                    self.changed = true;
+                }
+            }
+        }
+    }
+
     fn mark_if_changed_raster(&mut self) {
         if matches!(self.drag, Some(Drag::Raster { .. })) {
             self.mark();
@@ -7797,16 +7850,18 @@ impl App {
     /// Curve points into a brush stroke (and its recording); `space`: a
     /// photo mask's pixels.
     #[allow(clippy::too_many_arguments)]
-    fn raster_points(st: &mut RasterStroke, r: &mut crate::raster::RasterLayer, space: Option<crate::export::MaskMap>, more: &[[f32; 3]], rec: Option<(std::time::Instant, f64, bool)>, rec_pts: &mut Vec<[f32; 3]>, rec_times: &mut Vec<f32>) {
+    fn raster_points(st: &mut crate::brush::Painting, r: &mut crate::raster::RasterLayer, space: Option<crate::export::MaskMap>, more: &[[f32; 3]], rec: Option<(std::time::Instant, f64, bool)>, rec_pts: &mut Vec<[f32; 3]>, rec_times: &mut Vec<f32>) {
+        let mut local = Vec::with_capacity(more.len());
         for p in more {
             let w = pos2(p[0], p[1]);
             let lp = space.map_or(w, |m| m.inv(w)) - r.offset;
-            st.add_point(r, lp, p[2]);
+            local.push([lp.x, lp.y, p[2]]);
             if let Some((c, _, live)) = rec {
                 rec_pts.push([lp.x, lp.y, p[2]]);
                 rec_times.push(if live { c.elapsed().as_secs_f32() } else { 0.0 });
             }
         }
+        st.add(r, &local);
     }
 
     /// Curve points into a pen stroke's points (and its recording times).
@@ -7895,6 +7950,7 @@ impl App {
                     self.sel = ids.first().copied();
                     self.extra_sel = ids.iter().skip(1).copied().collect();
                     self.sub = sub;
+                    self.bake_pixel_sel();
                     self.status = if ids.is_empty() && ns == 0 && np == 0 {
                         crate::i18n::tr("영역 안에 선택할 것 없음").into()
                     } else {
@@ -7956,13 +8012,14 @@ impl App {
                 self.sel = ids.first().copied();
                 self.extra_sel = ids.iter().skip(1).copied().collect();
                 self.sub = sub;
+                self.bake_pixel_sel();
                 self.status = crate::i18n::trf("선택: 레이어 {} · 펜 획 {} · 브러시 영역 {}", &[format!("{}", ids.len()), format!("{ns}"), format!("{np}")]);
             }
             Drag::Group { center, s, th, .. } => {
                 self.remap_pixel_sel(center, s, th, Vec2::ZERO);
             }
             Drag::Raster { id, stroke: Some(mut st), mut curve, .. } => {
-                let params = st.p;
+                let params = st.params();
                 let more = curve.finish(CURVE_STEP / self.zoom);
                 let space = self.mask_space(id);
                 if let Some(LayerKind::Raster(r)) = self.doc.get_mut(id).map(|l| &mut l.kind) {
@@ -9704,6 +9761,7 @@ impl App {
                     ui.label(crate::i18n::trf("타일 {}개", &[format!("{}", r.tiles.len())]));
                     if crate::kit::button(ui, crate::i18n::tr("모두 지우기")).clicked() {
                         r.tiles.clear();
+                        r.strokes.clear();
                         changed = true;
                     }
                     if !is_mask && blend_row(ui, "raster_blend", &mut r.blend, mxs.blend) {

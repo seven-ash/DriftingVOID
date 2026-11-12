@@ -683,11 +683,48 @@ pub fn blend_onto(dst: &mut Pixmap, src: &Pixmap, mode: Blend, opacity: f32, bg:
     }
 }
 
+/// A brush layer with strokes: its pixels and then its strokes (dabbed at
+/// this scale, `brush::paint`) into a picture of its own over the part of
+/// `pm` it covers (an eraser stroke takes away from the layer only), then
+/// that picture over `pm`.
+fn draw_brushed(pm: &mut Pixmap, r: &crate::raster::RasterLayer, base: Transform, region: Rect, scale: f32) {
+    let Some(b) = r.bounds().map(|b| b.intersect(region)).filter(|b| b.is_positive()) else { return };
+    let mut q = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom()].map(|p| tiny_skia::Point::from_xy(p.x, p.y));
+    base.map_points(&mut q);
+    let (x0, y0) = (q.iter().map(|p| p.x).fold(f32::MAX, f32::min).floor().max(0.0), q.iter().map(|p| p.y).fold(f32::MAX, f32::min).floor().max(0.0));
+    let x1 = q.iter().map(|p| p.x).fold(f32::MIN, f32::max).ceil().min(pm.width() as f32) + 1.0;
+    let y1 = q.iter().map(|p| p.y).fold(f32::MIN, f32::max).ceil().min(pm.height() as f32) + 1.0;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    let Some(mut own) = Pixmap::new(w, h) else { return };
+    let to_own = base.post_translate(-x0, -y0);
+    let pixels = crate::raster::RasterLayer { offset: r.offset, tiles: r.tiles.clone(), blend: r.blend, ..Default::default() };
+    let flat = Layer { id: 0, name: String::new(), visible: true, locked: false, opacity: 1.0, kind: LayerKind::Raster(pixels), place: None, anim: None, mask_of: None, mask_anchor: None, mask_pose: None, mask_invert: false, mask_res: 1.0 };
+    draw_layer(&mut own, &flat, to_own, region, scale);
+    let (off, map) = (r.offset, |p: egui::Pos2| {
+        let mut pt = [tiny_skia::Point::from_xy(p.x, p.y)];
+        to_own.map_points(&mut pt);
+        egui::pos2(pt[0].x, pt[0].y)
+    });
+    let px = own.data_mut();
+    for st in &r.strokes {
+        if !st.bounds.translate(off).intersects(region) {
+            continue;
+        }
+        let dabs = st.dabs_mapped(|q| map(q + off), scale);
+        crate::brush::paint(px, w, h, &dabs, &st.p);
+    }
+    pm.draw_pixmap(x0 as i32, y0 as i32, own.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+}
+
 pub(crate) fn draw_layer(pm: &mut Pixmap, layer: &Layer, base: Transform, region: Rect, scale: f32) {
     match &layer.kind {
         // FX layers: GPU only (the CPU path is a test reference)
         LayerKind::Audio(_) | LayerKind::Fx(_) => {}
         LayerKind::Image(im) => draw_image(pm, im, base, scale, region),
+        LayerKind::Raster(r) if !r.strokes.is_empty() => draw_brushed(pm, r, base, region, scale),
         LayerKind::Raster(r) => {
             let local = region.translate(-r.offset);
             let Some(b) = r.bounds().map(|b| b.translate(-r.offset)) else { return };

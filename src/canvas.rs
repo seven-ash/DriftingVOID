@@ -252,6 +252,10 @@ pub fn content_key(l: &Layer) -> u64 {
                 acc = acc.wrapping_add(th.finish());
             }
             (acc, r.tiles.len()).hash(&mut h);
+            r.strokes.len().hash(&mut h);
+            for s in &r.strokes {
+                s.key.hash(&mut h);
+            }
         }
         LayerKind::Vector(v) => {
             (2u8, v.strokes.len()).hash(&mut h);
@@ -604,14 +608,18 @@ fn draw_one(painter: &Painter, ctx: &Context, doc: &Document, layer: &Layer, xf:
                 painter.add(Shape::mesh(image_mesh(tex, c, uv, tint(op))));
             }
             LayerKind::Raster(r) => {
+                // strokes baked in (this path draws pixels only)
+                let shown = r.shown();
+                let r = &*shown;
                 let local = view_w.translate(-r.offset);
                 for (&key, t) in &r.tiles {
                     let tr = Rect::from_min_size(
                         pos2((key.0 * TILE) as f32, (key.1 * TILE) as f32),
                         vec2(TILE as f32, TILE as f32),
                     );
+                    // (a tile out of view is skipped; it ended the layer before 0.108.0)
                     if !tr.intersects(local) {
-                        return;
+                        continue;
                     }
                     let tex = cache.tile(ctx, layer.id, key, t);
                     let sr = xf.rect_w2s(tr.translate(r.offset));

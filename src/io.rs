@@ -160,7 +160,17 @@ enum FileKind {
         recs: Vec<crate::raster::BrushRec>,
         #[serde(default)]
         base_tiles: Option<Vec<[i32; 2]>>,
+        /// Brush strokes over the pixels (file version 2).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        brush: Vec<FileBrush>,
     },
+}
+
+/// A brush stroke as kept: its points (x, y, pressure) and its brush.
+#[derive(Serialize, Deserialize)]
+struct FileBrush {
+    pts: Vec<[f32; 3]>,
+    p: crate::raster::BrushParams,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -288,14 +298,19 @@ fn write_project(doc: &Document, tmp: &Path) -> Result<(), String> {
                         }
                         None => None,
                     };
-                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, blend: r.blend, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles }
+                    let brush = r.strokes.iter().map(|s| FileBrush { pts: s.pts.clone(), p: s.p }).collect();
+                    FileKind::Raster { offset: [r.offset.x, r.offset.y], tiles: keys, blend: r.blend, recs: r.recs.iter().map(|x| (**x).clone()).collect(), base_tiles, brush }
                 }
                 LayerKind::Audio(a) => FileKind::Audio(a.clone()),
                 LayerKind::Fx(fx) => FileKind::Fx(fx.clone()),
             };
             layers.push(FileLayer { id: l.id, name: l.name.clone(), visible: l.visible, locked: l.locked, opacity: l.opacity, kind, place: l.place.clone(), anim: l.anim.clone(), mask_of: l.mask_of, mask_anchor: l.mask_anchor, mask_pose: l.mask_pose, mask_invert: l.mask_invert, mask_res: l.mask_res });
         }
-        let fd = FileDoc { version: FILE_VERSION, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
+        // the lowest version that can read it all: 2 only with brush strokes,
+        // so earlier releases still open the rest
+        let strokes = doc.layers.iter().any(|l| matches!(&l.kind, LayerKind::Raster(r) if !r.strokes.is_empty()));
+        let version = if strokes { 2 } else { 1 };
+        let fd = FileDoc { version, next_id: doc.next_id, export_frame: doc.export_frame.map(r2a), layers, spaces: doc.spaces.clone(), timeline: doc.timeline.clone(), cameras: doc.cameras.clone(), audio: Vec::new() };
         zip.start_file("doc.json", deflate).map_err(|e| e.to_string())?;
         zip.write_all(&serde_json::to_vec_pretty(&fd).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         let w = zip.finish().map_err(|e| e.to_string())?;
@@ -309,8 +324,9 @@ fn write_project(doc: &Document, tmp: &Path) -> Result<(), String> {
 /// whenever a file may hold something an earlier reader cannot read (a new
 /// layer kind, filter or enum value: anything serde would refuse), so that
 /// reader can say the file is newer instead of failing on a field name.
-/// Releases up to 1.0.1.R wrote 1 and did not check it.
-pub const FILE_VERSION: u32 = 1;
+/// Releases up to 1.0.1.R wrote 1 and did not check it. 2 (0.108.0): brush
+/// strokes kept as strokes; a file is written as 1 when it has none.
+pub const FILE_VERSION: u32 = 2;
 
 /// The version a project's `doc.json` states (0 when it states none).
 fn stated_version(json: &[u8]) -> u32 {
@@ -384,8 +400,9 @@ pub fn load_project(path: &Path) -> Result<Document, String> {
                 offset: vec2(offset[0], offset[1]),
                 strokes: strokes.into_iter().map(|s| Arc::new(VStroke::new(s.pts, a2c(s.color)).with_rec(s.rec))).collect(),
             }),
-            FileKind::Raster { offset, tiles, blend, recs, base_tiles } => {
-                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), recs: recs.into_iter().map(Arc::new).collect(), blend, ..Default::default() };
+            FileKind::Raster { offset, tiles, blend, recs, base_tiles, brush } => {
+                let strokes = brush.into_iter().map(|b| Arc::new(crate::brush::BStroke::new(b.pts, b.p))).collect();
+                let mut r = RasterLayer { offset: vec2(offset[0], offset[1]), recs: recs.into_iter().map(Arc::new).collect(), blend, strokes, ..Default::default() };
                 if let Some(bk) = base_tiles {
                     let mut base = crate::doc::TileMap::default();
                     for [x, y] in bk {
@@ -479,6 +496,52 @@ mod video_tests {
         assert_eq!(v.info, info);
         assert_eq!(b.src.size(), vec2(1920.0, 1080.0));
         assert_eq!(b.src.rgba.dimensions(), (96, 54));
+    }
+
+    /// Brush strokes are saved as strokes and come back the same; a file
+    /// with them states version 2, one without them 1 (earlier releases still
+    /// open it).
+    #[test]
+    fn brush_strokes_round_trip() {
+        use crate::raster::{BrushParams, RasterLayer};
+        let p = BrushParams { color: Color32::from_rgb(10, 200, 30), radius: 7.5, opacity: 0.6, hardness: 0.3, pressure_size: true, pressure_opacity: false, erase: false };
+        let mut r = RasterLayer { offset: vec2(5.0, -3.0), ..Default::default() };
+        r.fill_rect(egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(20.0, 20.0)), true);
+        let pts = vec![[1.0, 2.0, 0.5], [30.0, 4.0, 1.0], [60.0, -9.0, 0.25]];
+        r.strokes.push(Arc::new(crate::brush::BStroke::new(pts.clone(), p)));
+        r.strokes.push(Arc::new(crate::brush::BStroke::new(vec![[3.0, 3.0, 1.0]], BrushParams { erase: true, ..p })));
+        let mut doc = Document::default();
+        doc.insert("b".into(), LayerKind::Raster(r), None);
+        let path = std::env::temp_dir().join(format!("dv_brush_roundtrip_{}.void", std::process::id()));
+        save_project(&doc, &path).unwrap();
+        let json = {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut s = String::new();
+            zip.by_name("doc.json").unwrap().read_to_string(&mut s).unwrap();
+            s
+        };
+        assert_eq!(stated_version(json.as_bytes()), 2);
+        let back = load_project(&path).unwrap();
+        let LayerKind::Raster(b) = &back.layers[0].kind else { panic!() };
+        assert_eq!(b.strokes.len(), 2);
+        assert_eq!(b.strokes[0].pts, pts);
+        assert_eq!(b.strokes[0].key, doc_stroke_key(&doc, 0));
+        assert!(b.strokes[1].p.erase && !b.tiles.is_empty());
+        // without strokes: version 1
+        let LayerKind::Raster(r) = &mut doc.layers[0].kind else { panic!() };
+        r.strokes.clear();
+        save_project(&doc, &path).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut s = String::new();
+        zip.by_name("doc.json").unwrap().read_to_string(&mut s).unwrap();
+        assert_eq!(stated_version(s.as_bytes()), 1);
+        drop(zip);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn doc_stroke_key(doc: &Document, i: usize) -> u64 {
+        let LayerKind::Raster(r) = &doc.layers[0].kind else { panic!() };
+        r.strokes[i].key
     }
 
     #[test]
